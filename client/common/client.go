@@ -42,8 +42,8 @@ type Client struct {
 
 // prepareToProcess lee la primera fila del CSV (los encabezados)
 // y los guarda en el cliente para su uso posterior.
-func (c *Client) prepareToProcess(betsReader *csv.Reader) error {
-	headers, err := betsReader.Read()
+func (c *Client) prepareToProcess(tableReader *csv.Reader) error {
+	headers, err := tableReader.Read()
 	if err != nil {
 		// Podría ser io.EOF si el archivo está vacío, o un error de parseo
 		return fmt.Errorf("error al leer los encabezados del CSV: %w", err)
@@ -61,36 +61,10 @@ func NewClient(config ClientConfig) *Client {
 	return client
 }
 
-// processNextBet reads a single CSV record from betsReader, converts it
-// to the protocol key/value map (including AGENCIA), and attempts to add
-// it to the current batch buffer via AddBetWithFlush. If adding this bet
-// would exceed either the 8 KiB framing limit or the configured BatchLimit,
-// the function triggers a flush of the current batch to c.conn and then
-// starts a new batch with this bet. The returned error is io.EOF when the
-// CSV is exhausted, or any I/O/serialization error encountered.
-// func (c *Client) processNextBet(betsReader *csv.Reader, batchBuff *bytes.Buffer, betsCounter *int32) error {
-// 	betFields, err := betsReader.Read()
-// 	if err != nil {
-// 		return err
-// 	}
-// 	bet := map[string]string{
-// 		"AGENCIA":    c.config.ID,
-// 		"NOMBRE":     betFields[0],
-// 		"APELLIDO":   betFields[1],
-// 		"DOCUMENTO":  betFields[2],
-// 		"NACIMIENTO": betFields[3],
-// 		"NUMERO":     betFields[4],
-// 	}
-// 	if err := AddBetWithFlush(bet, batchBuff, c.conn, betsCounter, c.config.BatchLimit); err != nil {
-// 		return err
-// 	}
-// 	return nil
-// }
-
 // processNextBet lee un registro, lo convierte en un mapa usando los
 // encabezados leídos previamente y lo añade al batch.
-func (c *Client) processNextBet(betsReader *csv.Reader, batchBuff *bytes.Buffer, betsCounter *int32) error {
-	betFields, err := betsReader.Read()
+func (c *Client) processNextLine(tableReader *csv.Reader, batchBuff *bytes.Buffer, linesCounter *int32) error {
+	lineFields, err := tableReader.Read()
 	if err != nil {
 		return err // Devuelve io.EOF al final del archivo, o un error de lectura.
 	}
@@ -98,15 +72,15 @@ func (c *Client) processNextBet(betsReader *csv.Reader, batchBuff *bytes.Buffer,
 	// --- LÓGICA MODIFICADA ---
 
 	// 1. Validar que la cantidad de campos coincida con los encabezados.
-	if len(betFields) != len(c.csvHeaders) {
-		return fmt.Errorf("error de formato: la fila tiene %d campos, pero se esperaban %d (basado en los encabezados)", len(betFields), len(c.csvHeaders))
+	if len(lineFields) != len(c.csvHeaders) {
+		return fmt.Errorf("error de formato: la fila tiene %d campos, pero se esperaban %d (basado en los encabezados)", len(lineFields), len(c.csvHeaders))
 	}
 
 	// 2. Crear el mapa dinámicamente.
 	bet := make(map[string]string)
 	bet["AGENCIA"] = c.config.ID // Añadir el campo fijo.
 
-	for i, field := range betFields {
+	for i, field := range lineFields {
 		// Asigna el valor del campo a la clave correspondiente del encabezado.
 		key := c.csvHeaders[i]
 		bet[key] = field
@@ -115,7 +89,7 @@ func (c *Client) processNextBet(betsReader *csv.Reader, batchBuff *bytes.Buffer,
 	// --- FIN DE LA LÓGICA MODIFICADA ---
 
 	// La lógica de envío se mantiene igual.
-	if err := AddBetWithFlush(bet, batchBuff, c.conn, betsCounter, c.config.BatchLimit); err != nil {
+	if err := AddLineWithFlush(bet, batchBuff, c.conn, linesCounter, c.config.BatchLimit); err != nil {
 		return err
 	}
 
@@ -127,25 +101,25 @@ func (c *Client) processNextBet(betsReader *csv.Reader, batchBuff *bytes.Buffer,
 // On context cancellation, it flushes any partial batch and returns the
 // context error. On clean EOF, it flushes a final partial batch (if any)
 // and returns nil. Any serialization or socket error is returned.
-func (c *Client) buildAndSendBatches(ctx context.Context, betsReader *csv.Reader) error {
+func (c *Client) buildAndSendBatches(ctx context.Context, tableReader *csv.Reader) error {
 	var batchBuff bytes.Buffer
-	var betsCounter int32 = 0
+	var linesCounter int32 = 0
 	for {
 		select {
 		case <-ctx.Done():
-			if betsCounter > 0 {
-				if err := FlushBatch(&batchBuff, c.conn, betsCounter); err != nil {
+			if linesCounter > 0 {
+				if err := FlushBatch(&batchBuff, c.conn, linesCounter); err != nil {
 					return err
 				}
-				betsCounter = 0
+				linesCounter = 0
 			}
 			return ctx.Err()
 		default:
 		}
-		if err := c.processNextBet(betsReader, &batchBuff, &betsCounter); err != nil {
+		if err := c.processNextLine(tableReader, &batchBuff, &linesCounter); err != nil {
 			if errors.Is(err, io.EOF) {
-				if betsCounter > 0 {
-					if err := FlushBatch(&batchBuff, c.conn, betsCounter); err != nil {
+				if linesCounter > 0 {
+					if err := FlushBatch(&batchBuff, c.conn, linesCounter); err != nil {
 						return err
 					}
 				}
@@ -183,22 +157,21 @@ func (c *Client) createClientSocket() error {
 //
 // It guarantees connection closure on exit and uses deadlines to unblock
 // the reader goroutine on cancellation.
-func (c *Client) SendBets() {
+func (c *Client) SendTable() {
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGTERM)
 	defer stop()
 
-	betsFile, err := os.Open(c.config.BetsFilePath)
+	tableFile, err := os.Open(c.config.BetsFilePath)
 	if err != nil {
-		log.Criticalf("action: read_bets | result: fail | error: %v", err)
+		log.Criticalf("action: read_table | result: fail | error: %v", err)
 		return
 	}
-	defer betsFile.Close()
+	defer tableFile.Close()
 
-	betsReader := csv.NewReader(betsFile)
-	betsReader.Comma = ','
-	// betsReader.FieldsPerRecord = 5
+	tableReader := csv.NewReader(tableFile)
+	tableReader.Comma = ','
 
-	if err := c.prepareToProcess(betsReader); err != nil {
+	if err := c.prepareToProcess(tableReader); err != nil {
 		log.Criticalf("action: read_csv_headers | result: fail | error: %v", err)
 		return
 	}
@@ -210,7 +183,7 @@ func (c *Client) SendBets() {
 
 	writeDone := make(chan error, 1)
 	go func() {
-		writeDone <- c.buildAndSendBatches(ctx, betsReader)
+		writeDone <- c.buildAndSendBatches(ctx, tableReader)
 	}()
 
 	conn := c.conn
@@ -218,7 +191,7 @@ func (c *Client) SendBets() {
 	readResponse(conn, readDone)
 
 	if err = <-writeDone; err != nil && !errors.Is(err, context.Canceled) {
-		log.Errorf("action: send_bets | result: fail | error: %v", err)
+		log.Errorf("action: send_table | result: fail | error: %v", err)
 		return
 	}
 
@@ -256,10 +229,10 @@ func readResponse(conn net.Conn, readDone chan struct{}) {
 				break
 			}
 			switch msg.GetOpCode() {
-			case BetsRecvSuccessOpCode:
-				log.Info("action: bets_enviadas | result: success")
-			case BetsRecvFailOpCode:
-				log.Error("action: bets_enviadas | result: fail")
+			case LinesRecvSuccessOpCode:
+				log.Info("action: tabla_enviada | result: success")
+			case LinesRecvFailOpCode:
+				log.Error("action: tabla_enviada | result: fail")
 			case WinnersOpCode:
 				{
 					log.Infof("action: consulta_ganadores | result: success | cant_ganadores: %d",
