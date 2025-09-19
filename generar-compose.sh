@@ -6,9 +6,9 @@ touch $1
 
 echo "name: tp0
 services:
-  server:
-    container_name: server
-    image: server:latest
+  orchestrator:
+    container_name: orchestrator
+    image: orchestrator:latest
     entrypoint: python3 /main.py
     environment:
       - PYTHONUNBUFFERED=1
@@ -17,7 +17,7 @@ services:
     networks:
       - testing_net
     volumes:
-      - ./server/config.ini:/config.ini:ro" > $1
+      - ./orchestrator/config.ini:/config.ini:ro" > $1
 
 for i in $(seq 1 $2); do
     echo "
@@ -31,7 +31,7 @@ for i in $(seq 1 $2); do
     networks:
       - testing_net
     depends_on:
-      - server
+      - orchestrator
     volumes:
       - ./client/config.yaml:/config.yaml:ro
       - ./.data/agency-$i.csv:/bets.csv:ro" >> $1

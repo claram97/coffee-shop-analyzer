@@ -1,6 +1,6 @@
 # id: 1
-server:
-  address: "server:12345"
+orchestrator:
+  address: "orchestrator:12345"
 loop:
   amount: 5
   period: "5s"

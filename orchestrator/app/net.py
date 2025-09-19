@@ -6,7 +6,7 @@ import threading
 from app import protocol
 
 
-class Server:
+class Orchestrator:
     def __init__(self, port, listen_backlog):
         """Initialize listening socket and concurrency primitives.
 

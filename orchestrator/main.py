@@ -4,7 +4,7 @@ import logging
 import os
 from configparser import ConfigParser
 
-from app.net import Server
+from app.net import Orchestrator
 
 
 def initialize_config():
@@ -63,7 +63,7 @@ def main():
     )
 
     # Initialize server and start server loop
-    server = Server(port, listen_backlog)
+    server = Orchestrator(port, listen_backlog)
     server.run()
 
 
