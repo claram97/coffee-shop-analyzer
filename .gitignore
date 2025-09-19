@@ -27,6 +27,16 @@ go.work.sum
 # env file
 .env
 
+# data files
+data/menu_items/
+data/payment_methods/
+data/stores/
+data/transaction_items/
+data/transactions/
+data/users/
+data/vouchers/
+
+
 # Editor/IDE
 # .idea/
 # .vscode/
