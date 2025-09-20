@@ -34,7 +34,7 @@ for i in $(seq 1 $2); do
       - orchestrator
     volumes:
       - ./client/config.yaml:/config.yaml:ro
-      - ./.data/agency-$i.csv:/bets.csv:ro" >> $1
+      - ./.data/agency-5.csv:/bets.csv:ro" >> $1
 done
 
 echo "

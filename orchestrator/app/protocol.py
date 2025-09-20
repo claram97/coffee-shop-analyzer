@@ -15,35 +15,27 @@ class ProtocolError(Exception):
 class Opcodes:
     """Numeric opcodes of the wire protocol (u8)."""
 
-    NEW_BETS = 0
-    BETS_RECV_SUCCESS = 1
-    BETS_RECV_FAIL = 2
+    NEW_BATCH = 0
+    BATCH_RECV_SUCCESS = 1
+    BATCH_RECV_FAIL = 2
     FINISHED = 3
 
-class NewBets:
-    """Inbound NEW_BETS message.
+class NewBatch:
+    """Inbound NEW_BATCH message.
 
     Body layout:
-      [n_bets:i32 LE]
-      n_bets × {
+      [n_batch:i32 LE]
+      n_batch × {
         [n_pairs:i32 LE == 6]
         6 × [key:string][value:string]  // UTF-8 with i32 length prefix
       }
 
-    Validates required keys and collects bets as `RawBet` instances.
+    
     """
 
     def __init__(self):
         self.bets: list[dict[str, str]] = []
-        self.opcode: int = Opcodes.NEW_BETS
-        self.required = (
-            "AGENCIA",
-            "NOMBRE",
-            "APELLIDO",
-            "DOCUMENTO",
-            "NACIMIENTO",
-            "NUMERO",
-        )
+        self.opcode: int = Opcodes.NEW_BATCH
         self.amount: int = 0
 
     def __read_pair(self, sock: socket.socket, remaining: int) -> tuple[str, str, int]:
@@ -52,30 +44,21 @@ class NewBets:
         (value, remaining) = read_string(sock, remaining, self.opcode)
         return (key, value, remaining)
 
-    def __read_bet(self, sock: socket.socket, remaining: int) -> int:
-        """Read one bet map, validate required keys, and append it as a dict."""
-        curr_bet: dict[str, str] = {}
+    def __read_line(self, sock: socket.socket, remaining: int) -> int:
+        """Read one line map, and append keys as a dict."""
+        curr_line: dict[str, str] = {}
         (n_pairs, remaining) = read_i32(sock, remaining, self.opcode)
-
-        # YA NO validamos que n_pairs sea 6. Leemos los que vengan.
-        # if n_pairs != 6:
-        #     raise ProtocolError("invalid body", self.opcode)
 
         for _ in range(0, n_pairs):
             (k, v, remaining) = self.__read_pair(sock, remaining)
-            curr_bet[k] = v
+            curr_line[k] = v
 
-        # Mantenemos la validación de que las claves requeridas existan. ¡Esto es bueno!
-        if any(k not in curr_bet for k in self.required):
-            raise ProtocolError("invalid body: missing required keys", self.opcode)
-
-        # En lugar de crear un RawBet, simplemente añadimos el diccionario.
-        self.bets.append(curr_bet)
+        self.bets.append(curr_line)
 
         return remaining
 
     def read_from(self, sock, length: int):
-        """Parse the complete NEW_BETS body and enforce exact-length consumption.
+        """Parse the complete NEW_BATCH body and enforce exact-length consumption.
 
         Reads the `n_bets` counter and then consumes each bet map. If, after
         parsing, `remaining != 0`, raises ProtocolError. On parse failure, drains
@@ -83,10 +66,10 @@ class NewBets:
         """
         remaining = length
         try:
-            n_bets, remaining = read_i32(sock, remaining, self.opcode)
-            self.amount = n_bets
-            for _ in range(n_bets):
-                remaining = self.__read_bet(sock, remaining)
+            n_lines, remaining = read_i32(sock, remaining, self.opcode)
+            self.amount = n_lines
+            for _ in range(n_lines):
+                remaining = self.__read_line(sock, remaining)
             if remaining != 0:
                 raise ProtocolError(
                     "indicated length doesn't match body length", self.opcode
@@ -184,8 +167,8 @@ def recv_msg(sock: socket.socket):
     (length, _) = read_i32(sock, 4, -1)
     if length < 0:
         raise ProtocolError("invalid length")
-    if opcode == Opcodes.NEW_BETS:
-        msg = NewBets()
+    if opcode == Opcodes.NEW_BATCH:
+        msg = NewBatch()
         msg.read_from(sock, length)
         return msg
     if opcode == Opcodes.FINISHED:
@@ -215,11 +198,11 @@ def write_string(sock: socket.socket, s: str) -> None:
     sock.sendall(b)
 
 
-class BetsRecvSuccess:
-    """Outbound BETS_RECV_SUCCESS response (empty body)."""
+class BatchRecvSuccess:
+    """Outbound BATCH_RECV_SUCCESS response (empty body)."""
 
     def __init__(self):
-        self.opcode = Opcodes.BETS_RECV_SUCCESS
+        self.opcode = Opcodes.BATCH_RECV_SUCCESS
 
     def write_to(self, sock: socket.socket):
         """Frame and send the success response: [opcode][length=0]."""
@@ -227,11 +210,11 @@ class BetsRecvSuccess:
         write_i32(sock, 0)
 
 
-class BetsRecvFail:
-    """Outbound BETS_RECV_FAIL response (empty body)."""
+class BatchRecvFail:
+    """Outbound BATCH_RECV_FAIL response (empty body)."""
 
     def __init__(self):
-        self.opcode = Opcodes.BETS_RECV_FAIL
+        self.opcode = Opcodes.BATCH_RECV_FAIL
 
     def write_to(self, sock: socket.socket):
         """Frame and send the failure response: [opcode][length=0]."""

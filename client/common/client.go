@@ -96,7 +96,7 @@ func (c *Client) processNextLine(tableReader *csv.Reader, batchBuff *bytes.Buffe
 	return nil
 }
 
-// buildAndSendBatches streams the CSV, incrementally building NewBets
+// buildAndSendBatches streams the CSV, incrementally building NewBatch
 // bodies into batchBuff and flushing to c.conn as limits are reached.
 // On context cancellation, it flushes any partial batch and returns the
 // context error. On clean EOF, it flushes a final partial batch (if any)
@@ -243,9 +243,9 @@ func readResponse(conn net.Conn, readDone chan struct{}) {
 				break
 			}
 			switch msg.GetOpCode() {
-			case LinesRecvSuccessOpCode:
+			case BatchRecvSuccessOpCode:
 				log.Info("action: tabla_enviada | result: success")
-			case LinesRecvFailOpCode:
+			case BatchRecvFailOpCode:
 				log.Error("action: tabla_enviada | result: fail")
 			}
 		}

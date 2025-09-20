@@ -6,7 +6,7 @@ services:
     entrypoint: python3 /main.py
     environment:
       - PYTHONUNBUFFERED=1
-      - CLIENTS_AMOUNT=3
+      - CLIENTS_AMOUNT=1
       # - LOGGING_LEVEL=DEBUG
     networks:
       - testing_net
@@ -26,37 +26,7 @@ services:
       - orchestrator
     volumes:
       - ./client/config.yaml:/config.yaml:ro
-      - ./.data/agency-1.csv:/bets.csv:ro
-
-  client2:
-    container_name: client2
-    image: client:latest
-    entrypoint: /client
-    environment:
-      - CLI_ID=2
-      # - CLI_LOG_LEVEL=DEBUG
-    networks:
-      - testing_net
-    depends_on:
-      - orchestrator
-    volumes:
-      - ./client/config.yaml:/config.yaml:ro
-      - ./.data/agency-2.csv:/bets.csv:ro
-
-  client3:
-    container_name: client3
-    image: client:latest
-    entrypoint: /client
-    environment:
-      - CLI_ID=3
-      # - CLI_LOG_LEVEL=DEBUG
-    networks:
-      - testing_net
-    depends_on:
-      - orchestrator
-    volumes:
-      - ./client/config.yaml:/config.yaml:ro
-      - ./.data/agency-3.csv:/bets.csv:ro
+      - ./.data/agency-5.csv:/bets.csv:ro
 
 networks:
   testing_net:

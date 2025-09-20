@@ -91,11 +91,11 @@ class Orchestrator:
 
     def __process_msg(self, msg, client_sock) -> bool:
         """Process a decoded message.""" # <-- CORRECCIÓN 2: Docstring simplificado
-        if msg.opcode == protocol.Opcodes.NEW_BETS:
+        if msg.opcode == protocol.Opcodes.NEW_BATCH:
             try:
                pass
             except Exception as e:
-                protocol.BetsRecvFail().write_to(client_sock)
+                protocol.BatchRecvFail().write_to(client_sock)
                 logging.error(
                     "action: apuesta_recibida | result: fail | cantidad: %d", msg.amount
                 )
@@ -104,7 +104,7 @@ class Orchestrator:
                 "action: apuesta_recibida | result: success | cantidad: %d",
                 msg.amount,
             )
-            protocol.BetsRecvSuccess().write_to(client_sock)
+            protocol.BatchRecvSuccess().write_to(client_sock)
             return True
             
         if msg.opcode == protocol.Opcodes.FINISHED:
