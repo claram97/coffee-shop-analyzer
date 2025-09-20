@@ -19,7 +19,6 @@ class Opcodes:
     BETS_RECV_SUCCESS = 1
     BETS_RECV_FAIL = 2
     FINISHED = 3
-    WINNERS = 4
 
 class NewBets:
     """Inbound NEW_BETS message.
@@ -238,27 +237,3 @@ class BetsRecvFail:
         """Frame and send the failure response: [opcode][length=0]."""
         write_u8(sock, self.opcode)
         write_i32(sock, 0)
-
-
-class Winners:
-    """Outbound WINNERS response.
-
-    Body layout:
-      [count:i32 LE]
-      count × [string]  // each is i32 length + UTF-8
-    """
-
-    def __init__(self, winners: list[str]):
-        self.opcode = Opcodes.WINNERS
-        self.list = winners
-
-    def write_to(self, sock: socket.socket):
-        """Frame and send the winners list using sendall() for each chunk."""
-        body_length = 4
-        for document in self.list:
-            body_length += 4 + len(document)
-        write_u8(sock, self.opcode)
-        write_i32(sock, body_length)
-        write_i32(sock, len(self.list))
-        for document in self.list:
-            write_string(sock, document)

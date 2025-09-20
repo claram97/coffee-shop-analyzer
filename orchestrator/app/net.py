@@ -14,10 +14,6 @@ class Orchestrator:
         - `_stop` is a process-wide shutdown flag (set by SIGTERM).
         - `_finished` is a Barrier with the expected number of clients/agencies;
           it is used to block FINISHED handlers until all are in.
-        - `_winners` holds the computed winners grouped by agency.
-        - `_raffle_done` is a latch Event set once the raffle is computed.
-        - `_raffle_lock` ensures the raffle is computed exactly once.
-        - `_storage_lock` serializes access to storage during batch persistence.
         - `_threads` keeps track of per-connection worker threads.
         """
         self._server_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
@@ -97,11 +93,7 @@ class Orchestrator:
         """Process a decoded message.""" # <-- CORRECCIÓN 2: Docstring simplificado
         if msg.opcode == protocol.Opcodes.NEW_BETS:
             try:
-                # <-- CORRECCIÓN 3: Se eliminó el 'with self._storage_lock'
-                for bet in msg.bets:
-                    logging.info(
-                        "action: apuesta_almacenada | result: success"
-                    )
+               pass
             except Exception as e:
                 protocol.BetsRecvFail().write_to(client_sock)
                 logging.error(

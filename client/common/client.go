@@ -135,17 +135,33 @@ func (c *Client) buildAndSendBatches(ctx context.Context, tableReader *csv.Reade
 // resulting connection to c.conn. On failure it logs a critical message
 // and returns the dial error; on success it returns nil.
 func (c *Client) createClientSocket() error {
-	conn, err := net.Dial("tcp", c.config.ServerAddress)
-	if err != nil {
-		log.Criticalf(
-			"action: connect | result: fail | client_id: %v | error: %v",
-			c.config.ID,
-			err,
-		)
-		return err
+	const maxAttempts = 3
+	var lastErr error
+
+	for attempt := 1; attempt <= maxAttempts; attempt++ {
+		conn, err := net.Dial("tcp", c.config.ServerAddress)
+		if err == nil {
+			c.conn = conn
+			if attempt > 1 {
+				log.Infof("action: connect_retry | result: success | attempt: %d | client_id: %v", attempt, c.config.ID)
+			}
+			return nil
+		}
+
+		lastErr = err
+		if attempt < maxAttempts {
+			log.Warningf("action: connect | result: retrying | attempt: %d/%d | client_id: %v | error: %v", attempt, maxAttempts, c.config.ID, err)
+			time.Sleep(2 * time.Second)
+			continue
+		}
 	}
-	c.conn = conn
-	return nil
+
+	log.Criticalf(
+		"action: connect | result: fail | client_id: %v | error: %v",
+		c.config.ID,
+		lastErr,
+	)
+	return lastErr
 }
 
 // SendBets is the high-level entry point. It:
@@ -212,14 +228,12 @@ func (c *Client) SendTable() {
 
 // readResponse consumes server responses from conn in a dedicated goroutine.
 // It logs per-message results and terminates when:
-//   - an I/O error occurs (EOF included), or
-//   - a Winners message is received (explicit break to stop reading).
+//   - an I/O error occurs (EOF included)
 //
 // The function closes readDone when the goroutine exits.
 func readResponse(conn net.Conn, readDone chan struct{}) {
 	reader := bufio.NewReader(conn)
 	go func() {
-	readLoop:
 		for {
 			msg, err := ReadMessage(reader)
 			if err != nil {
@@ -233,19 +247,13 @@ func readResponse(conn net.Conn, readDone chan struct{}) {
 				log.Info("action: tabla_enviada | result: success")
 			case LinesRecvFailOpCode:
 				log.Error("action: tabla_enviada | result: fail")
-			case WinnersOpCode:
-				{
-					log.Infof("action: consulta_ganadores | result: success | cant_ganadores: %d",
-						len(msg.(*Winners).List))
-					break readLoop
-				}
 			}
 		}
 		close(readDone)
 	}()
 }
 
-// sendFinishedAndAskForWinners sends FINISHED (with the numeric agency ID).
+// sendFinished sends FINISHED (with the numeric agency ID).
 // It logs success or failure for each write. On any serialization/I/O error it logs and returns.
 func (c *Client) sendFinished() {
 	agencyId, err := strconv.Atoi(c.config.ID)

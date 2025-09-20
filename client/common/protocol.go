@@ -12,7 +12,6 @@ const NewLinesOpCode byte = 0
 const LinesRecvSuccessOpCode byte = 1
 const LinesRecvFailOpCode byte = 2
 const FinishedOpCode byte = 3
-const WinnersOpCode byte = 4
 
 // ProtocolError models a framing/validation error while parsing or writing
 // protocol messages. Opcode, when present, indicates the message context.
@@ -194,71 +193,6 @@ func (msg *LinesRecvFail) readFrom(reader *bufio.Reader) error {
 	return nil
 }
 
-// Winners is the server→client response listing winner documents for an agency.
-// Body format: [n:i32 LE][n × [string]] where [string] is length-prefixed UTF-8.
-type Winners struct {
-	List []string
-}
-
-func (msg *Winners) GetOpCode() byte { return WinnersOpCode }
-
-// GetLength computes the body length: 4 bytes for n plus each string's
-// 4-byte length prefix and its bytes.
-func (msg *Winners) GetLength() int32 {
-	var totalLen int32 = 4
-	for _, doc := range msg.List {
-		totalLen += 4 + int32(len(doc))
-	}
-	return totalLen
-}
-
-// readFrom parses the Winners body defensively, validating remaining counters,
-// string lengths, and consuming exactly the advertised number of bytes.
-// It appends each winner ID to msg.List and returns nil on success.
-func (msg *Winners) readFrom(reader *bufio.Reader) error {
-	var remaining int32
-	if err := binary.Read(reader, binary.LittleEndian, &remaining); err != nil {
-		return err
-	}
-	if remaining < 4 {
-		return &ProtocolError{"invalid body length", msg.GetOpCode()}
-	}
-	var nWinners int32
-	if err := binary.Read(reader, binary.LittleEndian, &nWinners); err != nil {
-		return err
-	}
-	if nWinners < 0 {
-		return &ProtocolError{"invalid body", msg.GetOpCode()}
-	}
-	remaining -= 4
-	for i := int32(0); i < nWinners; i++ {
-		if remaining < 4 {
-			return &ProtocolError{"invalid body length", msg.GetOpCode()}
-		}
-		var strLen int32
-		if err := binary.Read(reader, binary.LittleEndian, &strLen); err != nil {
-			return err
-		}
-		if strLen < 0 {
-			return &ProtocolError{"invalid body", msg.GetOpCode()}
-		}
-		remaining -= 4
-		if remaining < strLen {
-			return &ProtocolError{"invalid body length", msg.GetOpCode()}
-		}
-		buf := make([]byte, int(strLen))
-		if _, err := io.ReadFull(reader, buf); err != nil {
-			return err
-		}
-		remaining -= strLen
-		msg.List = append(msg.List, string(buf))
-	}
-	if remaining != 0 {
-		return &ProtocolError{"invalid body length", msg.GetOpCode()}
-	}
-	return nil
-}
-
 // ReadMessage reads exactly one framed server response from reader.
 // It consumes the opcode, dispatches to the message parser (which
 // validates and consumes the body), and returns the parsed message.
@@ -280,12 +214,6 @@ func ReadMessage(reader *bufio.Reader) (Readable, error) {
 	case LinesRecvFailOpCode:
 		{
 			var msg LinesRecvFail
-			err := msg.readFrom(reader)
-			return &msg, err
-		}
-	case WinnersOpCode:
-		{
-			var msg Winners
 			err := msg.readFrom(reader)
 			return &msg, err
 		}

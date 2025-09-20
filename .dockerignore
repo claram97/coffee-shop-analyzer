@@ -1,0 +1,10 @@
+.data
+**/.DS_Store
+**/Thumbs.db
+node_modules
+dist
+build
+.git
+.gitignore
+.vscode
+*.log
