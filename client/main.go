@@ -102,5 +102,5 @@ func main() {
 
 	client := common.NewClient(clientConfig)
 
-	client.SendTable()
+	client.SendBets()
 }

@@ -1,5 +1,5 @@
 import socket
-import logging
+
 
 class ProtocolError(Exception):
     """Represents a framing/validation error while parsing or writing messages.
@@ -13,71 +13,135 @@ class ProtocolError(Exception):
 
 
 class Opcodes:
-    """Numeric opcodes of the wire protocol (u8)."""
-
-    NEW_BATCH = 0
-    BATCH_RECV_SUCCESS = 1
-    BATCH_RECV_FAIL = 2
+    NEW_BETS = 0
+    BETS_RECV_SUCCESS = 1
+    BETS_RECV_FAIL = 2
     FINISHED = 3
+    # ¡Añadimos un nuevo opcode para nuestro ejemplo!
+    NEW_PRODUCTS = 5 # <-- CORRECCIÓN 1: Nuevo opcode añadido
 
-class NewBatch:
-    """Inbound NEW_BATCH message.
 
-    Body layout:
-      [n_batch:i32 LE]
-      n_batch × {
-        [n_pairs:i32 LE == 6]
-        6 × [key:string][value:string]  // UTF-8 with i32 length prefix
-      }
+class RawBet:
+    """Transport-level bet structure read from the wire (not the domain model)."""
 
-    
+    def __init__(
+        self,
+        first_name: str,
+        last_name: str,
+        document: str,
+        birthdate: str,
+        number: str,
+    ):
+        self.first_name = first_name
+        self.last_name = last_name
+        self.document = document
+        self.birthdate = birthdate
+        self.number = number
+
+class RawProduct:
+    def __init__(self, product_id: str, name: str, price: str):
+        self.product_id = product_id
+        self.name = name
+        self.price = price
+
+# --- NUEVA CLASE BASE GENÉRICA ---
+
+class TableMessage:
     """
+    Clase base genérica para leer un mensaje que contiene una tabla de datos.
+    Una tabla es una lista de registros, donde cada registro es un mapa de
+    clave-valor.
+    """
+    def __init__(self, opcode: int, required_keys: tuple[str, ...], row_factory):
+        self.opcode = opcode
+        self.required_keys = required_keys
+        self.rows = []  # Almacenará los objetos creados (e.g., RawBet, RawProduct)
+        self.amount = 0
+        # `row_factory` es una función o clase que convierte un dict en un objeto
+        self._row_factory = row_factory
 
-    def __init__(self):
-        self.bets: list[dict[str, str]] = []
-        self.opcode: int = Opcodes.NEW_BATCH
-        self.amount: int = 0
-
-    def __read_pair(self, sock: socket.socket, remaining: int) -> tuple[str, str, int]:
-        """Read a single <key, value> pair, both as protocol [string]."""
-        (key, remaining) = read_string(sock, remaining, self.opcode)
-        (value, remaining) = read_string(sock, remaining, self.opcode)
-        return (key, value, remaining)
-
-    def __read_line(self, sock: socket.socket, remaining: int) -> int:
-        """Read one line map, and append keys as a dict."""
-        curr_line: dict[str, str] = {}
+    def __read_row(self, sock: socket.socket, remaining: int) -> int:
+        """Lee un único registro (fila) de la tabla."""
+        current_row_data: dict[str, str] = {}
         (n_pairs, remaining) = read_i32(sock, remaining, self.opcode)
 
-        for _ in range(0, n_pairs):
-            (k, v, remaining) = self.__read_pair(sock, remaining)
-            curr_line[k] = v
+        # La validación ahora es genérica
+        if n_pairs != len(self.required_keys):
+            raise ProtocolError(f"Expected {len(self.required_keys)} pairs, got {n_pairs}", self.opcode)
 
-        self.bets.append(curr_line)
+        for _ in range(n_pairs):
+            (key, remaining) = read_string(sock, remaining, self.opcode)
+            (value, remaining) = read_string(sock, remaining, self.opcode)
+            current_row_data[key] = value
 
+        # Verificación de claves genérica
+        if any(key not in current_row_data for key in self.required_keys):
+            raise ProtocolError("Missing required keys in row", self.opcode)
+
+        # Mapeo explícito para RawBet
+        if self._row_factory == RawBet:
+            mapping = {
+                "NOMBRE": "first_name",
+                "APELLIDO": "last_name",
+                "DOCUMENTO": "document",
+                "NACIMIENTO": "birthdate",
+                "NUMERO": "number",
+            }
+            kwargs = {mapping[k]: v for k, v in current_row_data.items() if k in mapping}
+            self.rows.append(self._row_factory(**kwargs))
+        else:
+            # Por defecto: claves a minúsculas
+            kwargs = {key.lower(): value for key, value in current_row_data.items()}
+            self.rows.append(self._row_factory(**kwargs))
         return remaining
 
-    def read_from(self, sock, length: int):
-        """Parse the complete NEW_BATCH body and enforce exact-length consumption.
-
-        Reads the `n_bets` counter and then consumes each bet map. If, after
-        parsing, `remaining != 0`, raises ProtocolError. On parse failure, drains
-        the remaining bytes (to keep the stream synchronized) and re-raises.
-        """
+    def read_from(self, sock: socket.socket, length: int):
+        """Parsea el cuerpo completo del mensaje de la tabla."""
         remaining = length
         try:
-            n_lines, remaining = read_i32(sock, remaining, self.opcode)
-            self.amount = n_lines
-            for _ in range(n_lines):
-                remaining = self.__read_line(sock, remaining)
+            (n_rows, remaining) = read_i32(sock, remaining, self.opcode)
+            self.amount = n_rows
+            for _ in range(n_rows):
+                remaining = self.__read_row(sock, remaining)
+            
             if remaining != 0:
-                raise ProtocolError(
-                    "indicated length doesn't match body length", self.opcode
-                )
+                raise ProtocolError("Indicated length doesn't match body length", self.opcode)
         except ProtocolError:
             if remaining > 0:
                 _ = recv_exactly(sock, remaining)
             raise
+
+# --- CLASES DE MENSAJES ESPECÍFICOS (Ahora mucho más simples) ---
+
+class NewBets(TableMessage):
+    """Mensaje NEW_BETS que ahora hereda de TableMessage."""
+    def __init__(self):
+        # Solo necesitamos definir la configuración específica de las apuestas
+        required = (
+            "NOMBRE", "APELLIDO", 
+            "DOCUMENTO", "NACIMIENTO", "NUMERO"
+        )
+        # Le pasamos a la clase base el opcode, las claves y la clase que debe usar para crear cada fila
+        super().__init__(
+            opcode=Opcodes.NEW_BETS,
+            required_keys=required,
+            row_factory=RawBet  # Usará RawBet(**kwargs) para crear los objetos
+        )
+
+# ¡Mira qué fácil es agregar una nueva tabla!
+class NewProducts(TableMessage):
+    """Ejemplo de un nuevo mensaje para recibir productos."""
+    def __init__(self):
+        required = ("ID_PRODUCTO", "NOMBRE", "PRECIO")
+        # Cambiamos el row_factory a RawProduct
+        # Renombramos los argumentos para que coincidan con RawProduct.__init__
+        # "ID_PRODUCTO" -> "product_id", "NOMBRE" -> "name", etc.
+        # El mapeo a minúsculas en __read_row se encarga de esto.
+        super().__init__(
+            opcode=Opcodes.NEW_PRODUCTS,
+            required_keys=required,
+            row_factory=RawProduct
+        )
 
 
 class Finished:
@@ -158,24 +222,28 @@ def read_string(sock: socket.socket, remaining: int, opcode: int) -> (str, int):
 
 
 def recv_msg(sock: socket.socket):
-    """Read a single framed message and dispatch by opcode.
-
-    Reads opcode (u8) and length (i32 LE), validates length, then dispatches
-    to the appropriate message class. Raises ProtocolError on invalid opcode.
-    """
+    """Lee un mensaje y lo despacha a la clase apropiada."""
     opcode = read_u8(sock)
     (length, _) = read_i32(sock, 4, -1)
     if length < 0:
         raise ProtocolError("invalid length")
-    if opcode == Opcodes.NEW_BATCH:
-        msg = NewBatch()
-        msg.read_from(sock, length)
-        return msg
-    if opcode == Opcodes.FINISHED:
+
+    msg = None
+    if opcode == Opcodes.NEW_BETS:
+        msg = NewBets()
+    elif opcode == Opcodes.FINISHED:
+        # La clase Finished no cambia
         msg = Finished()
+    # ¡Añadimos el nuevo tipo de mensaje!
+    elif opcode == Opcodes.NEW_PRODUCTS:
+        msg = NewProducts()
+    
+    if msg:
         msg.read_from(sock, length)
         return msg
+    
     raise ProtocolError(f"invalid opcode: {opcode}")
+
 
 
 def write_u8(sock, value: int) -> None:
@@ -198,11 +266,11 @@ def write_string(sock: socket.socket, s: str) -> None:
     sock.sendall(b)
 
 
-class BatchRecvSuccess:
-    """Outbound BATCH_RECV_SUCCESS response (empty body)."""
+class BetsRecvSuccess:
+    """Outbound BETS_RECV_SUCCESS response (empty body)."""
 
     def __init__(self):
-        self.opcode = Opcodes.BATCH_RECV_SUCCESS
+        self.opcode = Opcodes.BETS_RECV_SUCCESS
 
     def write_to(self, sock: socket.socket):
         """Frame and send the success response: [opcode][length=0]."""
@@ -210,11 +278,11 @@ class BatchRecvSuccess:
         write_i32(sock, 0)
 
 
-class BatchRecvFail:
-    """Outbound BATCH_RECV_FAIL response (empty body)."""
+class BetsRecvFail:
+    """Outbound BETS_RECV_FAIL response (empty body)."""
 
     def __init__(self):
-        self.opcode = Opcodes.BATCH_RECV_FAIL
+        self.opcode = Opcodes.BETS_RECV_FAIL
 
     def write_to(self, sock: socket.socket):
         """Frame and send the failure response: [opcode][length=0]."""

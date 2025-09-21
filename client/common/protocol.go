@@ -8,9 +8,9 @@ import (
 	"io"
 )
 
-const NewBatchOpCode byte = 0
-const BatchRecvSuccessOpCode byte = 1
-const BatchRecvFailOpCode byte = 2
+const NewBetsOpCode byte = 0
+const BetsRecvSuccessOpCode byte = 1
+const BetsRecvFailOpCode byte = 2
 const FinishedOpCode byte = 3
 
 // ProtocolError models a framing/validation error while parsing or writing
@@ -96,47 +96,47 @@ func writeStringMap(buff *bytes.Buffer, body map[string]string) error {
 // AddBetWithFlush serializes a single bet as a [string map] and attempts to
 // append it to the current batch buffer `to`. If appending would exceed the
 // 8 KiB package limit (including opcode+length+n headers) or the given
-// batchLimit, this function first FlushBatch(to, finalOutput, *linesCounter)
-// and then starts a new batch with this line, setting *linesCounter = 1.
-// On success, it increments *linesCounter and returns nil; any I/O/encoding
+// batchLimit, this function first FlushBatch(to, finalOutput, *betsCounter)
+// and then starts a new batch with this bet, setting *betsCounter = 1.
+// On success, it increments *betsCounter and returns nil; any I/O/encoding
 // error is returned.
-func AddLineWithFlush(line map[string]string, to *bytes.Buffer, finalOutput io.Writer, linesCounter *int32, batchLimit int32) error {
+func AddBetWithFlush(bet map[string]string, to *bytes.Buffer, finalOutput io.Writer, betsCounter *int32, batchLimit int32) error {
 	var buff bytes.Buffer
-	if err := writeStringMap(&buff, line); err != nil {
+	if err := writeStringMap(&buff, bet); err != nil {
 		return err
 	}
-	if to.Len()+buff.Len()+1+4+4 <= 8*1024 && *linesCounter+1 <= batchLimit {
+	if to.Len()+buff.Len()+1+4+4 <= 8*1024 && *betsCounter+1 <= batchLimit {
 		_, err := io.Copy(to, &buff)
 		if err != nil {
 			return err
 		}
-		*linesCounter++
+		*betsCounter++
 		return nil
 	}
-	if err := FlushBatch(to, finalOutput, *linesCounter); err != nil {
+	if err := FlushBatch(to, finalOutput, *betsCounter); err != nil {
 		return err
 	}
-	if err := writeStringMap(to, line); err != nil {
+	if err := writeStringMap(to, bet); err != nil {
 		return err
 	}
-	*linesCounter = 1
+	*betsCounter = 1
 	return nil
 }
 
-// FlushBatch frames and writes a NewBatch message to `out` from the accumulated
+// FlushBatch frames and writes a NewBets message to `out` from the accumulated
 // body in `batch`. The wire format is:
 //
-//	[opcode=NewBatch:1][length=i32 LE (4 + bodyLen)][nBets=i32 LE][body]
+//	[opcode=NewBets:1][length=i32 LE (4 + bodyLen)][nBets=i32 LE][body]
 //
 // After a successful write it resets the batch buffer. Any write error is returned.
-func FlushBatch(batch *bytes.Buffer, out io.Writer, linesCounter int32) error {
-	if err := binary.Write(out, binary.LittleEndian, NewBatchOpCode); err != nil {
+func FlushBatch(batch *bytes.Buffer, out io.Writer, betsCounter int32) error {
+	if err := binary.Write(out, binary.LittleEndian, NewBetsOpCode); err != nil {
 		return err
 	}
 	if err := binary.Write(out, binary.LittleEndian, int32(4+batch.Len())); err != nil {
 		return err
 	}
-	if err := binary.Write(out, binary.LittleEndian, linesCounter); err != nil {
+	if err := binary.Write(out, binary.LittleEndian, betsCounter); err != nil {
 		return err
 	}
 	if _, err := io.Copy(out, batch); err != nil {
@@ -153,42 +153,42 @@ type Readable interface {
 	Message
 }
 
-// BatchRecvSuccess is the server→client acknowledgment for a batch processed
+// BetsRecvSuccess is the server→client acknowledgment for a batch processed
 // successfully. Its body length is always 0.
-type BatchRecvSuccess struct{}
+type BetsRecvSuccess struct{}
 
-func (msg *BatchRecvSuccess) GetOpCode() byte  { return BatchRecvSuccessOpCode }
-func (msg *BatchRecvSuccess) GetLength() int32 { return 0 }
+func (msg *BetsRecvSuccess) GetOpCode() byte  { return BetsRecvSuccessOpCode }
+func (msg *BetsRecvSuccess) GetLength() int32 { return 0 }
 
 // readFrom validates that the next i32 body length is exactly 0.
 // It consumes the field and returns nil on success.
-func (msg *BatchRecvSuccess) readFrom(reader *bufio.Reader) error {
+func (msg *BetsRecvSuccess) readFrom(reader *bufio.Reader) error {
 	var length int32
 	if err := binary.Read(reader, binary.LittleEndian, &length); err != nil {
 		return err
 	}
 	if length != msg.GetLength() {
-		return &ProtocolError{"invalid body length", BatchRecvSuccessOpCode}
+		return &ProtocolError{"invalid body length", BetsRecvSuccessOpCode}
 	}
 	return nil
 }
 
-// BatchRecvFail is the server→client negative acknowledgment for a batch.
+// BetsRecvFail is the server→client negative acknowledgment for a batch.
 // Its body length is always 0.
-type BatchRecvFail struct{}
+type BetsRecvFail struct{}
 
-func (msg *BatchRecvFail) GetOpCode() byte  { return BatchRecvFailOpCode }
-func (msg *BatchRecvFail) GetLength() int32 { return 0 }
+func (msg *BetsRecvFail) GetOpCode() byte  { return BetsRecvFailOpCode }
+func (msg *BetsRecvFail) GetLength() int32 { return 0 }
 
 // readFrom validates that the next i32 body length is exactly 0.
 // It consumes the field and returns nil on success.
-func (msg *BatchRecvFail) readFrom(reader *bufio.Reader) error {
+func (msg *BetsRecvFail) readFrom(reader *bufio.Reader) error {
 	var length int32
 	if err := binary.Read(reader, binary.LittleEndian, &length); err != nil {
 		return err
 	}
 	if length != msg.GetLength() {
-		return &ProtocolError{"invalid body length", BatchRecvFailOpCode}
+		return &ProtocolError{"invalid body length", BetsRecvFailOpCode}
 	}
 	return nil
 }
@@ -205,15 +205,15 @@ func ReadMessage(reader *bufio.Reader) (Readable, error) {
 		return nil, err
 	}
 	switch opcode {
-	case BatchRecvSuccessOpCode:
+	case BetsRecvSuccessOpCode:
 		{
-			var msg BatchRecvSuccess
+			var msg BetsRecvSuccess
 			err := msg.readFrom(reader)
 			return &msg, err
 		}
-	case BatchRecvFailOpCode:
+	case BetsRecvFailOpCode:
 		{
-			var msg BatchRecvFail
+			var msg BetsRecvFail
 			err := msg.readFrom(reader)
 			return &msg, err
 		}
