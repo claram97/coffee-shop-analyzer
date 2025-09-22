@@ -316,49 +316,125 @@ func (c *Client) createClientSocket() error {
 //
 // It guarantees connection closure on exit and uses deadlines to unblock
 // the reader goroutine on cancellation.
+// func (c *Client) SendBets() {
+// 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGTERM)
+// 	defer stop()
+
+// 	file, err := os.Open(c.config.BetsFilePath)
+// 	if err != nil {
+// 		log.Criticalf("action: read_file | result: fail | error: %v", err)
+// 		return
+// 	}
+// 	defer file.Close()
+
+// 	reader := csv.NewReader(file)
+// 	reader.Comma = ','
+// 	// Ignorar encabezado
+// 	if _, err := reader.Read(); err != nil {
+// 		log.Criticalf("action: read_file | result: fail | error: encabezado: %v", err)
+// 		return
+// 	}
+// 	// La validación de campos ahora es dinámica, usando la interfaz.
+// 	reader.FieldsPerRecord = -1 // Allow variable field counts, validate in handler
+
+// 	if err := c.createClientSocket(); err != nil {
+// 		return
+// 	}
+// 	defer c.conn.Close()
+
+// 	writeDone := make(chan error, 1)
+// 	go func() {
+// 		writeDone <- c.buildAndSendBatches(ctx, reader)
+// 	}()
+
+// 	conn := c.conn
+// 	readDone := make(chan struct{})
+// 	readResponse(conn, readDone)
+
+// 	if err = <-writeDone; err != nil && !errors.Is(err, context.Canceled) {
+// 		log.Errorf("action: send_bets | result: fail | error: %v", err)
+// 		return
+// 	}
+
+//		if err == nil {
+//			c.sendFinished()
+//		}
+//		select {
+//		case <-ctx.Done():
+//			_ = c.conn.SetReadDeadline(time.Now().Add(2 * time.Second))
+//			<-readDone
+//			return
+//		case <-readDone:
+//			if tcp, ok := c.conn.(*net.TCPConn); ok {
+//				_ = tcp.CloseWrite()
+//			}
+//		}
+//	}
+
 func (c *Client) SendBets() {
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGTERM)
 	defer stop()
-
-	file, err := os.Open(c.config.BetsFilePath)
-	if err != nil {
-		log.Criticalf("action: read_file | result: fail | error: %v", err)
-		return
-	}
-	defer file.Close()
-
-	reader := csv.NewReader(file)
-	reader.Comma = ','
-	// Ignorar encabezado
-	if _, err := reader.Read(); err != nil {
-		log.Criticalf("action: read_file | result: fail | error: encabezado: %v", err)
-		return
-	}
-	// La validación de campos ahora es dinámica, usando la interfaz.
-	reader.FieldsPerRecord = -1 // Allow variable field counts, validate in handler
 
 	if err := c.createClientSocket(); err != nil {
 		return
 	}
 	defer c.conn.Close()
 
-	writeDone := make(chan error, 1)
-	go func() {
-		writeDone <- c.buildAndSendBatches(ctx, reader)
-	}()
-
-	conn := c.conn
+	// Start the response reader ONCE, outside the loop
 	readDone := make(chan struct{})
-	readResponse(conn, readDone)
+	readResponse(c.conn, readDone)
 
-	if err = <-writeDone; err != nil && !errors.Is(err, context.Canceled) {
-		log.Errorf("action: send_bets | result: fail | error: %v", err)
-		return
+	// Loop configuration
+	iterations := 4
+	var lastErr error
+
+	for iteration := 1; iteration <= iterations; iteration++ {
+		log.Infof("Starting iteration %d/%d", iteration, iterations)
+
+		// Open the CSV file for this iteration
+		file, err := os.Open(c.config.BetsFilePath)
+		if err != nil {
+			log.Criticalf("action: read_file | result: fail | iteration: %d | error: %v", iteration, err)
+			return
+		}
+
+		reader := csv.NewReader(file)
+		reader.Comma = ','
+		// Skip header
+		if _, err := reader.Read(); err != nil {
+			log.Criticalf("action: read_file | result: fail | error: encabezado: %v", err)
+			file.Close()
+			return
+		}
+		reader.FieldsPerRecord = -1
+
+		writeDone := make(chan error, 1)
+		go func() {
+			writeDone <- c.buildAndSendBatches(ctx, reader)
+		}()
+
+		lastErr = <-writeDone
+		if lastErr != nil && !errors.Is(lastErr, context.Canceled) {
+			log.Errorf("action: send_bets | result: fail | iteration: %d | error: %v", iteration, lastErr)
+			file.Close()
+			return
+		}
+
+		file.Close()
+		log.Infof("Completed iteration %d/%d", iteration, iterations)
+
+		// Add delay between iterations
+		if iteration < iterations {
+			time.Sleep(1 * time.Second)
+		}
 	}
 
-	if err == nil {
+	// Send FINISHED only after all iterations are complete
+	if lastErr == nil {
 		c.sendFinished()
 	}
+
+	// Wait for final responses and cleanup
 	select {
 	case <-ctx.Done():
 		_ = c.conn.SetReadDeadline(time.Now().Add(2 * time.Second))

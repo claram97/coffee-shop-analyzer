@@ -96,7 +96,7 @@ func main() {
 	var handler common.TableRowHandler
 	var opCode byte
 
-	tableType := "vouchers"
+	tableType := "users"
 
 	switch tableType {
 	case "bets":
