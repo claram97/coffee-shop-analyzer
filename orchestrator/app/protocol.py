@@ -17,8 +17,13 @@ class Opcodes:
     BETS_RECV_SUCCESS = 1
     BETS_RECV_FAIL = 2
     FINISHED = 3
-    # ¡Añadimos un nuevo opcode para nuestro ejemplo!
-    NEW_PRODUCTS = 5 # <-- CORRECCIÓN 1: Nuevo opcode añadido
+    NEW_MENU_ITEMS = 4
+    NEW_PAYMENT_METHODS = 5
+    NEW_STORES = 6
+    NEW_TRANSACTION_ITEMS = 7
+    NEW_TRANSACTION = 8
+    NEW_USERS = 9
+    NEW_VOUCHERS = 10
 
 
 class RawBet:
@@ -38,13 +43,74 @@ class RawBet:
         self.birthdate = birthdate
         self.number = number
 
-class RawProduct:
-    def __init__(self, product_id: str, name: str, price: str):
+class RawMenuItems:
+    def __init__(self, product_id: str, name: str, price: str, category: str, is_seasonal: str, available_from: str, available_to: str):
         self.product_id = product_id
         self.name = name
         self.price = price
+        self.category = category
+        self.is_seasonal = is_seasonal
+        self.available_from = available_from
+        self.available_to = available_to
 
-# --- NUEVA CLASE BASE GENÉRICA ---
+class RawPaymentMethod:
+    def __init__(self, method_id: str, method_name: str, category: str):
+        self.method_id = method_id
+        self.method_name = method_name
+        self.category = category
+
+class RawStore:
+    def __init__(self, store_id: str, store_name: str, street: str, postal_code: str,
+                 city: str, state: str, latitude: str, longitude: str):
+        self.store_id = store_id
+        self.store_name = store_name
+        self.street = street
+        self.postal_code = postal_code
+        self.city = city
+        self.state = state
+        self.latitude = latitude
+        self.longitude = longitude
+
+class RawTransactionItem:
+    def __init__(self, transaction_id: str, item_id: str, quantity: str,
+                 unit_price: str, subtotal: str, created_at: str):
+        self.transaction_id = transaction_id
+        self.item_id = item_id
+        self.quantity = quantity
+        self.unit_price = unit_price
+        self.subtotal = subtotal
+        self.created_at = created_at
+
+class RawTransaction:
+    def __init__(self, transaction_id: str, store_id: str, payment_method_id: str,
+                 voucher_id: str, user_id: str, original_amount: str,
+                 discount_applied: str, final_amount: str, created_at: str):
+        self.transaction_id = transaction_id
+        self.store_id = store_id
+        self.payment_method_id = payment_method_id
+        self.voucher_id = voucher_id
+        self.user_id = user_id
+        self.original_amount = original_amount
+        self.discount_applied = discount_applied
+        self.final_amount = final_amount
+        self.created_at = created_at
+
+class RawUser:
+    def __init__(self, user_id: str, name: str, email: str):
+        self.user_id = user_id
+        self.name = name
+        self.email = email
+
+class RawVoucher:
+    def __init__(self, voucher_id: str, voucher_code: str, discount_type: str,
+                 discount_value: str, valid_from: str, valid_to: str):
+        self.voucher_id = voucher_id
+        self.voucher_code = voucher_code
+        self.discount_type = discount_type
+        self.discount_value = discount_value
+        self.valid_from = valid_from
+        self.valid_to = valid_to
+
 
 class TableMessage:
     """
@@ -128,21 +194,96 @@ class NewBets(TableMessage):
             row_factory=RawBet  # Usará RawBet(**kwargs) para crear los objetos
         )
 
-# ¡Mira qué fácil es agregar una nueva tabla!
-class NewProducts(TableMessage):
-    """Ejemplo de un nuevo mensaje para recibir productos."""
+class NewMenuItems(TableMessage):
+    """Mensaje NEW_PRODUCTS que ahora hereda de TableMessage."""
+
     def __init__(self):
-        required = ("ID_PRODUCTO", "NOMBRE", "PRECIO")
-        # Cambiamos el row_factory a RawProduct
-        # Renombramos los argumentos para que coincidan con RawProduct.__init__
-        # "ID_PRODUCTO" -> "product_id", "NOMBRE" -> "name", etc.
-        # El mapeo a minúsculas en __read_row se encarga de esto.
+        required = (
+            "product_id", "name", "price", "category", "is_seasonal", 
+            "available_from", "available_to"
+        )
         super().__init__(
-            opcode=Opcodes.NEW_PRODUCTS,
+            opcode=Opcodes.NEW_MENU_ITEMS,
             required_keys=required,
-            row_factory=RawProduct
+            row_factory=RawMenuItems  # Usará RawMenuItems(**kwargs) para crear los objetos
         )
 
+class NewTransactionItems(TableMessage):
+    """Mensaje NEW_TRANSACTION_ITEMS que ahora hereda de TableMessage."""
+    def __init__(self):
+        required = (
+            "transaction_id", "item_id", "quantity", 
+            "unit_price", "subtotal", "created_at"
+        )
+        super().__init__(
+            opcode=Opcodes.NEW_TRANSACTION_ITEMS,
+            required_keys=required,
+            row_factory=RawTransactionItem  # Usará RawTransactionItem(**kwargs) para crear los objetos
+        )
+
+class NewTransactions(TableMessage):
+    """Mensaje NEW_TRANSACTIONS que ahora hereda de TableMessage."""
+    def __init__(self):
+        required = (
+            "transaction_id", "store_id", "payment_method_id", 
+            "voucher_id", "user_id", "original_amount", 
+            "discount_applied", "final_amount", "created_at"
+        )
+        super().__init__(
+            opcode=Opcodes.NEW_TRANSACTIONS,
+            required_keys=required,
+            row_factory=RawTransaction  # Usará RawTransaction(**kwargs) para crear los objetos
+        )
+
+class NewUsers(TableMessage):
+    """Mensaje NEW_USERS que ahora hereda de TableMessage."""
+    def __init__(self):
+        required = (
+            "user_id", "gender", "birthdate", "registered_at"
+        )
+        super().__init__(
+            opcode=Opcodes.NEW_USERS,
+            required_keys=required,
+            row_factory=RawUser  # Usará RawUser(**kwargs) para crear los objetos
+        )
+class NewVouchers(TableMessage):
+    """Mensaje NEW_VOUCHERS que ahora hereda de TableMessage."""
+    def __init__(self):
+        required = (
+            "voucher_id", "voucher_code", "discount_type", 
+            "discount_value", "valid_from", "valid_to"
+        )
+        super().__init__(
+            opcode=Opcodes.NEW_VOUCHERS,
+            required_keys=required,
+            row_factory=RawVoucher  # Usará RawVoucher(**kwargs) para crear los objetos
+        )
+
+class NewPaymentMethods(TableMessage):
+    """Mensaje NEW_PAYMENT_METHODS que ahora hereda de TableMessage."""
+    def __init__(self):
+        required = (
+            "method_id", "method_name", "category"
+        )
+        super().__init__(
+            opcode=Opcodes.NEW_PAYMENT_METHODS,
+            required_keys=required,
+            row_factory=RawPaymentMethod  # Usará RawPaymentMethod(**kwargs) para crear los objetos
+        )
+
+class NewStores(TableMessage):
+    """Mensaje NEW_STORES que ahora hereda de TableMessage."""
+    def __init__(self):
+        required = (
+            "store_id", "store_name", "street", 
+            "postal_code", "city", "state", 
+            "latitude", "longitude"
+        )
+        super().__init__(
+            opcode=Opcodes.NEW_STORES,
+            required_keys=required,
+            row_factory=RawStore  # Usará RawStore(**kwargs) para crear los objetos
+        )
 
 class Finished:
     """Inbound FINISHED message. Body is a single agency_id (i32 LE)."""
@@ -235,15 +376,26 @@ def recv_msg(sock: socket.socket):
         # La clase Finished no cambia
         msg = Finished()
     # ¡Añadimos el nuevo tipo de mensaje!
-    elif opcode == Opcodes.NEW_PRODUCTS:
-        msg = NewProducts()
-    
+    elif opcode == Opcodes.NEW_MENU_ITEMS:
+        msg = NewMenuItems()
+    elif opcode == Opcodes.NEW_PAYMENT_METHODS:
+        msg = NewPaymentMethods()
+    elif opcode == Opcodes.NEW_STORES:
+        msg = NewStores()
+    elif opcode == Opcodes.NEW_TRANSACTION_ITEMS:
+        msg = NewTransactionItems()
+    elif opcode == Opcodes.NEW_TRANSACTION:
+        msg = NewTransactions()
+    elif opcode == Opcodes.NEW_USERS:
+        msg = NewUsers()
+    elif opcode == Opcodes.NEW_VOUCHERS:
+        msg = NewVouchers()
+    else:
+        raise ProtocolError(f"invalid opcode: {opcode}")
+
     if msg:
         msg.read_from(sock, length)
         return msg
-    
-    raise ProtocolError(f"invalid opcode: {opcode}")
-
 
 
 def write_u8(sock, value: int) -> None:

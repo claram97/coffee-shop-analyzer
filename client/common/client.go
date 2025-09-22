@@ -13,11 +13,140 @@ import (
 	"strconv"
 	"syscall"
 	"time"
-
 	"github.com/op/go-logging"
 )
 
 var log = logging.MustGetLogger("log")
+
+// --- NUEVO: Interfaz para manejar cualquier tipo de fila de tabla ---
+type TableRowHandler interface {
+	// ProcessRecord convierte una línea de CSV en el mapa clave-valor del protocolo.
+	ProcessRecord(record []string) (map[string]string, error)
+	// GetExpectedFields devuelve el número de columnas que el CSV debe tener.
+	GetExpectedFields() int
+}
+
+type MenuItemHandler struct {}
+
+func (m MenuItemHandler) ProcessRecord(record []string) (map[string]string, error) {
+	return map[string]string{
+		"item_id":    record[0],
+		"item_name":  record[1],
+		"category":   record[2],
+		"price":      record[3],
+		"is_seasonal":record[4],
+		"available_from": record[5],
+		"available_to": record[6],
+	}, nil
+}
+
+func (m MenuItemHandler) GetExpectedFields() int { return 7 }
+
+type PaymentMethodHandler struct {}
+
+func (p PaymentMethodHandler) ProcessRecord(record []string) (map[string]string, error) {
+	return map[string]string{
+		"method_id":   record[0],
+		"method_name": record[1],
+		"category":    record[2],
+	}, nil
+}
+
+func (p PaymentMethodHandler) GetExpectedFields() int { return 3 }
+
+type StoreHandler struct {}
+
+func (s StoreHandler) ProcessRecord(record []string) (map[string]string, error) {
+	return map[string]string{
+		"store_id":   record[0],
+		"store_name": record[1],
+		"street":     record[2],
+		"postal_code":record[3],
+		"city":       record[4],
+		"state":      record[5],
+		"latitude":   record[6],
+		"longitude":  record[7],
+	}, nil
+}
+
+func (s StoreHandler) GetExpectedFields() int { return 8 }
+
+type TransactionItemHandler struct {}
+
+func (t TransactionItemHandler) ProcessRecord(record []string) (map[string]string, error) {
+	return map[string]string{
+		"transaction_id": record[0],
+		"item_id":        record[1],
+		"quantity":       record[2],
+		"unit_price":     record[3],
+		"subtotal":       record[4],
+		"created_at":     record[5],
+	}, nil
+}
+
+func (t TransactionItemHandler) GetExpectedFields() int { return 6 }
+
+type TransactionHandler struct {}
+
+func (t TransactionHandler) ProcessRecord(record []string) (map[string]string, error) {
+	return map[string]string{
+		"transaction_id":   record[0],
+		"store_id":         record[1],
+		"payment_method_id":record[2],
+		"voucher_id":       record[3],
+		"user_id":          record[4],
+		"original_amount":  record[5],
+		"discount_applied": record[6],
+		"final_amount":     record[7],
+		"created_at":       record[8],
+	}, nil
+}
+
+func (t TransactionHandler) GetExpectedFields() int { return 9 }
+
+type UserHandler struct {}
+
+func (u UserHandler) ProcessRecord(record []string) (map[string]string, error) {
+	return map[string]string{
+		"user_id":      record[0],
+		"gender":       record[1],
+		"birthdate":   record[2],
+		"registered_at":record[3],
+	}, nil
+}
+
+func (u UserHandler) GetExpectedFields() int { return 4 }
+
+type VoucherHandler struct {}
+
+func (v VoucherHandler) ProcessRecord(record []string) (map[string]string, error) {
+	return map[string]string{
+		"voucher_id":    record[0],
+		"voucher_code":  record[1],
+		"discount_type": record[2],
+		"discount_value":record[3],
+		"valid_from":    record[4],
+		"valid_to":      record[5],
+	}, nil
+}
+
+func (v VoucherHandler) GetExpectedFields() int { return 6 }
+
+// --- NUEVO: Implementación específica para Apuestas ---
+type BetHandler struct{}
+
+func (b BetHandler) ProcessRecord(record []string) (map[string]string, error) {
+	// Esta es la misma lógica que antes estaba en processNextBet
+	return map[string]string{
+		"NOMBRE":     record[0],
+		"APELLIDO":   record[1],
+		"DOCUMENTO":  record[2],
+		"NACIMIENTO": record[3],
+		"NUMERO":     record[4],
+	}, nil
+}
+
+func (b BetHandler) GetExpectedFields() int { return 5 }
 
 // ClientConfig holds the runtime configuration for a client instance.
 // - ID: agency identifier as a string.
@@ -34,17 +163,21 @@ type ClientConfig struct {
 // Client encapsulates the client behavior, including configuration and
 // the currently open TCP connection (if any).
 type Client struct {
-	config ClientConfig
-	conn   net.Conn
+	config  ClientConfig
+	conn    net.Conn
+	handler TableRowHandler // <-- Usa la interfaz
+	opCode  byte            // <-- Sabe qué OpCode enviar
 }
+
 
 // NewClient constructs a Client with the provided configuration.
 // The TCP connection is not opened here; see createClientSocket / SendBets.
-func NewClient(config ClientConfig) *Client {
-	client := &Client{
-		config: config,
+func NewClient(config ClientConfig, handler TableRowHandler, opCode byte) *Client {
+	return &Client{
+		config:  config,
+		handler: handler,
+		opCode:  opCode,
 	}
-	return client
 }
 
 // processNextBet reads a single CSV record from betsReader, converts it
@@ -54,19 +187,20 @@ func NewClient(config ClientConfig) *Client {
 // the function triggers a flush of the current batch to c.conn and then
 // starts a new batch with this bet. The returned error is io.EOF when the
 // CSV is exhausted, or any I/O/serialization error encountered.
-func (c *Client) processNextBet(betsReader *csv.Reader, batchBuff *bytes.Buffer, betsCounter *int32) error {
-	betFields, err := betsReader.Read()
+func (c *Client) processNextRow(reader *csv.Reader, batchBuff *bytes.Buffer, counter *int32) error {
+	record, err := reader.Read()
 	if err != nil {
 		return err
 	}
-	bet := map[string]string{
-		"NOMBRE":     betFields[0],
-		"APELLIDO":   betFields[1],
-		"DOCUMENTO":  betFields[2],
-		"NACIMIENTO": betFields[3],
-		"NUMERO":     betFields[4],
+
+	// Llama al método de la interfaz para procesar el registro. El cliente no sabe qué tipo es.
+	rowMap, err := c.handler.ProcessRecord(record)
+	if err != nil {
+		return err
 	}
-	if err := AddBetWithFlush(bet, batchBuff, c.conn, betsCounter, c.config.BatchLimit); err != nil {
+
+	// Llama a una función de bajo nivel también genérica
+	if err := AddRowToBatch(rowMap, batchBuff, c.conn, counter, c.config.BatchLimit, c.opCode); err != nil {
 		return err
 	}
 	return nil
@@ -77,25 +211,26 @@ func (c *Client) processNextBet(betsReader *csv.Reader, batchBuff *bytes.Buffer,
 // On context cancellation, it flushes any partial batch and returns the
 // context error. On clean EOF, it flushes a final partial batch (if any)
 // and returns nil. Any serialization or socket error is returned.
-func (c *Client) buildAndSendBatches(ctx context.Context, betsReader *csv.Reader) error {
+func (c *Client) buildAndSendBatches(ctx context.Context, reader *csv.Reader) error {
 	var batchBuff bytes.Buffer
-	var betsCounter int32 = 0
+	var counter int32 = 0
 	for {
 		select {
 		case <-ctx.Done():
-			if betsCounter > 0 {
-				if err := FlushBatch(&batchBuff, c.conn, betsCounter); err != nil {
+			if counter > 0 {
+				if err := FlushBatch(&batchBuff, c.conn, counter, c.opCode); err != nil { // <-- Usa c.opCode
 					return err
 				}
-				betsCounter = 0
+				counter = 0
 			}
 			return ctx.Err()
 		default:
 		}
-		if err := c.processNextBet(betsReader, &batchBuff, &betsCounter); err != nil {
+
+		if err := c.processNextRow(reader, &batchBuff, &counter); err != nil {
 			if errors.Is(err, io.EOF) {
-				if betsCounter > 0 {
-					if err := FlushBatch(&batchBuff, c.conn, betsCounter); err != nil {
+				if counter > 0 {
+					if err := FlushBatch(&batchBuff, c.conn, counter, c.opCode); err != nil { // <-- Usa c.opCode
 						return err
 					}
 				}
@@ -137,16 +272,23 @@ func (c *Client) SendBets() {
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGTERM)
 	defer stop()
 
-	betsFile, err := os.Open(c.config.BetsFilePath)
+	file, err := os.Open(c.config.BetsFilePath)
 	if err != nil {
-		log.Criticalf("action: read_bets | result: fail | error: %v", err)
+		log.Criticalf("action: read_file | result: fail | error: %v", err)
 		return
 	}
-	defer betsFile.Close()
+	defer file.Close()
 
-	betsReader := csv.NewReader(betsFile)
-	betsReader.Comma = ','
-	betsReader.FieldsPerRecord = 5
+
+       reader := csv.NewReader(file)
+       reader.Comma = ','
+       // Ignorar encabezado
+       if _, err := reader.Read(); err != nil {
+	       log.Criticalf("action: read_file | result: fail | error: encabezado: %v", err)
+	       return
+       }
+       // La validación de campos ahora es dinámica, usando la interfaz.
+       reader.FieldsPerRecord = c.handler.GetExpectedFields()
 
 	if err := c.createClientSocket(); err != nil {
 		return
@@ -155,7 +297,7 @@ func (c *Client) SendBets() {
 
 	writeDone := make(chan error, 1)
 	go func() {
-		writeDone <- c.buildAndSendBatches(ctx, betsReader)
+		writeDone <- c.buildAndSendBatches(ctx, reader)
 	}()
 
 	conn := c.conn

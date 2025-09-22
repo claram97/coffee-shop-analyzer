@@ -81,7 +81,7 @@ class Orchestrator:
                 if not self.__process_msg(msg, client_sock):
                     break
             except protocol.ProtocolError as e:
-                logging.error("action: receive_message | result: fail | error: %s", e)
+                logging.error("action: receive_message | result: protocol error | error: %s", e)
             except EOFError:
                 break
             except OSError as e:
@@ -91,7 +91,7 @@ class Orchestrator:
 
     def __process_msg(self, msg, client_sock) -> bool:
         """Process a decoded message.""" # <-- CORRECCIÓN 2: Docstring simplificado
-        if msg.opcode == protocol.Opcodes.NEW_BETS:
+        if msg.opcode != protocol.Opcodes.FINISHED:
             try:
                pass
             except Exception as e:

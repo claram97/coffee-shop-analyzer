@@ -8,10 +8,20 @@ import (
 	"io"
 )
 
-const NewBetsOpCode byte = 0
-const BetsRecvSuccessOpCode byte = 1
-const BetsRecvFailOpCode byte = 2
-const FinishedOpCode byte = 3
+const (
+	OpCodeNewBets         byte = 0
+	BetsRecvSuccessOpCode byte = 1
+	BetsRecvFailOpCode    byte = 2
+	OpCodeFinished        byte = 3
+	OpCodeNewMenuItems     byte = 4
+	OpCodeNewPaymentMethods byte = 5
+	OpCodeNewStores         byte = 6
+	OpCodeNewTransactionItems byte = 7
+	OpCodeNewTransaction     byte = 8
+	OpCodeNewUsers           byte = 9
+	OpCodeNewVouchers        byte = 10
+)
+
 
 // ProtocolError models a framing/validation error while parsing or writing
 // protocol messages. Opcode, when present, indicates the message context.
@@ -44,7 +54,7 @@ type Finished struct {
 	AgencyId int32
 }
 
-func (msg *Finished) GetOpCode() byte  { return FinishedOpCode }
+func (msg *Finished) GetOpCode() byte  { return OpCodeFinished }
 func (msg *Finished) GetLength() int32 { return 4 }
 
 // WriteTo writes the FINISHED frame with little-endian length and agencyId.
@@ -100,43 +110,48 @@ func writeStringMap(buff *bytes.Buffer, body map[string]string) error {
 // and then starts a new batch with this bet, setting *betsCounter = 1.
 // On success, it increments *betsCounter and returns nil; any I/O/encoding
 // error is returned.
-func AddBetWithFlush(bet map[string]string, to *bytes.Buffer, finalOutput io.Writer, betsCounter *int32, batchLimit int32) error {
+func AddRowToBatch(row map[string]string, to *bytes.Buffer, finalOutput io.Writer, counter *int32, batchLimit int32, opCode byte) error {
 	var buff bytes.Buffer
-	if err := writeStringMap(&buff, bet); err != nil {
+	if err := writeStringMap(&buff, row); err != nil {
 		return err
 	}
-	if to.Len()+buff.Len()+1+4+4 <= 8*1024 && *betsCounter+1 <= batchLimit {
+
+	// La lógica de comprobación de límites es la misma
+	if to.Len()+buff.Len()+1+4+4 <= 8*1024 && *counter+1 <= batchLimit {
 		_, err := io.Copy(to, &buff)
 		if err != nil {
 			return err
 		}
-		*betsCounter++
+		*counter++
 		return nil
 	}
-	if err := FlushBatch(to, finalOutput, *betsCounter); err != nil {
+
+	// Llama a la versión genérica de FlushBatch, pasando el opCode
+	if err := FlushBatch(to, finalOutput, *counter, opCode); err != nil {
 		return err
 	}
-	if err := writeStringMap(to, bet); err != nil {
+
+	if err := writeStringMap(to, row); err != nil {
 		return err
 	}
-	*betsCounter = 1
+	*counter = 1
 	return nil
 }
-
 // FlushBatch frames and writes a NewBets message to `out` from the accumulated
 // body in `batch`. The wire format is:
 //
 //	[opcode=NewBets:1][length=i32 LE (4 + bodyLen)][nBets=i32 LE][body]
 //
 // After a successful write it resets the batch buffer. Any write error is returned.
-func FlushBatch(batch *bytes.Buffer, out io.Writer, betsCounter int32) error {
-	if err := binary.Write(out, binary.LittleEndian, NewBetsOpCode); err != nil {
+func FlushBatch(batch *bytes.Buffer, out io.Writer, counter int32, opCode byte) error {
+	// Escribe el OpCode que vino como parámetro en lugar de uno fijo
+	if err := binary.Write(out, binary.LittleEndian, opCode); err != nil {
 		return err
 	}
 	if err := binary.Write(out, binary.LittleEndian, int32(4+batch.Len())); err != nil {
 		return err
 	}
-	if err := binary.Write(out, binary.LittleEndian, betsCounter); err != nil {
+	if err := binary.Write(out, binary.LittleEndian, counter); err != nil {
 		return err
 	}
 	if _, err := io.Copy(out, batch); err != nil {
