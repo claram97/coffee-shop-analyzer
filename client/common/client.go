@@ -177,15 +177,14 @@ type Client struct {
 
 // NewClient constructs a Client with the provided configuration.
 // The TCP connection is not opened here; see createClientSocket / SendBets.
-func NewClient(config ClientConfig, handler TableRowHandler, opCode byte) *Client {
+// Handler and opCode will be set automatically during SendBets based on table types.
+func NewClient(config ClientConfig) *Client {
 	return &Client{
-		config:  config,
-		handler: handler,
-		opCode:  opCode,
+		config: config,
 	}
 }
 
-func (c *Client) ChangeClientTableType(handler TableRowHandler, opCode byte) error {
+func (c *Client) setClientTableType(handler TableRowHandler, opCode byte) error {
 	c.handler = handler
 	c.opCode = opCode
 	return nil
@@ -195,21 +194,21 @@ func (c *Client) ChangeClientTableType(handler TableRowHandler, opCode byte) err
 func (c *Client) setHandlerForTableType(tableType string) error {
 	switch tableType {
 	case "transactions":
-		return c.ChangeClientTableType(TransactionHandler{}, OpCodeNewTransaction)
+		return c.setClientTableType(TransactionHandler{}, OpCodeNewTransaction)
 	case "transaction_items":
-		return c.ChangeClientTableType(TransactionItemHandler{}, OpCodeNewTransactionItems)
+		return c.setClientTableType(TransactionItemHandler{}, OpCodeNewTransactionItems)
 	case "menu_items":
-		return c.ChangeClientTableType(MenuItemHandler{}, OpCodeNewMenuItems)
+		return c.setClientTableType(MenuItemHandler{}, OpCodeNewMenuItems)
 	case "payment_methods":
-		return c.ChangeClientTableType(PaymentMethodHandler{}, OpCodeNewPaymentMethods)
+		return c.setClientTableType(PaymentMethodHandler{}, OpCodeNewPaymentMethods)
 	case "stores":
-		return c.ChangeClientTableType(StoreHandler{}, OpCodeNewStores)
+		return c.setClientTableType(StoreHandler{}, OpCodeNewStores)
 	case "users":
-		return c.ChangeClientTableType(UserHandler{}, OpCodeNewUsers)
+		return c.setClientTableType(UserHandler{}, OpCodeNewUsers)
 	case "vouchers":
-		return c.ChangeClientTableType(VoucherHandler{}, OpCodeNewVouchers)
+		return c.setClientTableType(VoucherHandler{}, OpCodeNewVouchers)
 	case "bets":
-		return c.ChangeClientTableType(BetHandler{}, OpCodeNewBets)
+		return c.setClientTableType(BetHandler{}, OpCodeNewBets)
 	default:
 		return fmt.Errorf("unknown table type: %s", tableType)
 	}
@@ -337,101 +336,6 @@ func (c *Client) createClientSocket() error {
 	)
 	return lastErr
 }
-
-// SendBets is the high-level entry point. It:
-//  1. Opens the CSV and connects to the server.
-//  2. Starts a reader goroutine (readResponse) to consume server replies.
-//  3. Builds and streams batches (buildAndSendBatches) until EOF or cancellation.
-//  4. On success, sends FINISHED.
-//  5. Waits for either context cancellation or the reader goroutine to finish.
-//
-// It guarantees connection closure on exit and uses deadlines to unblock
-// the reader goroutine on cancellation.
-// func (c *Client) SendBets() {
-// 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGTERM)
-// 	defer stop()
-
-// 	file, err := os.Open(c.config.BetsFilePath)
-// 	if err != nil {
-// 		log.Criticalf("action: read_file | result: fail | error: %v", err)
-// 		return
-// 	}
-// 	defer file.Close()
-
-// 	reader := csv.NewReader(file)
-// 	reader.Comma = ','
-// 	// Ignorar encabezado
-// 	if _, err := reader.Read(); err != nil {
-// 		log.Criticalf("action: read_file | result: fail | error: encabezado: %v", err)
-// 		return
-// 	}
-// 	// La validación de campos ahora es dinámica, usando la interfaz.
-// 	reader.FieldsPerRecord = -1 // Allow variable field counts, validate in handler
-
-// 	if err := c.createClientSocket(); err != nil {
-// 		return
-// 	}
-// 	defer c.conn.Close()
-
-// 	writeDone := make(chan error, 1)
-// 	go func() {
-// 		writeDone <- c.buildAndSendBatches(ctx, reader)
-// 	}()
-
-// 	conn := c.conn
-// 	readDone := make(chan struct{})
-// 	readResponse(conn, readDone)
-
-// 	if err = <-writeDone; err != nil && !errors.Is(err, context.Canceled) {
-// 		log.Errorf("action: send_bets | result: fail | error: %v", err)
-// 		return
-// 	}
-
-//		if err == nil {
-//			c.sendFinished()
-//		}
-//		select {
-//		case <-ctx.Done():
-//			_ = c.conn.SetReadDeadline(time.Now().Add(2 * time.Second))
-//			<-readDone
-//			return
-//		case <-readDone:
-//			if tcp, ok := c.conn.(*net.TCPConn); ok {
-//				_ = tcp.CloseWrite()
-//			}
-//		}
-//	}
-
-// func (c *Client) exploreDataDirectory() {
-// 	dataDir := "./data"
-
-// 	entries, err := os.ReadDir(dataDir)
-// 	if err != nil {
-// 		log.Errorf("Error reading directory %s: %v", dataDir, err)
-// 		return
-// 	}
-
-// 	for _, entry := range entries {
-// 		if entry.IsDir() {
-// 			subDirPath := filepath.Join(dataDir, entry.Name())
-// 			tableType := entry.Name()
-// 			log.Infof("Table type: %s", tableType)
-
-// 			files, err := os.ReadDir(subDirPath)
-// 			if err != nil {
-// 				log.Errorf("  ❌ Error reading subdirectory: %v", err)
-// 				continue
-// 			}
-
-// 			for _, file := range files {
-// 				if !file.IsDir() {
-// 					table := file.Name()
-// 					log.Infof("Table %s", table)
-// 				}
-// 			}
-// 		}
-// 	}
-// }
 
 func (c *Client) SendBets() {
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGTERM)

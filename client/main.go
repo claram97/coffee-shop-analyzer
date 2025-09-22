@@ -93,49 +93,6 @@ func main() {
 	// Print program config with debugging purposes
 	PrintConfig(v)
 
-	var handler common.TableRowHandler
-	var opCode byte
-
-	tableType := "users"
-
-	switch tableType {
-	case "bets":
-		handler = common.BetHandler{}
-		opCode = common.OpCodeNewBets
-		log.Infof("Client configured to send BETS")
-	case "menu_items":
-		handler = common.MenuItemHandler{}
-		opCode = common.OpCodeNewMenuItems
-		log.Infof("Client configured to send MENU ITEMS")
-	case "payment_methods":
-		handler = common.PaymentMethodHandler{}
-		opCode = common.OpCodeNewPaymentMethods
-		log.Infof("Client configured to send PAYMENT METHODS")
-	case "stores":
-		handler = common.StoreHandler{}
-		opCode = common.OpCodeNewStores
-		log.Infof("Client configured to send STORES")
-	case "transaction_items":
-		handler = common.TransactionItemHandler{}
-		opCode = common.OpCodeNewTransactionItems
-		log.Infof("Client configured to send TRANSACTION ITEMS")
-	case "transactions":
-		handler = common.TransactionHandler{}
-		opCode = common.OpCodeNewTransaction
-		log.Infof("Client configured to send TRANSACTIONS")
-	case "users":
-		handler = common.UserHandler{}
-		opCode = common.OpCodeNewUsers
-		log.Infof("Client configured to send USERS")
-	case "vouchers":
-		handler = common.VoucherHandler{}
-		opCode = common.OpCodeNewVouchers
-		log.Infof("Client configured to send VOUCHERS")
-	default:
-		log.Criticalf("Invalid table.type configured: '%s'. Valid options are bets, menu_items, payment_methods, stores, transaction_items, transactions, users, vouchers")
-		return
-	}
-
 	clientConfig := common.ClientConfig{
 		ServerAddress: v.GetString("orchestrator.address"),
 		ID:            v.GetString("id"),
@@ -143,7 +100,7 @@ func main() {
 		BatchLimit:    v.GetInt32("batch.maxAmount"),
 	}
 
-	betClient := common.NewClient(clientConfig, handler, opCode)
+	client := common.NewClient(clientConfig)
 
-	betClient.SendBets()
+	client.SendBets()
 }
