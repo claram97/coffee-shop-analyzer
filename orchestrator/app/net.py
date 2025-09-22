@@ -94,7 +94,14 @@ class Orchestrator:
         """Process a decoded message.""" # <-- CORRECCIÓN 2: Docstring simplificado
         if msg.opcode != protocol.Opcodes.FINISHED and msg.opcode != protocol.Opcodes.BETS_RECV_SUCCESS and msg.opcode != protocol.Opcodes.BETS_RECV_FAIL:
             try:
-               pass
+                # Escribir el mensaje recibido a un archivo
+                with open("received_messages.txt", "a", encoding="utf-8") as f:
+                    f.write(f"=== Mensaje recibido - Opcode: {msg.opcode} - Cantidad: {msg.amount} ===\n")
+                    for i, row in enumerate(msg.rows):
+                        f.write(f"Row {i+1}: {row.__dict__}\n")
+                    f.write("\n")
+                
+                pass
             except Exception as e:
                 protocol.BetsRecvFail().write_to(client_sock)
                 logging.error(

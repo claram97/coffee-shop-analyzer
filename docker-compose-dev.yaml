@@ -27,6 +27,7 @@ services:
     volumes:
       - ./client/config.yaml:/config.yaml:ro
       - ./.data/users/users_202506.csv:/bets.csv:ro
+      - ./.data/menu_items/menu_items.csv:/menu_items.csv:ro
 
 networks:
   testing_net:

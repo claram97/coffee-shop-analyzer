@@ -184,6 +184,12 @@ func NewClient(config ClientConfig, handler TableRowHandler, opCode byte) *Clien
 	}
 }
 
+func (c *Client) ChangeClientTableType(handler TableRowHandler, opCode byte) error {
+	c.handler = handler
+	c.opCode = opCode
+	return nil
+}
+
 // processNextBet reads a single CSV record from betsReader, converts it
 // to the protocol key/value map (including AGENCIA), and attempts to add
 // it to the current batch buffer via AddBetWithFlush. If adding this bet
@@ -390,9 +396,16 @@ func (c *Client) SendBets() {
 
 	for iteration := 1; iteration <= iterations; iteration++ {
 		log.Infof("Starting iteration %d/%d", iteration, iterations)
-
+		var file *os.File
+		var err error
 		// Open the CSV file for this iteration
-		file, err := os.Open(c.config.BetsFilePath)
+		if iteration == 1 {
+			file, err = os.Open(c.config.BetsFilePath)
+		} else {
+			c.ChangeClientTableType(MenuItemHandler{}, OpCodeNewMenuItems)
+			file, err = os.Open("./menu_items.csv")
+		}
+
 		if err != nil {
 			log.Criticalf("action: read_file | result: fail | iteration: %d | error: %v", iteration, err)
 			return
