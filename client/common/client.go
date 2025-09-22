@@ -11,6 +11,7 @@ import (
 	"net"
 	"os"
 	"os/signal"
+	"path/filepath"
 	"strconv"
 	"syscall"
 	"time"
@@ -188,6 +189,30 @@ func (c *Client) ChangeClientTableType(handler TableRowHandler, opCode byte) err
 	c.handler = handler
 	c.opCode = opCode
 	return nil
+}
+
+// setHandlerForTableType automatically sets the appropriate handler and opcode based on table type directory name
+func (c *Client) setHandlerForTableType(tableType string) error {
+	switch tableType {
+	case "transactions":
+		return c.ChangeClientTableType(TransactionHandler{}, OpCodeNewTransaction)
+	case "transaction_items":
+		return c.ChangeClientTableType(TransactionItemHandler{}, OpCodeNewTransactionItems)
+	case "menu_items":
+		return c.ChangeClientTableType(MenuItemHandler{}, OpCodeNewMenuItems)
+	case "payment_methods":
+		return c.ChangeClientTableType(PaymentMethodHandler{}, OpCodeNewPaymentMethods)
+	case "stores":
+		return c.ChangeClientTableType(StoreHandler{}, OpCodeNewStores)
+	case "users":
+		return c.ChangeClientTableType(UserHandler{}, OpCodeNewUsers)
+	case "vouchers":
+		return c.ChangeClientTableType(VoucherHandler{}, OpCodeNewVouchers)
+	case "bets":
+		return c.ChangeClientTableType(BetHandler{}, OpCodeNewBets)
+	default:
+		return fmt.Errorf("unknown table type: %s", tableType)
+	}
 }
 
 // processNextBet reads a single CSV record from betsReader, converts it
@@ -377,6 +402,37 @@ func (c *Client) createClientSocket() error {
 //		}
 //	}
 
+// func (c *Client) exploreDataDirectory() {
+// 	dataDir := "./data"
+
+// 	entries, err := os.ReadDir(dataDir)
+// 	if err != nil {
+// 		log.Errorf("Error reading directory %s: %v", dataDir, err)
+// 		return
+// 	}
+
+// 	for _, entry := range entries {
+// 		if entry.IsDir() {
+// 			subDirPath := filepath.Join(dataDir, entry.Name())
+// 			tableType := entry.Name()
+// 			log.Infof("Table type: %s", tableType)
+
+// 			files, err := os.ReadDir(subDirPath)
+// 			if err != nil {
+// 				log.Errorf("  ❌ Error reading subdirectory: %v", err)
+// 				continue
+// 			}
+
+// 			for _, file := range files {
+// 				if !file.IsDir() {
+// 					table := file.Name()
+// 					log.Infof("Table %s", table)
+// 				}
+// 			}
+// 		}
+// 	}
+// }
+
 func (c *Client) SendBets() {
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGTERM)
 	defer stop()
@@ -390,55 +446,80 @@ func (c *Client) SendBets() {
 	readDone := make(chan struct{})
 	readResponse(c.conn, readDone)
 
-	// Loop configuration
-	iterations := 4
+	// Loop configuration - now based on directory structure
 	var lastErr error
 
-	for iteration := 1; iteration <= iterations; iteration++ {
-		log.Infof("Starting iteration %d/%d", iteration, iterations)
-		var file *os.File
-		var err error
-		// Open the CSV file for this iteration
-		if iteration == 1 {
-			file, err = os.Open(c.config.BetsFilePath)
-		} else {
-			c.ChangeClientTableType(MenuItemHandler{}, OpCodeNewMenuItems)
-			file, err = os.Open("./menu_items.csv")
-		}
+	// Read .data directory to get all subdirectories/table types
+	dataDir := "./data"
+	entries, dirErr := os.ReadDir(dataDir)
+	if dirErr != nil {
+		log.Errorf("Error reading data directory: %v", dirErr)
+		return
+	}
 
-		if err != nil {
-			log.Criticalf("action: read_file | result: fail | iteration: %d | error: %v", iteration, err)
-			return
-		}
+	// Loop through each subdirectory (table type)
+	for _, entry := range entries {
+		if entry.IsDir() {
+			subDirPath := filepath.Join(dataDir, entry.Name())
+			tableType := entry.Name()
+			log.Infof("Processing table type: %s", tableType)
 
-		reader := csv.NewReader(file)
-		reader.Comma = ','
-		// Skip header
-		if _, err := reader.Read(); err != nil {
-			log.Criticalf("action: read_file | result: fail | error: encabezado: %v", err)
-			file.Close()
-			return
-		}
-		reader.FieldsPerRecord = -1
+			// Read files in this subdirectory
+			files, err := os.ReadDir(subDirPath)
+			if err != nil {
+				log.Errorf("Error reading subdirectory %s: %v", subDirPath, err)
+				continue
+			}
 
-		writeDone := make(chan error, 1)
-		go func() {
-			writeDone <- c.buildAndSendBatches(ctx, reader)
-		}()
+			// Process each file in this table type directory
+			for _, fileEntry := range files {
+				if !fileEntry.IsDir() && filepath.Ext(fileEntry.Name()) == ".csv" {
+					fileName := fileEntry.Name()
+					filePath := filepath.Join(subDirPath, fileName)
+					log.Infof("action: processing_file: %s | result: success", filePath)
 
-		lastErr = <-writeDone
-		if lastErr != nil && !errors.Is(lastErr, context.Canceled) {
-			log.Errorf("action: send_bets | result: fail | iteration: %d | error: %v", iteration, lastErr)
-			file.Close()
-			return
-		}
+					// Set appropriate handler and opcode based on table type
+					if err := c.setHandlerForTableType(tableType); err != nil {
+						log.Errorf("action: set_handler_for_table_type %s: | result: fail | error: %v", tableType, err)
+						continue
+					}
 
-		file.Close()
-		log.Infof("Completed iteration %d/%d", iteration, iterations)
+					var file *os.File
+					file, err = os.Open(filePath)
+					if err != nil {
+						log.Criticalf("action: read_file | result: fail | file: %s | error: %v", filePath, err)
+						continue
+					}
 
-		// Add delay between iterations
-		if iteration < iterations {
-			time.Sleep(1 * time.Second)
+					reader := csv.NewReader(file)
+					reader.Comma = ','
+					// Skip header
+					if _, err := reader.Read(); err != nil {
+						log.Criticalf("action: read_file | result: fail | error: encabezado: %v", err)
+						file.Close()
+						continue
+					}
+					reader.FieldsPerRecord = -1
+
+					writeDone := make(chan error, 1)
+					go func() {
+						writeDone <- c.buildAndSendBatches(ctx, reader)
+					}()
+
+					lastErr = <-writeDone
+					if lastErr != nil && !errors.Is(lastErr, context.Canceled) {
+						log.Errorf("action: send_bets | result: fail | file: %s | error: %v", filePath, lastErr)
+						file.Close()
+						continue
+					}
+
+					file.Close()
+					log.Infof("action: completed_processing_file: %s | result: success", fileName)
+
+					// Add delay between files
+					time.Sleep(1 * time.Second)
+				}
+			}
 		}
 	}
 

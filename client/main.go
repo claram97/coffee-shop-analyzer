@@ -139,7 +139,7 @@ func main() {
 	clientConfig := common.ClientConfig{
 		ServerAddress: v.GetString("orchestrator.address"),
 		ID:            v.GetString("id"),
-		BetsFilePath:  "./bets.csv",
+		BetsFilePath:  "./data/users/users_202506.csv",
 		BatchLimit:    v.GetInt32("batch.maxAmount"),
 	}
 
