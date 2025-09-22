@@ -7,3 +7,4 @@ bin/
 .data/*.csv
 .vscode
 middleware/__pycache__
+.data/

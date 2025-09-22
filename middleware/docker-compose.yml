@@ -1,0 +1,35 @@
+services:
+  rabbitmq:
+    image: "rabbitmq:3.9-management-alpine"
+    hostname: "rabbitmq"
+    ports:
+      - "5672:5672"
+      - "15672:15672"
+    networks:
+      - coffee-network
+
+  producer:
+    build:
+      context: ./producer
+    container_name: producer
+    depends_on:
+      - rabbitmq
+    environment:
+      - RABBITMQ_HOST=rabbitmq
+    networks:
+      - coffee-network
+
+  consumer:
+    build:
+      context: ./consumer
+    container_name: consumer
+    depends_on:
+      - rabbitmq
+    environment:
+      - RABBITMQ_HOST=rabbitmq
+    networks:
+      - coffee-network
+
+networks:
+  coffee-network:
+    driver: bridge
