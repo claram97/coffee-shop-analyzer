@@ -9,19 +9,18 @@ import (
 )
 
 const (
-	OpCodeNewBets         byte = 0
-	BetsRecvSuccessOpCode byte = 1
-	BetsRecvFailOpCode    byte = 2
-	OpCodeFinished        byte = 3
-	OpCodeNewMenuItems     byte = 4
-	OpCodeNewPaymentMethods byte = 5
-	OpCodeNewStores         byte = 6
+	OpCodeNewBets             byte = 0
+	BetsRecvSuccessOpCode     byte = 1
+	BetsRecvFailOpCode        byte = 2
+	OpCodeFinished            byte = 3
+	OpCodeNewMenuItems        byte = 4
+	OpCodeNewPaymentMethods   byte = 5
+	OpCodeNewStores           byte = 6
 	OpCodeNewTransactionItems byte = 7
-	OpCodeNewTransaction     byte = 8
-	OpCodeNewUsers           byte = 9
-	OpCodeNewVouchers        byte = 10
+	OpCodeNewTransaction      byte = 8
+	OpCodeNewUsers            byte = 9
+	OpCodeNewVouchers         byte = 10
 )
-
 
 // ProtocolError models a framing/validation error while parsing or writing
 // protocol messages. Opcode, when present, indicates the message context.
@@ -137,6 +136,7 @@ func AddRowToBatch(row map[string]string, to *bytes.Buffer, finalOutput io.Write
 	*counter = 1
 	return nil
 }
+
 // FlushBatch frames and writes a NewBets message to `out` from the accumulated
 // body in `batch`. The wire format is:
 //

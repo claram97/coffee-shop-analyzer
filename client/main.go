@@ -96,7 +96,7 @@ func main() {
 	var handler common.TableRowHandler
 	var opCode byte
 
-	tableType := "menu_items"
+	tableType := "vouchers"
 
 	switch tableType {
 	case "bets":
@@ -132,7 +132,7 @@ func main() {
 		opCode = common.OpCodeNewVouchers
 		log.Infof("Client configured to send VOUCHERS")
 	default:
-		log.Criticalf("Invalid table.type configured: '%s'. Valid options are bets, menu_items, payment_methods, stores, transaction_items, transactions, users, vouchers",)
+		log.Criticalf("Invalid table.type configured: '%s'. Valid options are bets, menu_items, payment_methods, stores, transaction_items, transactions, users, vouchers")
 		return
 	}
 
@@ -142,7 +142,6 @@ func main() {
 		BetsFilePath:  "./bets.csv",
 		BatchLimit:    v.GetInt32("batch.maxAmount"),
 	}
-
 
 	betClient := common.NewClient(clientConfig, handler, opCode)
 

@@ -96,10 +96,11 @@ class RawTransaction:
         self.created_at = created_at
 
 class RawUser:
-    def __init__(self, user_id: str, name: str, email: str):
+    def __init__(self, user_id: str, gender: str, birthdate: str, registered_at: str):
         self.user_id = user_id
-        self.name = name
-        self.email = email
+        self.gender = gender
+        self.birthdate = birthdate
+        self.registered_at = registered_at
 
 class RawVoucher:
     def __init__(self, voucher_id: str, voucher_code: str, discount_type: str,
@@ -141,8 +142,13 @@ class TableMessage:
             current_row_data[key] = value
 
         # Verificación de claves genérica
-        if any(key not in current_row_data for key in self.required_keys):
-            raise ProtocolError("Missing required keys in row", self.opcode)
+        missing_keys = [key for key in self.required_keys if key not in current_row_data]
+        if missing_keys:
+            received_keys = list(current_row_data.keys())
+            raise ProtocolError(
+                f"Missing required keys: {missing_keys}. Received keys: {received_keys}. Expected: {list(self.required_keys)}", 
+                self.opcode
+            )
 
         # Mapeo explícito para RawBet
         if self._row_factory == RawBet:
@@ -199,7 +205,7 @@ class NewMenuItems(TableMessage):
 
     def __init__(self):
         required = (
-            "product_id", "name", "price", "category", "is_seasonal", 
+            "product_id", "name", "category", "price", "is_seasonal", 
             "available_from", "available_to"
         )
         super().__init__(
@@ -230,7 +236,7 @@ class NewTransactions(TableMessage):
             "discount_applied", "final_amount", "created_at"
         )
         super().__init__(
-            opcode=Opcodes.NEW_TRANSACTIONS,
+            opcode=Opcodes.NEW_TRANSACTION,
             required_keys=required,
             row_factory=RawTransaction  # Usará RawTransaction(**kwargs) para crear los objetos
         )
@@ -343,15 +349,17 @@ def read_i32(sock: socket.socket, remaining: int, opcode: int) -> tuple[int, int
     return val, remaining
 
 
-def read_string(sock: socket.socket, remaining: int, opcode: int) -> (str, int):
+def read_string(sock: socket.socket, remaining: int, opcode: int) -> tuple[str, int]:
     """Read a protocol [string]: i32 length (validated) + UTF-8 bytes.
 
     Ensures a strictly positive length and sufficient remaining payload.
     Returns the decoded string and the updated `remaining`.
     """
     (key_len, remaining) = read_i32(sock, remaining, opcode)
-    if key_len <= 0:
+    if key_len < 0:
         raise ProtocolError("invalid body", opcode)
+    if key_len == 0:
+        return ("", remaining)  # Handle empty strings
     if remaining < key_len:
         raise ProtocolError("indicated length doesn't match body length", opcode)
     try:

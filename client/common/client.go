@@ -6,6 +6,7 @@ import (
 	"context"
 	"encoding/csv"
 	"errors"
+	"fmt"
 	"io"
 	"net"
 	"os"
@@ -13,6 +14,7 @@ import (
 	"strconv"
 	"syscall"
 	"time"
+
 	"github.com/op/go-logging"
 )
 
@@ -26,23 +28,26 @@ type TableRowHandler interface {
 	GetExpectedFields() int
 }
 
-type MenuItemHandler struct {}
+type MenuItemHandler struct{}
 
 func (m MenuItemHandler) ProcessRecord(record []string) (map[string]string, error) {
+	if len(record) != 7 {
+		return nil, fmt.Errorf("expected 7 fields, got %d: %v", len(record), record)
+	}
 	return map[string]string{
-		"item_id":    record[0],
-		"item_name":  record[1],
-		"category":   record[2],
-		"price":      record[3],
-		"is_seasonal":record[4],
+		"product_id":     record[0], // item_id from CSV
+		"name":           record[1], // item_name from CSV
+		"category":       record[2], // category from CSV
+		"price":          record[3], // price from CSV
+		"is_seasonal":    record[4],
 		"available_from": record[5],
-		"available_to": record[6],
+		"available_to":   record[6],
 	}, nil
 }
 
 func (m MenuItemHandler) GetExpectedFields() int { return 7 }
 
-type PaymentMethodHandler struct {}
+type PaymentMethodHandler struct{}
 
 func (p PaymentMethodHandler) ProcessRecord(record []string) (map[string]string, error) {
 	return map[string]string{
@@ -54,24 +59,24 @@ func (p PaymentMethodHandler) ProcessRecord(record []string) (map[string]string,
 
 func (p PaymentMethodHandler) GetExpectedFields() int { return 3 }
 
-type StoreHandler struct {}
+type StoreHandler struct{}
 
 func (s StoreHandler) ProcessRecord(record []string) (map[string]string, error) {
 	return map[string]string{
-		"store_id":   record[0],
-		"store_name": record[1],
-		"street":     record[2],
-		"postal_code":record[3],
-		"city":       record[4],
-		"state":      record[5],
-		"latitude":   record[6],
-		"longitude":  record[7],
+		"store_id":    record[0],
+		"store_name":  record[1],
+		"street":      record[2],
+		"postal_code": record[3],
+		"city":        record[4],
+		"state":       record[5],
+		"latitude":    record[6],
+		"longitude":   record[7],
 	}, nil
 }
 
 func (s StoreHandler) GetExpectedFields() int { return 8 }
 
-type TransactionItemHandler struct {}
+type TransactionItemHandler struct{}
 
 func (t TransactionItemHandler) ProcessRecord(record []string) (map[string]string, error) {
 	return map[string]string{
@@ -86,47 +91,47 @@ func (t TransactionItemHandler) ProcessRecord(record []string) (map[string]strin
 
 func (t TransactionItemHandler) GetExpectedFields() int { return 6 }
 
-type TransactionHandler struct {}
+type TransactionHandler struct{}
 
 func (t TransactionHandler) ProcessRecord(record []string) (map[string]string, error) {
 	return map[string]string{
-		"transaction_id":   record[0],
-		"store_id":         record[1],
-		"payment_method_id":record[2],
-		"voucher_id":       record[3],
-		"user_id":          record[4],
-		"original_amount":  record[5],
-		"discount_applied": record[6],
-		"final_amount":     record[7],
-		"created_at":       record[8],
+		"transaction_id":    record[0],
+		"store_id":          record[1],
+		"payment_method_id": record[2],
+		"voucher_id":        record[3],
+		"user_id":           record[4],
+		"original_amount":   record[5],
+		"discount_applied":  record[6],
+		"final_amount":      record[7],
+		"created_at":        record[8],
 	}, nil
 }
 
 func (t TransactionHandler) GetExpectedFields() int { return 9 }
 
-type UserHandler struct {}
+type UserHandler struct{}
 
 func (u UserHandler) ProcessRecord(record []string) (map[string]string, error) {
 	return map[string]string{
-		"user_id":      record[0],
-		"gender":       record[1],
-		"birthdate":   record[2],
-		"registered_at":record[3],
+		"user_id":       record[0],
+		"gender":        record[1],
+		"birthdate":     record[2],
+		"registered_at": record[3],
 	}, nil
 }
 
 func (u UserHandler) GetExpectedFields() int { return 4 }
 
-type VoucherHandler struct {}
+type VoucherHandler struct{}
 
 func (v VoucherHandler) ProcessRecord(record []string) (map[string]string, error) {
 	return map[string]string{
-		"voucher_id":    record[0],
-		"voucher_code":  record[1],
-		"discount_type": record[2],
-		"discount_value":record[3],
-		"valid_from":    record[4],
-		"valid_to":      record[5],
+		"voucher_id":     record[0],
+		"voucher_code":   record[1],
+		"discount_type":  record[2],
+		"discount_value": record[3],
+		"valid_from":     record[4],
+		"valid_to":       record[5],
 	}, nil
 }
 
@@ -168,7 +173,6 @@ type Client struct {
 	handler TableRowHandler // <-- Usa la interfaz
 	opCode  byte            // <-- Sabe qué OpCode enviar
 }
-
 
 // NewClient constructs a Client with the provided configuration.
 // The TCP connection is not opened here; see createClientSocket / SendBets.
@@ -243,20 +247,64 @@ func (c *Client) buildAndSendBatches(ctx context.Context, reader *csv.Reader) er
 }
 
 // createClientSocket dials the configured ServerAddress and assigns the
-// resulting connection to c.conn. On failure it logs a critical message
+// resulting connection to c.conn. It implements retry logic: 3 attempts
+// with 2 second intervals between attempts. On failure it logs a critical message
 // and returns the dial error; on success it returns nil.
 func (c *Client) createClientSocket() error {
-	conn, err := net.Dial("tcp", c.config.ServerAddress)
-	if err != nil {
-		log.Criticalf(
-			"action: connect | result: fail | client_id: %v | error: %v",
+	const maxRetries = 3
+	const retryInterval = 2 * time.Second
+
+	var lastErr error
+
+	for attempt := 1; attempt <= maxRetries; attempt++ {
+		log.Infof(
+			"action: connect | attempt: %d/%d | client_id: %v | server: %v",
+			attempt,
+			maxRetries,
 			c.config.ID,
+			c.config.ServerAddress,
+		)
+
+		conn, err := net.Dial("tcp", c.config.ServerAddress)
+		if err == nil {
+			c.conn = conn
+			log.Infof(
+				"action: connect | result: success | client_id: %v | attempt: %d",
+				c.config.ID,
+				attempt,
+			)
+			return nil
+		}
+
+		lastErr = err
+		log.Warningf(
+			"action: connect | result: fail | client_id: %v | attempt: %d/%d | error: %v",
+			c.config.ID,
+			attempt,
+			maxRetries,
 			err,
 		)
-		return err
+
+		// Si no es el último intento, esperar antes del siguiente
+		if attempt < maxRetries {
+			log.Infof(
+				"action: connect_retry | waiting: %v | client_id: %v | next_attempt: %d",
+				retryInterval,
+				c.config.ID,
+				attempt+1,
+			)
+			time.Sleep(retryInterval)
+		}
 	}
-	c.conn = conn
-	return nil
+
+	// Si llegamos aquí, todos los intentos fallaron
+	log.Criticalf(
+		"action: connect | result: fail_all_retries | client_id: %v | attempts: %d | error: %v",
+		c.config.ID,
+		maxRetries,
+		lastErr,
+	)
+	return lastErr
 }
 
 // SendBets is the high-level entry point. It:
@@ -279,16 +327,15 @@ func (c *Client) SendBets() {
 	}
 	defer file.Close()
 
-
-       reader := csv.NewReader(file)
-       reader.Comma = ','
-       // Ignorar encabezado
-       if _, err := reader.Read(); err != nil {
-	       log.Criticalf("action: read_file | result: fail | error: encabezado: %v", err)
-	       return
-       }
-       // La validación de campos ahora es dinámica, usando la interfaz.
-       reader.FieldsPerRecord = c.handler.GetExpectedFields()
+	reader := csv.NewReader(file)
+	reader.Comma = ','
+	// Ignorar encabezado
+	if _, err := reader.Read(); err != nil {
+		log.Criticalf("action: read_file | result: fail | error: encabezado: %v", err)
+		return
+	}
+	// La validación de campos ahora es dinámica, usando la interfaz.
+	reader.FieldsPerRecord = -1 // Allow variable field counts, validate in handler
 
 	if err := c.createClientSocket(); err != nil {
 		return
@@ -327,7 +374,6 @@ func (c *Client) SendBets() {
 // readResponse consumes server responses from conn in a dedicated goroutine.
 // It logs per-message results and terminates when:
 //   - an I/O error occurs (EOF included), or
-//   
 //
 // The function closes readDone when the goroutine exits.
 func readResponse(conn net.Conn, readDone chan struct{}) {

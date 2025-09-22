@@ -82,6 +82,7 @@ class Orchestrator:
                     break
             except protocol.ProtocolError as e:
                 logging.error("action: receive_message | result: protocol error | error: %s", e)
+                break  # Close connection on protocol errors to prevent stream corruption
             except EOFError:
                 break
             except OSError as e:
