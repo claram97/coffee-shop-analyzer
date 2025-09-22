@@ -91,7 +91,7 @@ class Orchestrator:
 
     def __process_msg(self, msg, client_sock) -> bool:
         """Process a decoded message.""" # <-- CORRECCIÓN 2: Docstring simplificado
-        if msg.opcode != protocol.Opcodes.FINISHED:
+        if msg.opcode != protocol.Opcodes.FINISHED and msg.opcode != protocol.Opcodes.BETS_RECV_SUCCESS and msg.opcode != protocol.Opcodes.BETS_RECV_FAIL:
             try:
                pass
             except Exception as e:
