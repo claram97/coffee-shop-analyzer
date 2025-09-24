@@ -3,20 +3,30 @@ from __future__ import annotations
 import copy
 import logging
 from dataclasses import dataclass, field
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, NamedTuple, Optional
 
 # ----------------------------
-# Modelos de datos (mínimos)
+# CopyInfo: historial ordenado de fan-outs anidados
+# ----------------------------
+
+
+class CopyInfo(NamedTuple):
+    index: int  # índice de esta copia en este fan-out
+    total: int  # total de copias generadas en este fan-out
+
+
+# ----------------------------
+# Modelos
 # ----------------------------
 
 
 @dataclass
 class Metadata:
-    queries: list[int]
-    total_filter_steps: int
-    filter_steps_mask: int = 0
-    copy_info: Optional[Dict[int, int]] = None
-    extra: Dict[str, Any] = field(default_factory=dict)
+    table_name: str
+    queries: List[int]  # p.ej. [1, 3, 4]
+    total_filter_steps: int  # cantidad total de steps posibles para ESTA rama
+    filter_steps_mask: int = 0  # bit=1 => step ya aplicado
+    copy_info: List[CopyInfo] = field(default_factory=list)
 
 
 @dataclass
@@ -26,12 +36,12 @@ class DataBatch:
 
 
 # ----------------------------
-# Utilidades de bitmask
+# Bitmask utils
 # ----------------------------
 
 
 def is_bit_set(mask: int, idx: int) -> bool:
-    return (mask >> idx) & 1 == 1
+    return ((mask >> idx) & 1) == 1
 
 
 def set_bit(mask: int, idx: int) -> int:
@@ -39,45 +49,110 @@ def set_bit(mask: int, idx: int) -> int:
 
 
 def first_zero_bit(mask: int, total_bits: int) -> Optional[int]:
-    """Devuelve el índice del primer bit en 0 dentro de [0, total_bits)."""
     for i in range(total_bits):
         if not is_bit_set(mask, i):
             return i
-    return None  # todos aplicados
+    return None
 
 
 # ----------------------------
-# Interfaces de IO (abstracciones)
+# IO
 # ----------------------------
 
 
 class BusProducer:
-    def send_to_filters_pool(self, batch: DataBatch) -> None:
-        # TODO: Publicar en un tópico/cola compartida por los workers de filtros.
+    def send_to_filters_pool(self, batch: DataBatch, step: int) -> None:
+        """Publicar en la cola/tópico de filtros; incluir 'step' en headers."""
         raise NotImplementedError
 
     def send_to_aggregator(self, batch: DataBatch) -> None:
-        # TODO: Publicar en el tópico/cola del agregador.
+        """Publicar en la cola/tópico del agregador."""
+        raise NotImplementedError
+
+    def requeue_to_router(self, batch: DataBatch) -> None:
+        """Volver a publicar en la cola del router (evita recursión)."""
         raise NotImplementedError
 
 
 # ----------------------------
-# Políticas por query (solo cantidad de steps y duplicación)
+# La policy es la tuya (ya implementada)
 # ----------------------------
 
 
 class QueryPolicyResolver:
-    def steps_remaining(self, queries: list[int], steps_mask: int) -> bool:
-        # TODO: De acuerdo a las queries y al steps_mask, devuelve True si faltan steps de filtrado
-        #      o False si ya se completó el filtrado
-        raise NotImplementedError
+    def steps_remaining(
+        self, batch_table_name: str, batch_queries: list[int], steps_done: int
+    ) -> bool:
+        if batch_table_name == "transactions":
+            if len(batch_queries) == 3:
+                if steps_done == 0:
+                    return True
+                return False
+            if len(batch_queries) == 1 and batch_queries[0] == 4:
+                return False
+            if len(batch_queries) == 2:
+                if steps_done == 1:
+                    return True
+                return False
+            if len(batch_queries) == 1 and batch_queries[0] == 3:
+                return False
+            if len(batch_queries) == 1 and batch_queries[0] == 1:
+                if steps_done == 2:
+                    return True
+                return False
 
+        if batch_table_name == "users":
+            if steps_done == 0:
+                return True
+            return False
+
+        if batch_table_name == "transaction_items":
+            if steps_done == 0:
+                return True
+            return False
+
+        return False
+
+    # Transactions:
+    # 1. Enviar a filter
+    # 2. Duplicar batch -> c1, c2
+    # 3. Dejar q4 en queries de c1
+    # 4. Enviar c1 a aggregator
+    # 5. Dejar q1 y q3 en queries de c2
+    # 6. Enviar c2 a Filter
+    # 7. Duplicar c2 -> c21, c22
+    # 8. Dejar q3 en c21
+    # 9. Enviar c21 a aggregator
+    # 10. Dejar q1 en c22
+    # 10. Enviar c22 a filter
+    # 11. Enviar c22 a aggregator
+
+    # Users:
+    # 1. Enviar a filter
+    # 2. Enviar a aggregator
+
+    # Transaction_items:
+    # 1. Enviar a filter
+    # 2. Enviar a aggregator
     def get_duplication_count(
-        self, queries: list[int], next_step_index: int, batch: DataBatch
+        self,
+        batch_queries: list[int],
     ) -> int:
-        # TODO: Política de duplicación *genérica* por query y/o por estado.
-        #       Retornar 1 si no hay duplicación; N>1 si hay que duplicar N veces.
-        return 1
+        if len(batch_queries) > 1:
+            return 2
+
+    def get_new_batch_queries(
+        self, batch_table_name: str, batch_queries: list[int], copy_number: int
+    ) -> list[int]:
+        if batch_table_name == "transactions":
+            if len(batch_queries) == 3:
+                if copy_number == 1:
+                    return [4]
+                return [1, 3]
+            if len(batch_queries) == 2:
+                if copy_number == 1:
+                    return [3]
+                return [1]
 
 
 # ----------------------------
@@ -87,53 +162,63 @@ class QueryPolicyResolver:
 
 class FilterRouter:
     def __init__(self, producer: BusProducer, policy: QueryPolicyResolver):
-        self._producer = producer
-        self._policy = policy
+        self._p = producer
+        self._pol = policy
         self._log = logging.getLogger("filter-router")
 
     def process_batch(self, batch: DataBatch) -> None:
-        meta = batch.metadata
+        m = batch.metadata
 
-        if meta.total_filter_steps is None:
-            meta.total_filter_steps = self._policy.get_total_steps(meta.query_id)
+        # 1) Calcular próximo step pendiente
+        next_step = first_zero_bit(m.filter_steps_mask, m.total_filter_steps)
 
-        # 1) ¿Quedan steps? (sin conocer cuáles)
-        next_step = first_zero_bit(meta.filter_steps_mask, meta.total_filter_steps)
-        if self._policy.steps_remaining(meta.queries, meta.filter_steps_mask):
-            # 2) Terminó el pipeline de filtros → al agregador
-            self._log.debug("All steps done. → aggregator (query=%s)", meta.query_id)
-            self._producer.send_to_aggregator(batch)
-            return
-
-        # 3) Marcar el próximo step (bit) ANTES de enviar a filtros
-        meta.filter_steps_mask = set_bit(meta.filter_steps_mask, next_step)
-
-        # 4) ¿Duplicamos? (sin semántica de step; solo cantidad)
-        copies = max(
-            1, int(self._policy.get_duplication_count(meta.query_id, next_step, batch))
-        )
-
-        if copies == 1:
+        # 2) Si la policy dice que aún quedan steps → marcar y enviar a filtros
+        if next_step is not None and self._pol.steps_remaining(
+            m.table_name, m.queries, steps_done=next_step
+        ):
+            # “Antes de mandar el batch a filtrar, pone en 1 el primer bit…”
+            m.filter_steps_mask = set_bit(m.filter_steps_mask, next_step)
             self._log.debug(
-                "→ filters_pool step=%d (no duplication) query=%s",
+                "→ filters step=%d table=%s queries=%s mask=%s",
                 next_step,
-                meta.query_id,
+                m.table_name,
+                m.queries,
+                bin(m.filter_steps_mask),
             )
-            self._producer.send_to_filters_pool(next_step, batch)
+            self._p.send_to_filters_pool(batch, step=next_step)
             return
 
-        # 5) Duplicación genérica: copiar batch y anotar copy_info
+        # 3) No quedan steps (o la policy indica que no corresponde filtrar ahora):
+        #    decidir duplicación.
+        dup_count = self._pol.get_duplication_count(m.queries)
+        dup_count = int(dup_count) if dup_count is not None else 1
+
+        if dup_count <= 1:
+            # 4) Sin fan-out → al agregador
+            self._log.debug(
+                "Steps done / no-dup. → aggregator table=%s queries=%s",
+                m.table_name,
+                m.queries,
+            )
+            self._p.send_to_aggregator(batch)
+            return
+
+        # 5) Fan-out: crear N copias. Cada copia ajusta queries.
         self._log.debug(
-            "Duplicating into %d copies. step=%d query=%s",
-            copies,
-            next_step,
-            meta.query_id,
+            "Fan-out x%d table=%s queries=%s", dup_count, m.table_name, m.queries
         )
 
-        for i in range(copies):
-            # TODO (performance): si payload es grande e inmutable, reemplazar deepcopy
-            # por un esquema zero-copy (payload compartido; clonar solo metadata).
+        for i in range(dup_count):
+            new_queries = self._pol.get_new_batch_queries(
+                m.table_name, m.queries, copy_number=i
+            )
+            if not new_queries:
+                # Defensa: si la policy devolviera vacío, degradamos a “misma rama”
+                new_queries = list(m.queries)
+
             b = copy.deepcopy(batch)
-            b.metadata.copy_info = {"total": copies, "index": i}
-            # Nota: no cambiamos next_step_index; la semántica la resuelve el worker.
-            self._producer.send_to_filters_pool(next_step, b)
+            b.metadata.copy_info = m.copy_info + [CopyInfo(index=i, total=dup_count)]
+            b.metadata.queries = new_queries
+
+            # Reencolar la copia para que vuelva a pasar por la misma FSM del router
+            self._p.requeue_to_router(b)
