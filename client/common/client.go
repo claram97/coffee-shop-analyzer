@@ -21,6 +21,30 @@ import (
 
 var log = logging.MustGetLogger("log")
 
+// isConnectionError checks if the error indicates a broken/lost connection
+func isConnectionError(err error) bool {
+	if err == nil {
+		return false
+	}
+
+	// Check for standard Go network/IO errors
+	if errors.Is(err, net.ErrClosed) ||
+		errors.Is(err, io.ErrClosedPipe) ||
+		errors.Is(err, io.ErrUnexpectedEOF) {
+		return true
+	}
+
+	// Check for network operation errors (connection refused, host unreachable, etc.)
+	var netErr *net.OpError
+	if errors.As(err, &netErr) {
+		return true
+	}
+
+	// Check for syscall errors (EPIPE, ECONNRESET, etc.)
+	var syscallErr *os.SyscallError
+	return errors.As(err, &syscallErr)
+}
+
 // --- NUEVO: Interfaz para manejar cualquier tipo de fila de tabla ---
 type TableRowHandler interface {
 	// ProcessRecord convierte una línea de CSV en el mapa clave-valor del protocolo.
@@ -314,6 +338,15 @@ func (c *Client) createClientSocket() error {
 	return lastErr
 }
 
+// closeConnection safely closes the client connection and performs cleanup
+func (c *Client) closeConnection() {
+	if c.conn != nil {
+		log.Infof("action: close_connection | client_id: %v", c.config.ID)
+		c.conn.Close()
+		c.conn = nil
+	}
+}
+
 func (c *Client) SendBets() {
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGTERM)
 	defer stop()
@@ -343,7 +376,7 @@ func (c *Client) SendBets() {
 		if entry.IsDir() {
 			subDirPath := filepath.Join(dataDir, entry.Name())
 			tableType := entry.Name()
-			log.Infof("Processing table type: %s", tableType)
+			log.Infof("action: processing_table_type | table_type: %s | client_id: %v", tableType, c.config.ID)
 
 			// Read files in this subdirectory
 			files, err := os.ReadDir(subDirPath)
@@ -392,6 +425,13 @@ func (c *Client) SendBets() {
 					if lastErr != nil && !errors.Is(lastErr, context.Canceled) {
 						log.Errorf("action: send_bets | result: fail | file: %s | error: %v", filePath, lastErr)
 						file.Close()
+
+						// Si es un error de conexión, terminar el programa completamente
+						if isConnectionError(lastErr) {
+							log.Criticalf("action: connection_lost | result: terminating | error: %v", lastErr)
+							c.closeConnection()
+							return // Salir de SendBets completamente
+						}
 						continue
 					}
 
@@ -434,7 +474,11 @@ func readResponse(conn net.Conn, readDone chan struct{}) {
 		for {
 			msg, err := ReadMessage(reader)
 			if err != nil {
-				if !errors.Is(err, io.EOF) {
+				if errors.Is(err, io.EOF) {
+					log.Infof("action: leer_respuesta | result: server_closed_connection")
+				} else if isConnectionError(err) {
+					log.Criticalf("action: leer_respuesta | result: connection_lost | err: %v", err)
+				} else {
 					log.Errorf("action: leer_respuesta | result: fail | err: %v", err)
 				}
 				break
