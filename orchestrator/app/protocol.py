@@ -803,10 +803,22 @@ def create_filtered_data_batch(original_msg) -> DataBatch:
         Opcodes.NEW_USERS: filter_users_columns,
     }
     
+    # Mapeo de opcodes a query IDs específicos para cada tabla
+    query_mappings = {
+        Opcodes.NEW_TRANSACTION: [1, 3, 4],       # Transaction: query 1, query 3, query 4
+        Opcodes.NEW_TRANSACTION_ITEMS: [2],        # TransactionItem: query 2
+        Opcodes.NEW_MENU_ITEMS: [2],               # MenuItem: query 2
+        Opcodes.NEW_STORES: [3],                   # Store: query 3
+        Opcodes.NEW_USERS: [4],                    # User: query 4
+    }
+    
     # Obtener función de filtrado
     filter_func = filter_functions.get(original_msg.opcode)
     if filter_func is None:
         raise ValueError(f"No filter function defined for opcode {original_msg.opcode}")
+    
+    # Obtener query IDs para esta tabla
+    query_ids = query_mappings.get(original_msg.opcode, [1])  # Default a [1] si no se encuentra
     
     # Aplicar filtro
     filtered_rows = filter_func(original_msg.rows)
@@ -824,7 +836,7 @@ def create_filtered_data_batch(original_msg) -> DataBatch:
     # Crear DataBatch wrapper
     wrapper = DataBatch(
         table_ids=[1],  # Por ahora usamos 1 como table_id genérico
-        query_ids=[1],  # Por ahora "q1" para todos como mencionaste
+        query_ids=query_ids,  # Queries específicas según la tabla
         meta={},
         total_shards=None,
         shard_num=None
