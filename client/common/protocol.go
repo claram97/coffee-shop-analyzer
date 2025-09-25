@@ -22,6 +22,13 @@ const (
 	OpCodeNewVouchers         byte = 10
 )
 
+// BatchStatus defines the status of a batch being sent
+const (
+	BatchContinue byte = 0 // Hay más batches en el archivo
+	BatchEOF      byte = 1 // Último batch del archivo
+	BatchCancel   byte = 2 // Batch enviado por cancelación
+)
+
 // ProtocolError models a framing/validation error while parsing or writing
 // protocol messages. Opcode, when present, indicates the message context.
 type ProtocolError struct {
@@ -128,7 +135,7 @@ func AddRowToBatch(row map[string]string, to *bytes.Buffer, finalOutput io.Write
 
 	// No cabe en el batch actual, hacer flush del batch completo
 	*batchNumber++ // Incrementar el número de batch antes de enviarlo
-	if err := FlushBatch(to, finalOutput, *counter, opCode, *batchNumber); err != nil {
+	if err := FlushBatch(to, finalOutput, *counter, opCode, *batchNumber, BatchContinue); err != nil {
 		return err
 	}
 
@@ -143,17 +150,17 @@ func AddRowToBatch(row map[string]string, to *bytes.Buffer, finalOutput io.Write
 // FlushBatch frames and writes a message to `out` from the accumulated
 // body in `batch`. The wire format is:
 //
-//	[opcode:1][length=i32 LE (4 + 8 + bodyLen)][nLines=i32 LE][batchNumber=i64 LE][body]
+//	[opcode:1][length=i32 LE (4 + 8 + 1 + bodyLen)][nLines=i32 LE][batchNumber=i64 LE][status=u8][body]
 //
 // After a successful write it resets the batch buffer. Any write error is returned.
-func FlushBatch(batch *bytes.Buffer, out io.Writer, counter int32, opCode byte, batchNumber int64) error {
+func FlushBatch(batch *bytes.Buffer, out io.Writer, counter int32, opCode byte, batchNumber int64, batchStatus byte) error {
 	// [opcode:1]
 	if err := binary.Write(out, binary.LittleEndian, opCode); err != nil {
 		return err
 	}
 
-	// [length:i32] - Ahora incluye 4 (nLines) + 8 (batchNumber) + bodyLen
-	if err := binary.Write(out, binary.LittleEndian, int32(4+8+batch.Len())); err != nil {
+	// [length:i32] - Ahora incluye 4 (nLines) + 8 (batchNumber) + 1 (status) + bodyLen
+	if err := binary.Write(out, binary.LittleEndian, int32(4+8+1+batch.Len())); err != nil {
 		return err
 	}
 
@@ -162,8 +169,13 @@ func FlushBatch(batch *bytes.Buffer, out io.Writer, counter int32, opCode byte, 
 		return err
 	}
 
-	// [batchNumber:i64] ← NUEVO CAMPO
+	// [batchNumber:i64]
 	if err := binary.Write(out, binary.LittleEndian, batchNumber); err != nil {
+		return err
+	}
+
+	// [status:u8] ← NUEVO CAMPO - BatchStatus (Continue/EOF/Cancel)
+	if err := binary.Write(out, binary.LittleEndian, batchStatus); err != nil {
 		return err
 	}
 

@@ -29,6 +29,13 @@ class Opcodes:
     DATA_BATCH = 11
 
 
+class BatchStatus:
+    """Status values for batch messages."""
+    CONTINUE = 0  # Hay más batches en el archivo
+    EOF = 1       # Último batch del archivo
+    CANCEL = 2    # Batch enviado por cancelación
+
+
 class RawBet:
     """Transport-level bet structure read from the wire (not the domain model)."""
 
@@ -176,7 +183,8 @@ class TableMessage:
         self.required_keys = required_keys
         self.rows = []  # Almacenará los objetos creados (e.g., RawBet, RawProduct)
         self.amount = 0
-        self.batch_number = 0  # NUEVO: número de batch del cliente
+        self.batch_number = 0  # Número de batch del cliente
+        self.batch_status = 0  # NUEVO: Status del batch (Continue/EOF/Cancel)
         # `row_factory` es una función o clase que convierte un dict en un objeto
         self._row_factory = row_factory
 
@@ -230,7 +238,7 @@ class TableMessage:
         """Parsea el cuerpo completo del mensaje de la tabla.
         
         Formato del mensaje del cliente:
-        [length:i32][nRows:i32][batchNumber:i64][rows...]
+        [length:i32][nRows:i32][batchNumber:i64][status:u8][rows...]
         """
         remaining = length
         try:
@@ -238,9 +246,13 @@ class TableMessage:
             (n_rows, remaining) = read_i32(sock, remaining, self.opcode)
             self.amount = n_rows
             
-            # NUEVO: Leer número de batch
+            # Leer número de batch
             (batch_number, remaining) = read_i64(sock, remaining, self.opcode)
             self.batch_number = batch_number
+            
+            # NUEVO: Leer status del batch
+            (batch_status, remaining) = _read_u8_with_remaining(sock, remaining, self.opcode)
+            self.batch_status = batch_status
             
             # Leer todas las filas
             for _ in range(n_rows):

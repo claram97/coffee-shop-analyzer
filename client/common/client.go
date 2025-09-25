@@ -259,7 +259,7 @@ func (c *Client) buildAndSendBatches(ctx context.Context, reader *csv.Reader, ba
 			// Si hay datos pendientes en el buffer, enviarlos antes de terminar
 			if counter > 0 {
 				currentBatchNumber++ // Incrementar solo cuando realmente enviamos un batch
-				if err := FlushBatch(&batchBuff, c.conn, counter, c.opCode, currentBatchNumber); err != nil {
+				if err := FlushBatch(&batchBuff, c.conn, counter, c.opCode, currentBatchNumber, BatchCancel); err != nil {
 					return err
 				}
 				counter = 0
@@ -276,7 +276,7 @@ func (c *Client) buildAndSendBatches(ctx context.Context, reader *csv.Reader, ba
 				// Enviar cualquier batch parcial que quede en el buffer
 				if counter > 0 {
 					currentBatchNumber++ // Incrementar solo cuando realmente enviamos un batch
-					if err := FlushBatch(&batchBuff, c.conn, counter, c.opCode, currentBatchNumber); err != nil {
+					if err := FlushBatch(&batchBuff, c.conn, counter, c.opCode, currentBatchNumber, BatchEOF); err != nil {
 						return err
 					}
 				}

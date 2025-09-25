@@ -94,9 +94,12 @@ class Orchestrator:
         """Process a decoded message.""" # <-- CORRECCIÓN 2: Docstring simplificado
         if msg.opcode != protocol.Opcodes.FINISHED and msg.opcode != protocol.Opcodes.BETS_RECV_SUCCESS and msg.opcode != protocol.Opcodes.BETS_RECV_FAIL:
             try:
-                # Escribir el mensaje recibido a un archivo (incluyendo batch_number)
+                # Escribir el mensaje recibido a un archivo (incluyendo batch_number y status)
+                status_names = {0: "Continue", 1: "EOF", 2: "Cancel"}
+                status_text = status_names.get(msg.batch_status, f"Unknown({msg.batch_status})")
+                
                 with open("received_messages.txt", "a", encoding="utf-8") as f:
-                    f.write(f"=== Mensaje recibido - Opcode: {msg.opcode} - Cantidad: {msg.amount} - Batch: {msg.batch_number} ===\n")
+                    f.write(f"=== Mensaje recibido - Opcode: {msg.opcode} - Cantidad: {msg.amount} - Batch: {msg.batch_number} - Status: {status_text} ===\n")
                     for i, row in enumerate(msg.rows):
                         f.write(f"Row {i+1}: {row.__dict__}\n")
                     f.write("\n")
@@ -110,10 +113,14 @@ class Orchestrator:
                 )
                 return True
             
-            # Log mejorado con batch_number
+            # Mapear el status a texto legible
+            status_names = {0: "Continue", 1: "EOF", 2: "Cancel"}
+            status_text = status_names.get(msg.batch_status, f"Unknown({msg.batch_status})")
+            
+            # Log mejorado con batch_number y status
             logging.info(
-                "action: batch_recibido | result: success | opcode: %d | cantidad: %d | batch_number: %d",
-                msg.opcode, msg.amount, msg.batch_number
+                "action: batch_recibido | result: success | opcode: %d | cantidad: %d | batch_number: %d | status: %s",
+                msg.opcode, msg.amount, msg.batch_number, status_text
             )
             
             # Log adicional con preview de datos
@@ -127,8 +134,8 @@ class Orchestrator:
                     sample_data = [row.__dict__ for row in sample_rows]
                     
                     logging.debug(
-                        "action: batch_preview | batch_number: %d | opcode: %d | keys: %s | sample_count: %d | sample: %s",
-                        msg.batch_number, msg.opcode, sorted(list(all_keys)), len(sample_rows), sample_data
+                        "action: batch_preview | batch_number: %d | status: %s | opcode: %d | keys: %s | sample_count: %d | sample: %s",
+                        msg.batch_number, status_text, msg.opcode, sorted(list(all_keys)), len(sample_rows), sample_data
                     )
             except Exception:
                 logging.debug("action: batch_preview | batch_number: %d | result: skip", getattr(msg, 'batch_number', 0))
