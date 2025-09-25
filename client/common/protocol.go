@@ -9,7 +9,6 @@ import (
 )
 
 const (
-	OpCodeNewBets             byte = 0
 	BetsRecvSuccessOpCode     byte = 1
 	BetsRecvFailOpCode        byte = 2
 	OpCodeFinished            byte = 3
@@ -19,7 +18,6 @@ const (
 	OpCodeNewTransactionItems byte = 7
 	OpCodeNewTransaction      byte = 8
 	OpCodeNewUsers            byte = 9
-	OpCodeNewVouchers         byte = 10
 )
 
 // BatchStatus defines the status of a batch being sent

@@ -99,16 +99,15 @@ func (t TransactionHandler) ProcessRecord(record []string) (map[string]string, e
 		"transaction_id":    record[0],
 		"store_id":          record[1],
 		"payment_method_id": record[2],
-		"voucher_id":        record[3],
-		"user_id":           record[4],
-		"original_amount":   record[5],
-		"discount_applied":  record[6],
-		"final_amount":      record[7],
-		"created_at":        record[8],
+		"user_id":           record[3],
+		"original_amount":   record[4],
+		"discount_applied":  record[5],
+		"final_amount":      record[6],
+		"created_at":        record[7],
 	}, nil
 }
 
-func (t TransactionHandler) GetExpectedFields() int { return 9 }
+func (t TransactionHandler) GetExpectedFields() int { return 8 }
 
 type UserHandler struct{}
 
@@ -122,37 +121,6 @@ func (u UserHandler) ProcessRecord(record []string) (map[string]string, error) {
 }
 
 func (u UserHandler) GetExpectedFields() int { return 4 }
-
-type VoucherHandler struct{}
-
-func (v VoucherHandler) ProcessRecord(record []string) (map[string]string, error) {
-	return map[string]string{
-		"voucher_id":     record[0],
-		"voucher_code":   record[1],
-		"discount_type":  record[2],
-		"discount_value": record[3],
-		"valid_from":     record[4],
-		"valid_to":       record[5],
-	}, nil
-}
-
-func (v VoucherHandler) GetExpectedFields() int { return 6 }
-
-// --- NUEVO: Implementación específica para Apuestas ---
-type BetHandler struct{}
-
-func (b BetHandler) ProcessRecord(record []string) (map[string]string, error) {
-	// Esta es la misma lógica que antes estaba en processNextBet
-	return map[string]string{
-		"NOMBRE":     record[0],
-		"APELLIDO":   record[1],
-		"DOCUMENTO":  record[2],
-		"NACIMIENTO": record[3],
-		"NUMERO":     record[4],
-	}, nil
-}
-
-func (b BetHandler) GetExpectedFields() int { return 5 }
 
 // ClientConfig holds the runtime configuration for a client instance.
 // - ID: agency identifier as a string.
@@ -205,10 +173,6 @@ func (c *Client) setHandlerForTableType(tableType string) error {
 		return c.setClientTableType(StoreHandler{}, OpCodeNewStores)
 	case "users":
 		return c.setClientTableType(UserHandler{}, OpCodeNewUsers)
-	case "vouchers":
-		return c.setClientTableType(VoucherHandler{}, OpCodeNewVouchers)
-	case "bets":
-		return c.setClientTableType(BetHandler{}, OpCodeNewBets)
 	default:
 		return fmt.Errorf("unknown table type: %s", tableType)
 	}
@@ -240,7 +204,7 @@ func (c *Client) processNextRow(reader *csv.Reader, batchBuff *bytes.Buffer, cou
 	return nil
 }
 
-// buildAndSendBatches streams the CSV, incrementally building NewBets
+// buildAndSendBatches streams the CSV, incrementally building table data
 // bodies into batchBuff and flushing to c.conn as limits are reached.
 // On context cancellation, it flushes any partial batch and returns the
 // context error. On clean EOF, it flushes a final partial batch (if any)

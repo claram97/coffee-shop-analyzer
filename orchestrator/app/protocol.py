@@ -15,7 +15,6 @@ class ProtocolError(Exception):
 
 
 class Opcodes:
-    NEW_BETS = 0
     BETS_RECV_SUCCESS = 1
     BETS_RECV_FAIL = 2
     FINISHED = 3
@@ -25,7 +24,6 @@ class Opcodes:
     NEW_TRANSACTION_ITEMS = 7
     NEW_TRANSACTION = 8
     NEW_USERS = 9
-    NEW_VOUCHERS = 10
     DATA_BATCH = 11
 
 
@@ -34,24 +32,6 @@ class BatchStatus:
     CONTINUE = 0  # Hay más batches en el archivo
     EOF = 1       # Último batch del archivo
     CANCEL = 2    # Batch enviado por cancelación
-
-
-class RawBet:
-    """Transport-level bet structure read from the wire (not the domain model)."""
-
-    def __init__(
-        self,
-        first_name: str,
-        last_name: str,
-        document: str,
-        birthdate: str,
-        number: str,
-    ):
-        self.first_name = first_name
-        self.last_name = last_name
-        self.document = document
-        self.birthdate = birthdate
-        self.number = number
 
 
 class RawMenuItems:
@@ -127,7 +107,6 @@ class RawTransaction:
         transaction_id: str,
         store_id: str,
         payment_method_id: str,
-        voucher_id: str,
         user_id: str,
         original_amount: str,
         discount_applied: str,
@@ -137,7 +116,6 @@ class RawTransaction:
         self.transaction_id = transaction_id
         self.store_id = store_id
         self.payment_method_id = payment_method_id
-        self.voucher_id = voucher_id
         self.user_id = user_id
         self.original_amount = original_amount
         self.discount_applied = discount_applied
@@ -153,24 +131,6 @@ class RawUser:
         self.registered_at = registered_at
 
 
-class RawVoucher:
-    def __init__(
-        self,
-        voucher_id: str,
-        voucher_code: str,
-        discount_type: str,
-        discount_value: str,
-        valid_from: str,
-        valid_to: str,
-    ):
-        self.voucher_id = voucher_id
-        self.voucher_code = voucher_code
-        self.discount_type = discount_type
-        self.discount_value = discount_value
-        self.valid_from = valid_from
-        self.valid_to = valid_to
-
-
 class TableMessage:
     """
     Clase base genérica para leer un mensaje que contiene una tabla de datos.
@@ -181,7 +141,7 @@ class TableMessage:
     def __init__(self, opcode: int, required_keys: tuple[str, ...], row_factory):
         self.opcode = opcode
         self.required_keys = required_keys
-        self.rows = []  # Almacenará los objetos creados (e.g., RawBet, RawProduct)
+        self.rows = []  # Almacenará los objetos creados (e.g., RawMenuItems, RawStore)
         self.amount = 0
         self.batch_number = 0  # Número de batch del cliente
         self.batch_status = 0  # NUEVO: Status del batch (Continue/EOF/Cancel)
@@ -215,23 +175,9 @@ class TableMessage:
                 self.opcode,
             )
 
-        # Mapeo explícito para RawBet
-        if self._row_factory == RawBet:
-            mapping = {
-                "NOMBRE": "first_name",
-                "APELLIDO": "last_name",
-                "DOCUMENTO": "document",
-                "NACIMIENTO": "birthdate",
-                "NUMERO": "number",
-            }
-            kwargs = {
-                mapping[k]: v for k, v in current_row_data.items() if k in mapping
-            }
-            self.rows.append(self._row_factory(**kwargs))
-        else:
-            # Por defecto: claves a minúsculas
-            kwargs = {key.lower(): value for key, value in current_row_data.items()}
-            self.rows.append(self._row_factory(**kwargs))
+        # Por defecto: claves a minúsculas
+        kwargs = {key.lower(): value for key, value in current_row_data.items()}
+        self.rows.append(self._row_factory(**kwargs))
         return remaining
 
     def read_from(self, sock: socket.socket, length: int):
@@ -269,20 +215,6 @@ class TableMessage:
 
 
 # --- CLASES DE MENSAJES ESPECÍFICOS (Ahora mucho más simples) ---
-
-
-class NewBets(TableMessage):
-    """Mensaje NEW_BETS que ahora hereda de TableMessage."""
-
-    def __init__(self):
-        # Solo necesitamos definir la configuración específica de las apuestas
-        required = ("NOMBRE", "APELLIDO", "DOCUMENTO", "NACIMIENTO", "NUMERO")
-        # Le pasamos a la clase base el opcode, las claves y la clase que debe usar para crear cada fila
-        super().__init__(
-            opcode=Opcodes.NEW_BETS,
-            required_keys=required,
-            row_factory=RawBet,  # Usará RawBet(**kwargs) para crear los objetos
-        )
 
 
 class NewMenuItems(TableMessage):
@@ -332,7 +264,6 @@ class NewTransactions(TableMessage):
             "transaction_id",
             "store_id",
             "payment_method_id",
-            "voucher_id",
             "user_id",
             "original_amount",
             "discount_applied",
@@ -355,25 +286,6 @@ class NewUsers(TableMessage):
             opcode=Opcodes.NEW_USERS,
             required_keys=required,
             row_factory=RawUser,  # Usará RawUser(**kwargs) para crear los objetos
-        )
-
-
-class NewVouchers(TableMessage):
-    """Mensaje NEW_VOUCHERS que ahora hereda de TableMessage."""
-
-    def __init__(self):
-        required = (
-            "voucher_id",
-            "voucher_code",
-            "discount_type",
-            "discount_value",
-            "valid_from",
-            "valid_to",
-        )
-        super().__init__(
-            opcode=Opcodes.NEW_VOUCHERS,
-            required_keys=required,
-            row_factory=RawVoucher,  # Usará RawVoucher(**kwargs) para crear los objetos
         )
 
 
@@ -515,9 +427,7 @@ def recv_msg(sock: socket.socket):
         raise ProtocolError("invalid length")
 
     msg = None
-    if opcode == Opcodes.NEW_BETS:
-        msg = NewBets()
-    elif opcode == Opcodes.FINISHED:
+    if opcode == Opcodes.FINISHED:
         msg = Finished()
     elif opcode == Opcodes.NEW_MENU_ITEMS:
         msg = NewMenuItems()
@@ -531,8 +441,6 @@ def recv_msg(sock: socket.socket):
         msg = NewTransactions()
     elif opcode == Opcodes.NEW_USERS:
         msg = NewUsers()
-    elif opcode == Opcodes.NEW_VOUCHERS:
-        msg = NewVouchers()
     elif opcode == Opcodes.DATA_BATCH:
         msg = DataBatch()
     else:
@@ -635,9 +543,7 @@ def _read_u8_u8_dict(
 
 def _instantiate_message_for_opcode(opcode: int):
     """Crea una instancia del mensaje adecuado para el opcode dado (inner)."""
-    if opcode == Opcodes.NEW_BETS:
-        return NewBets()
-    elif opcode == Opcodes.FINISHED:
+    if opcode == Opcodes.FINISHED:
         return Finished()
     elif opcode == Opcodes.NEW_MENU_ITEMS:
         return NewMenuItems()
@@ -651,8 +557,6 @@ def _instantiate_message_for_opcode(opcode: int):
         return NewTransactions()
     elif opcode == Opcodes.NEW_USERS:
         return NewUsers()
-    elif opcode == Opcodes.NEW_VOUCHERS:
-        return NewVouchers()
     else:
         raise ProtocolError(f"invalid embedded opcode: {opcode}", Opcodes.DATA_BATCH)
 
