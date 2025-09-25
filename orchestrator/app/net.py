@@ -94,17 +94,47 @@ class Orchestrator:
         """Process a decoded message.""" # <-- CORRECCIÓN 2: Docstring simplificado
         if msg.opcode != protocol.Opcodes.FINISHED and msg.opcode != protocol.Opcodes.BETS_RECV_SUCCESS and msg.opcode != protocol.Opcodes.BETS_RECV_FAIL:
             try:
-                # Escribir el mensaje recibido a un archivo (incluyendo batch_number y status)
+                # Mapear el status a texto legible
                 status_names = {0: "Continue", 1: "EOF", 2: "Cancel"}
                 status_text = status_names.get(msg.batch_status, f"Unknown({msg.batch_status})")
                 
+                # 1. Escribir el mensaje original recibido
                 with open("received_messages.txt", "a", encoding="utf-8") as f:
-                    f.write(f"=== Mensaje recibido - Opcode: {msg.opcode} - Cantidad: {msg.amount} - Batch: {msg.batch_number} - Status: {status_text} ===\n")
+                    f.write(f"=== Mensaje ORIGINAL - Opcode: {msg.opcode} - Cantidad: {msg.amount} - Batch: {msg.batch_number} - Status: {status_text} ===\n")
                     for i, row in enumerate(msg.rows):
                         f.write(f"Row {i+1}: {row.__dict__}\n")
                     f.write("\n")
                 
-                pass
+                # 2. Crear mensaje filtrado usando la nueva función
+                try:
+                    filtered_batch = protocol.create_filtered_data_batch(msg)
+                    
+                    # 3. Escribir el mensaje filtrado a un archivo separado
+                    with open("filtered_messages.txt", "a", encoding="utf-8") as f:
+                        f.write(f"=== Mensaje FILTRADO - Tabla: {filtered_batch.filtered_data['table_name']} - Original: {filtered_batch.filtered_data['original_row_count']} - Filtrado: {filtered_batch.filtered_data['filtered_row_count']} - Batch: {filtered_batch.filtered_data['batch_number']} - Status: {status_text} ===\n")
+                        f.write(f"Query IDs: {filtered_batch.query_ids}\n")
+                        f.write(f"Table IDs: {filtered_batch.table_ids}\n")
+                        f.write(f"Total Shards: {filtered_batch.total_shards}, Shard Num: {filtered_batch.shard_num}\n")
+                        for i, row in enumerate(filtered_batch.filtered_data['rows']):
+                            f.write(f"Row {i+1}: {row}\n")
+                        f.write("\n")
+                        
+                    # Log del filtrado
+                    logging.info(
+                        "action: batch_filtered | table: %s | original_count: %d | filtered_count: %d | batch_number: %d | status: %s",
+                        filtered_batch.filtered_data['table_name'],
+                        filtered_batch.filtered_data['original_row_count'],
+                        filtered_batch.filtered_data['filtered_row_count'],
+                        filtered_batch.filtered_data['batch_number'],
+                        status_text
+                    )
+                    
+                except Exception as filter_error:
+                    logging.warning(
+                        "action: batch_filter | result: fail | batch_number: %d | opcode: %d | error: %s",
+                        getattr(msg, 'batch_number', 0), msg.opcode, str(filter_error)
+                    )
+                
             except Exception as e:
                 protocol.BetsRecvFail().write_to(client_sock)
                 logging.error(
@@ -112,10 +142,6 @@ class Orchestrator:
                     getattr(msg, 'batch_number', 0), msg.amount, str(e)
                 )
                 return True
-            
-            # Mapear el status a texto legible
-            status_names = {0: "Continue", 1: "EOF", 2: "Cancel"}
-            status_text = status_names.get(msg.batch_status, f"Unknown({msg.batch_status})")
             
             # Log mejorado con batch_number y status
             logging.info(

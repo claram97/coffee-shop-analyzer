@@ -13,11 +13,10 @@ const (
 	BetsRecvFailOpCode        byte = 2
 	OpCodeFinished            byte = 3
 	OpCodeNewMenuItems        byte = 4
-	OpCodeNewPaymentMethods   byte = 5
-	OpCodeNewStores           byte = 6
-	OpCodeNewTransactionItems byte = 7
-	OpCodeNewTransaction      byte = 8
-	OpCodeNewUsers            byte = 9
+	OpCodeNewStores           byte = 5
+	OpCodeNewTransactionItems byte = 6
+	OpCodeNewTransaction      byte = 7
+	OpCodeNewUsers            byte = 8
 )
 
 // BatchStatus defines the status of a batch being sent

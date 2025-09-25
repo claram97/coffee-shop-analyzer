@@ -72,18 +72,6 @@ func (m MenuItemHandler) ProcessRecord(record []string) (map[string]string, erro
 
 func (m MenuItemHandler) GetExpectedFields() int { return 7 }
 
-type PaymentMethodHandler struct{}
-
-func (p PaymentMethodHandler) ProcessRecord(record []string) (map[string]string, error) {
-	return map[string]string{
-		"method_id":   record[0],
-		"method_name": record[1],
-		"category":    record[2],
-	}, nil
-}
-
-func (p PaymentMethodHandler) GetExpectedFields() int { return 3 }
-
 type StoreHandler struct{}
 
 func (s StoreHandler) ProcessRecord(record []string) (map[string]string, error) {
@@ -191,8 +179,6 @@ func (c *Client) setHandlerForTableType(tableType string) error {
 		return c.setClientTableType(TransactionItemHandler{}, OpCodeNewTransactionItems)
 	case "menu_items":
 		return c.setClientTableType(MenuItemHandler{}, OpCodeNewMenuItems)
-	case "payment_methods":
-		return c.setClientTableType(PaymentMethodHandler{}, OpCodeNewPaymentMethods)
 	case "stores":
 		return c.setClientTableType(StoreHandler{}, OpCodeNewStores)
 	case "users":
@@ -376,7 +362,14 @@ func (c *Client) SendBets() {
 		if entry.IsDir() {
 			subDirPath := filepath.Join(dataDir, entry.Name())
 			tableType := entry.Name()
+
 			log.Infof("action: processing_table_type | table_type: %s | client_id: %v", tableType, c.config.ID)
+
+			// Set appropriate handler and opcode based on table type
+			if err := c.setHandlerForTableType(tableType); err != nil {
+				log.Infof("action: skip_table_type | table_type: %s | reason: unsupported | client_id: %v | error: %v", tableType, c.config.ID, err)
+				continue
+			}
 
 			// Read files in this subdirectory
 			files, err := os.ReadDir(subDirPath)
@@ -392,12 +385,6 @@ func (c *Client) SendBets() {
 					fileName := fileEntry.Name()
 					filePath := filepath.Join(subDirPath, fileName)
 					log.Infof("action: processing_file: %s | result: success", filePath)
-
-					// Set appropriate handler and opcode based on table type
-					if err := c.setHandlerForTableType(tableType); err != nil {
-						log.Errorf("action: set_handler_for_table_type %s: | result: fail | error: %v", tableType, err)
-						continue
-					}
 
 					var file *os.File
 					file, err = os.Open(filePath)

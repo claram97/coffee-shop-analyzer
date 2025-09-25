@@ -7,4 +7,4 @@ loop:
 log:
   level: "INFO"
 batch:
-  maxAmount: 1500000
+  maxAmount: 4

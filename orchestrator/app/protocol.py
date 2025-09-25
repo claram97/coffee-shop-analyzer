@@ -24,11 +24,10 @@ class Opcodes:
     BETS_RECV_FAIL = 2
     FINISHED = 3
     NEW_MENU_ITEMS = 4
-    NEW_PAYMENT_METHODS = 5
-    NEW_STORES = 6
-    NEW_TRANSACTION_ITEMS = 7
-    NEW_TRANSACTION = 8
-    NEW_USERS = 9
+    NEW_STORES = 5
+    NEW_TRANSACTION_ITEMS = 6
+    NEW_TRANSACTION = 7
+    NEW_USERS = 8
 
 
 class BatchStatus:
@@ -56,13 +55,6 @@ class RawMenuItems:
         self.is_seasonal = is_seasonal
         self.available_from = available_from
         self.available_to = available_to
-
-
-class RawPaymentMethod:
-    def __init__(self, method_id: str, method_name: str, category: str):
-        self.method_id = method_id
-        self.method_name = method_name
-        self.category = category
 
 
 class RawStore:
@@ -293,18 +285,6 @@ class NewUsers(TableMessage):
         )
 
 
-class NewPaymentMethods(TableMessage):
-    """Mensaje NEW_PAYMENT_METHODS que ahora hereda de TableMessage."""
-
-    def __init__(self):
-        required = ("method_id", "method_name", "category")
-        super().__init__(
-            opcode=Opcodes.NEW_PAYMENT_METHODS,
-            required_keys=required,
-            row_factory=RawPaymentMethod,  # Usará RawPaymentMethod(**kwargs) para crear los objetos
-        )
-
-
 class NewStores(TableMessage):
     """Mensaje NEW_STORES que ahora hereda de TableMessage."""
 
@@ -435,8 +415,6 @@ def recv_msg(sock: socket.socket):
         msg = Finished()
     elif opcode == Opcodes.NEW_MENU_ITEMS:
         msg = NewMenuItems()
-    elif opcode == Opcodes.NEW_PAYMENT_METHODS:
-        msg = NewPaymentMethods()
     elif opcode == Opcodes.NEW_STORES:
         msg = NewStores()
     elif opcode == Opcodes.NEW_TRANSACTION_ITEMS:
@@ -551,8 +529,6 @@ def _instantiate_message_for_opcode(opcode: int):
         return Finished()
     elif opcode == Opcodes.NEW_MENU_ITEMS:
         return NewMenuItems()
-    elif opcode == Opcodes.NEW_PAYMENT_METHODS:
-        return NewPaymentMethods()
     elif opcode == Opcodes.NEW_STORES:
         return NewStores()
     elif opcode == Opcodes.NEW_TRANSACTION_ITEMS:
@@ -571,7 +547,6 @@ class DataBatch:
       [u8 list: table_ids]
       [u8 list: query_ids]
       [u16 reserved]              # flags / reservado
-      [i64 batch_number]
       [dict<u8,u8> meta]
       [u16 total_shards]
       [u16 shard_num]
@@ -584,7 +559,6 @@ class DataBatch:
         # Parámetros para SERIALIZACIÓN (todos los previos al batch interno):
         table_ids: Optional[List[int]] = None,
         query_ids: Optional[List[int]] = None,
-        batch_number: Optional[int] = None,
         meta: Optional[Dict[int, int]] = None,
         total_shards: Optional[int] = None,
         shard_num: Optional[int] = None,
@@ -599,7 +573,6 @@ class DataBatch:
         self.table_ids: List[int] = [] if table_ids is None else list(table_ids)
         self.query_ids: List[int] = [] if query_ids is None else list(query_ids)
         self.reserved_u16: int = int(reserved_u16)
-        self.batch_number: int = 0 if batch_number is None else int(batch_number)
         self.meta: Dict[int, int] = {} if meta is None else dict(meta)
         self.total_shards: int = 1 if total_shards is None else int(total_shards)
         self.shard_num: int = 0 if shard_num is None else int(shard_num)
@@ -737,3 +710,139 @@ class DataBatch:
         write_u8(sock, self.opcode)
         write_i32(sock, len(body))
         sock.sendall(body)
+
+
+# --- FILTROS DE COLUMNAS ---
+
+def filter_menu_items_columns(rows: List[RawMenuItems]) -> List[dict]:
+    """Filtra las columnas innecesarias de MenuItem: category, is_seasonal, available_from, available_to"""
+    filtered_rows = []
+    for row in rows:
+        filtered_row = {
+            "product_id": row.product_id,
+            "name": row.name,
+            "price": row.price
+        }
+        filtered_rows.append(filtered_row)
+    return filtered_rows
+
+
+def filter_stores_columns(rows: List[RawStore]) -> List[dict]:
+    """Filtra las columnas innecesarias de Store: street, postal_code, city, state, latitude, longitude"""
+    filtered_rows = []
+    for row in rows:
+        filtered_row = {
+            "store_id": row.store_id,
+            "store_name": row.store_name
+        }
+        filtered_rows.append(filtered_row)
+    return filtered_rows
+
+
+def filter_transaction_items_columns(rows: List[RawTransactionItem]) -> List[dict]:
+    """Filtra las columnas innecesarias de TransactionItem: unit_price"""
+    filtered_rows = []
+    for row in rows:
+        filtered_row = {
+            "transaction_id": row.transaction_id,
+            "item_id": row.item_id,
+            "quantity": row.quantity,
+            "subtotal": row.subtotal,
+            "created_at": row.created_at
+        }
+        filtered_rows.append(filtered_row)
+    return filtered_rows
+
+
+def filter_transactions_columns(rows: List[RawTransaction]) -> List[dict]:
+    """Filtra las columnas innecesarias de Transaction: payment_method_id, voucher_id, original_amount, discount_applied"""
+    filtered_rows = []
+    for row in rows:
+        filtered_row = {
+            "transaction_id": row.transaction_id,
+            "store_id": row.store_id,
+            "user_id": row.user_id,
+            "final_amount": row.final_amount,
+            "created_at": row.created_at
+        }
+        filtered_rows.append(filtered_row)
+    return filtered_rows
+
+
+def filter_users_columns(rows: List[RawUser]) -> List[dict]:
+    """Filtra las columnas innecesarias de User: gender, registered_at"""
+    filtered_rows = []
+    for row in rows:
+        filtered_row = {
+            "user_id": row.user_id,
+            "birthdate": row.birthdate
+        }
+        filtered_rows.append(filtered_row)
+    return filtered_rows
+
+
+def filter_vouchers_columns(rows) -> List[dict]:
+    """Filtra todas las columnas de Voucher ya que no se usan en ninguna query"""
+    # Por ahora retornamos lista vacía ya que estas columnas no se usan en queries actuales
+    return []
+
+
+# --- FUNCIÓN DE CREACIÓN DEL WRAPPER ---
+
+def create_filtered_data_batch(original_msg) -> DataBatch:
+    """
+    Toma un mensaje original (NewMenuItems, NewStores, etc.) y crea un DataBatch wrapper
+    con las columnas filtradas y metadatos apropiados.
+    """
+    # Mapeo de opcodes a funciones de filtrado
+    filter_functions = {
+        Opcodes.NEW_MENU_ITEMS: filter_menu_items_columns,
+        Opcodes.NEW_STORES: filter_stores_columns,
+        Opcodes.NEW_TRANSACTION_ITEMS: filter_transaction_items_columns,
+        Opcodes.NEW_TRANSACTION: filter_transactions_columns,
+        Opcodes.NEW_USERS: filter_users_columns,
+    }
+    
+    # Obtener función de filtrado
+    filter_func = filter_functions.get(original_msg.opcode)
+    if filter_func is None:
+        raise ValueError(f"No filter function defined for opcode {original_msg.opcode}")
+    
+    # Aplicar filtro
+    filtered_rows = filter_func(original_msg.rows)
+    
+    # Crear el diccionario para el wrapper
+    wrapper_data = {
+        "table_name": _get_table_name_for_opcode(original_msg.opcode),
+        "rows": filtered_rows,
+        "original_row_count": original_msg.amount,
+        "filtered_row_count": len(filtered_rows),
+        "batch_number": original_msg.batch_number,
+        "batch_status": original_msg.batch_status
+    }
+    
+    # Crear DataBatch wrapper
+    wrapper = DataBatch(
+        table_ids=[1],  # Por ahora usamos 1 como table_id genérico
+        query_ids=[1],  # Por ahora "q1" para todos como mencionaste
+        meta={},
+        total_shards=None,
+        shard_num=None
+    )
+    
+    # Asignar los datos filtrados al wrapper
+    wrapper.filtered_data = wrapper_data
+    
+    return wrapper
+
+
+def _get_table_name_for_opcode(opcode: int) -> str:
+    """Mapea opcodes a nombres de tabla para el logging/debugging"""
+    table_names = {
+        Opcodes.NEW_MENU_ITEMS: "menu_items",
+        Opcodes.NEW_STORES: "stores",
+        Opcodes.NEW_TRANSACTION_ITEMS: "transaction_items",
+        Opcodes.NEW_TRANSACTION: "transactions",
+        Opcodes.NEW_USERS: "users",
+    }
+    return table_names.get(opcode, f"unknown_opcode_{opcode}")
