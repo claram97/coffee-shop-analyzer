@@ -205,9 +205,7 @@ networks:
   coffee-network:
     driver: bridge
 ```
-Todos los nodos deben tener pika instalado. Se puede usar un `Dockerfile` como el de abajo para cualquiera de tus nodos hechos en Python (por ejemplo, adentro de tu carpeta `./productor` o `./consumidor`).
-
-
+Todos los nodos deben tener pika instalado. Se puede usar un `Dockerfile` como el de abajo para cualquiera de los nodos.
 
 ```dockerfile
 # Usar una imagen oficial de Python
@@ -229,5 +227,3 @@ COPY main.py .
 # Comando para correr la aplicación
 CMD ["python", "main.py"]
 ```
-
-Con esta configuración, podés correr `docker-compose up --build` desde la misma carpeta donde está tu `docker-compose.yml` para levantar todos los servicios.

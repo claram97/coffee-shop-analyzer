@@ -6,6 +6,7 @@ from middleware_client import MessageMiddlewareQueue, MessageMiddlewareExchange,
 
 RABBITMQ_HOST = 'localhost'
 
+# To run these tests we need to have a RabbitMQ instance running.
 class TestRabbitMQClient(unittest.TestCase):
     def test_work_queue_1_to_1(self):
         queue_name = "work_queue_single"
@@ -65,9 +66,15 @@ class TestRabbitMQClient(unittest.TestCase):
         self.assertSetEqual(set(received_messages), set(msg.encode('utf-8') for msg in messages_to_send))
 
         producer.close()
-        consumer1.delete()
+        consumer1.stop_consuming()
+        consumer2.stop_consuming()
         consumer1.close()
         consumer2.close()
+        
+        # Delete the queue after all consumers are closed
+        temp_client = MessageMiddlewareQueue(RABBITMQ_HOST, queue_name)
+        temp_client.delete()
+        temp_client.close()
 
     def test_exchange_1_to_1(self):
         exchange_name = "direct_exchange"
