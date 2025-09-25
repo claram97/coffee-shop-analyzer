@@ -27,6 +27,11 @@ const (
 	BatchCancel   byte = 2 // Batch enviado por cancelación
 )
 
+// Protocol limits
+const (
+	MaxBatchSizeBytes int = 90 * 1024 * 1024 // 1MB - Límite máximo del tamaño de batch en bytes
+)
+
 // ProtocolError models a framing/validation error while parsing or writing
 // protocol messages. Opcode, when present, indicates the message context.
 type ProtocolError struct {
@@ -109,7 +114,7 @@ func writeStringMap(buff *bytes.Buffer, body map[string]string) error {
 
 // AddRowToBatch serializes a single row as a [string map] and attempts to
 // append it to the current batch buffer `to`. If appending would exceed the
-// 8 KiB package limit (including opcode+length+n headers) or the given
+// MaxBatchSizeBytes limit (including opcode+length+n headers) or the given
 // batchLimit, this function first FlushBatch(to, finalOutput, *counter, batchNumber)
 // and then starts a new batch with this row, setting *counter = 1.
 // On success, it increments *counter and returns nil; any I/O/encoding
@@ -120,8 +125,10 @@ func AddRowToBatch(row map[string]string, to *bytes.Buffer, finalOutput io.Write
 		return err
 	}
 
-	// Verificar si la nueva fila cabe en el batch actual (8KB y límite de filas)
-	if to.Len()+buff.Len()+1+4+8+4 <= 8*1024 && *counter+1 <= batchLimit { // Agregué +8 para batchNumber
+	// Verificar si la nueva fila cabe en el batch actual (MaxBatchSizeBytes y límite de filas)
+	// +1 (opcode) +4 (length) +4 (nLines) +8 (batchNumber) +1 (status) = 18 bytes de overhead
+	const headerOverhead = 18
+	if to.Len()+buff.Len()+headerOverhead <= MaxBatchSizeBytes && *counter+1 <= batchLimit {
 		// Cabe en el batch actual, agregarlo
 		_, err := io.Copy(to, &buff)
 		if err != nil {

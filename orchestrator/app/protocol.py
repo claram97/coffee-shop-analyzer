@@ -3,6 +3,10 @@ import struct
 from typing import Optional, List, Dict
 
 
+# Protocol limits
+MAX_BATCH_SIZE_BYTES = 90 * 1024 * 1024  # 90MB - Límite máximo del tamaño de batch en bytes
+
+
 class ProtocolError(Exception):
     """Represents a framing/validation error while parsing or writing messages.
 
@@ -15,6 +19,7 @@ class ProtocolError(Exception):
 
 
 class Opcodes:
+    DATA_BATCH = 0 # Envuelve a los mensajes de tabla
     BETS_RECV_SUCCESS = 1
     BETS_RECV_FAIL = 2
     FINISHED = 3
@@ -24,7 +29,6 @@ class Opcodes:
     NEW_TRANSACTION_ITEMS = 7
     NEW_TRANSACTION = 8
     NEW_USERS = 9
-    DATA_BATCH = 11
 
 
 class BatchStatus:
