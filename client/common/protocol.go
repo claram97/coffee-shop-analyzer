@@ -102,21 +102,22 @@ func writeStringMap(buff *bytes.Buffer, body map[string]string) error {
 	return nil
 }
 
-// AddBetWithFlush serializes a single bet as a [string map] and attempts to
+// AddRowToBatch serializes a single row as a [string map] and attempts to
 // append it to the current batch buffer `to`. If appending would exceed the
 // 8 KiB package limit (including opcode+length+n headers) or the given
-// batchLimit, this function first FlushBatch(to, finalOutput, *betsCounter)
-// and then starts a new batch with this bet, setting *betsCounter = 1.
-// On success, it increments *betsCounter and returns nil; any I/O/encoding
-// error is returned.
-func AddRowToBatch(row map[string]string, to *bytes.Buffer, finalOutput io.Writer, counter *int32, batchLimit int32, opCode byte) error {
+// batchLimit, this function first FlushBatch(to, finalOutput, *counter, batchNumber)
+// and then starts a new batch with this row, setting *counter = 1.
+// On success, it increments *counter and returns nil; any I/O/encoding
+// error is returned. NOTE: batchNumber is used for the current batch being built.
+func AddRowToBatch(row map[string]string, to *bytes.Buffer, finalOutput io.Writer, counter *int32, batchLimit int32, opCode byte, batchNumber *int64) error {
 	var buff bytes.Buffer
 	if err := writeStringMap(&buff, row); err != nil {
 		return err
 	}
 
-	// La lógica de comprobación de límites es la misma
-	if to.Len()+buff.Len()+1+4+4 <= 8*1024 && *counter+1 <= batchLimit {
+	// Verificar si la nueva fila cabe en el batch actual (8KB y límite de filas)
+	if to.Len()+buff.Len()+1+4+8+4 <= 8*1024 && *counter+1 <= batchLimit { // Agregué +8 para batchNumber
+		// Cabe en el batch actual, agregarlo
 		_, err := io.Copy(to, &buff)
 		if err != nil {
 			return err
@@ -125,11 +126,13 @@ func AddRowToBatch(row map[string]string, to *bytes.Buffer, finalOutput io.Write
 		return nil
 	}
 
-	// Llama a la versión genérica de FlushBatch, pasando el opCode
-	if err := FlushBatch(to, finalOutput, *counter, opCode); err != nil {
+	// No cabe en el batch actual, hacer flush del batch completo
+	*batchNumber++ // Incrementar el número de batch antes de enviarlo
+	if err := FlushBatch(to, finalOutput, *counter, opCode, *batchNumber); err != nil {
 		return err
 	}
 
+	// Empezar un nuevo batch con esta fila
 	if err := writeStringMap(to, row); err != nil {
 		return err
 	}
@@ -137,26 +140,38 @@ func AddRowToBatch(row map[string]string, to *bytes.Buffer, finalOutput io.Write
 	return nil
 }
 
-// FlushBatch frames and writes a NewBets message to `out` from the accumulated
+// FlushBatch frames and writes a message to `out` from the accumulated
 // body in `batch`. The wire format is:
 //
-//	[opcode=NewBets:1][length=i32 LE (4 + bodyLen)][nBets=i32 LE][body]
+//	[opcode:1][length=i32 LE (4 + 8 + bodyLen)][nLines=i32 LE][batchNumber=i64 LE][body]
 //
 // After a successful write it resets the batch buffer. Any write error is returned.
-func FlushBatch(batch *bytes.Buffer, out io.Writer, counter int32, opCode byte) error {
-	// Escribe el OpCode que vino como parámetro en lugar de uno fijo
+func FlushBatch(batch *bytes.Buffer, out io.Writer, counter int32, opCode byte, batchNumber int64) error {
+	// [opcode:1]
 	if err := binary.Write(out, binary.LittleEndian, opCode); err != nil {
 		return err
 	}
-	if err := binary.Write(out, binary.LittleEndian, int32(4+batch.Len())); err != nil {
+
+	// [length:i32] - Ahora incluye 4 (nLines) + 8 (batchNumber) + bodyLen
+	if err := binary.Write(out, binary.LittleEndian, int32(4+8+batch.Len())); err != nil {
 		return err
 	}
+
+	// [nLines:i32]
 	if err := binary.Write(out, binary.LittleEndian, counter); err != nil {
 		return err
 	}
+
+	// [batchNumber:i64] ← NUEVO CAMPO
+	if err := binary.Write(out, binary.LittleEndian, batchNumber); err != nil {
+		return err
+	}
+
+	// [body]
 	if _, err := io.Copy(out, batch); err != nil {
 		return err
 	}
+
 	batch.Reset()
 	return nil
 }

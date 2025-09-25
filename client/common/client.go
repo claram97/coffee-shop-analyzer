@@ -221,7 +221,7 @@ func (c *Client) setHandlerForTableType(tableType string) error {
 // the function triggers a flush of the current batch to c.conn and then
 // starts a new batch with this bet. The returned error is io.EOF when the
 // CSV is exhausted, or any I/O/serialization error encountered.
-func (c *Client) processNextRow(reader *csv.Reader, batchBuff *bytes.Buffer, counter *int32) error {
+func (c *Client) processNextRow(reader *csv.Reader, batchBuff *bytes.Buffer, counter *int32, batchNumber *int64) error {
 	record, err := reader.Read()
 	if err != nil {
 		return err
@@ -234,7 +234,7 @@ func (c *Client) processNextRow(reader *csv.Reader, batchBuff *bytes.Buffer, cou
 	}
 
 	// Llama a una función de bajo nivel también genérica
-	if err := AddRowToBatch(rowMap, batchBuff, c.conn, counter, c.config.BatchLimit, c.opCode); err != nil {
+	if err := AddRowToBatch(rowMap, batchBuff, c.conn, counter, c.config.BatchLimit, c.opCode, batchNumber); err != nil {
 		return err
 	}
 	return nil
@@ -245,31 +245,44 @@ func (c *Client) processNextRow(reader *csv.Reader, batchBuff *bytes.Buffer, cou
 // On context cancellation, it flushes any partial batch and returns the
 // context error. On clean EOF, it flushes a final partial batch (if any)
 // and returns nil. Any serialization or socket error is returned.
-func (c *Client) buildAndSendBatches(ctx context.Context, reader *csv.Reader) error {
+func (c *Client) buildAndSendBatches(ctx context.Context, reader *csv.Reader, batchNumber int64) error {
 	var batchBuff bytes.Buffer
 	var counter int32 = 0
+	currentBatchNumber := batchNumber // Número del batch actual (no se incrementa por línea)
+
+	// Loop principal que procesa línea por línea del archivo CSV actual
 	for {
+
+		// Verificar si se recibió señal de cancelación (Ctrl+C, SIGTERM, etc.)
 		select {
 		case <-ctx.Done():
+			// Si hay datos pendientes en el buffer, enviarlos antes de terminar
 			if counter > 0 {
-				if err := FlushBatch(&batchBuff, c.conn, counter, c.opCode); err != nil { // <-- Usa c.opCode
+				currentBatchNumber++ // Incrementar solo cuando realmente enviamos un batch
+				if err := FlushBatch(&batchBuff, c.conn, counter, c.opCode, currentBatchNumber); err != nil {
 					return err
 				}
 				counter = 0
 			}
-			return ctx.Err()
+			return ctx.Err() // Retornar el error de cancelación
 		default:
+			// Continuar procesamiento normal si no hay cancelación
 		}
 
-		if err := c.processNextRow(reader, &batchBuff, &counter); err != nil {
+		// Leer y procesar la siguiente línea del CSV
+		if err := c.processNextRow(reader, &batchBuff, &counter, &currentBatchNumber); err != nil {
+			// Si llegamos al final del archivo (EOF = End Of File)
 			if errors.Is(err, io.EOF) {
+				// Enviar cualquier batch parcial que quede en el buffer
 				if counter > 0 {
-					if err := FlushBatch(&batchBuff, c.conn, counter, c.opCode); err != nil { // <-- Usa c.opCode
+					currentBatchNumber++ // Incrementar solo cuando realmente enviamos un batch
+					if err := FlushBatch(&batchBuff, c.conn, counter, c.opCode, currentBatchNumber); err != nil {
 						return err
 					}
 				}
-				break
+				break // Salir del loop - archivo completamente procesado
 			}
+			// Si es cualquier otro error (CSV malformado, I/O, etc.), propagarlo
 			return err
 		}
 	}
@@ -352,7 +365,7 @@ func (c *Client) SendBets() {
 
 	// Loop configuration - now based on directory structure
 	var lastErr error
-
+	var batchNumber int64 = 1
 	// Read .data directory to get all subdirectories/table types
 	dataDir := "./data"
 	entries, dirErr := os.ReadDir(dataDir)
@@ -377,6 +390,7 @@ func (c *Client) SendBets() {
 
 			// Process each file in this table type directory
 			for _, fileEntry := range files {
+				batchNumber = 0 // Reset batch number for each new file
 				if !fileEntry.IsDir() && filepath.Ext(fileEntry.Name()) == ".csv" {
 					fileName := fileEntry.Name()
 					filePath := filepath.Join(subDirPath, fileName)
@@ -407,7 +421,7 @@ func (c *Client) SendBets() {
 
 					writeDone := make(chan error, 1)
 					go func() {
-						writeDone <- c.buildAndSendBatches(ctx, reader)
+						writeDone <- c.buildAndSendBatches(ctx, reader, batchNumber)
 					}()
 
 					lastErr = <-writeDone

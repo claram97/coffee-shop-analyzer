@@ -94,9 +94,9 @@ class Orchestrator:
         """Process a decoded message.""" # <-- CORRECCIÓN 2: Docstring simplificado
         if msg.opcode != protocol.Opcodes.FINISHED and msg.opcode != protocol.Opcodes.BETS_RECV_SUCCESS and msg.opcode != protocol.Opcodes.BETS_RECV_FAIL:
             try:
-                # Escribir el mensaje recibido a un archivo
+                # Escribir el mensaje recibido a un archivo (incluyendo batch_number)
                 with open("received_messages.txt", "a", encoding="utf-8") as f:
-                    f.write(f"=== Mensaje recibido - Opcode: {msg.opcode} - Cantidad: {msg.amount} ===\n")
+                    f.write(f"=== Mensaje recibido - Opcode: {msg.opcode} - Cantidad: {msg.amount} - Batch: {msg.batch_number} ===\n")
                     for i, row in enumerate(msg.rows):
                         f.write(f"Row {i+1}: {row.__dict__}\n")
                     f.write("\n")
@@ -105,13 +105,34 @@ class Orchestrator:
             except Exception as e:
                 protocol.BetsRecvFail().write_to(client_sock)
                 logging.error(
-                    "action: apuesta_recibida | result: fail | cantidad: %d", msg.amount
+                    "action: batch_recibido | result: fail | batch_number: %d | cantidad: %d | error: %s", 
+                    getattr(msg, 'batch_number', 0), msg.amount, str(e)
                 )
                 return True
+            
+            # Log mejorado con batch_number
             logging.info(
-                "action: apuesta_recibida | result: success | cantidad: %d",
-                msg.amount,
+                "action: batch_recibido | result: success | opcode: %d | cantidad: %d | batch_number: %d",
+                msg.opcode, msg.amount, msg.batch_number
             )
+            
+            # Log adicional con preview de datos
+            try:
+                if msg.rows and len(msg.rows) > 0:
+                    sample_rows = msg.rows[:2]  # Primeras 2 filas como muestra
+                    all_keys = set()
+                    for row in sample_rows:
+                        all_keys.update(row.__dict__.keys())
+                    
+                    sample_data = [row.__dict__ for row in sample_rows]
+                    
+                    logging.debug(
+                        "action: batch_preview | batch_number: %d | opcode: %d | keys: %s | sample_count: %d | sample: %s",
+                        msg.batch_number, msg.opcode, sorted(list(all_keys)), len(sample_rows), sample_data
+                    )
+            except Exception:
+                logging.debug("action: batch_preview | batch_number: %d | result: skip", getattr(msg, 'batch_number', 0))
+                
             protocol.BetsRecvSuccess().write_to(client_sock)
             return True
             

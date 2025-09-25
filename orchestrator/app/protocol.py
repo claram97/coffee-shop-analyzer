@@ -176,6 +176,7 @@ class TableMessage:
         self.required_keys = required_keys
         self.rows = []  # Almacenará los objetos creados (e.g., RawBet, RawProduct)
         self.amount = 0
+        self.batch_number = 0  # NUEVO: número de batch del cliente
         # `row_factory` es una función o clase que convierte un dict en un objeto
         self._row_factory = row_factory
 
@@ -226,11 +227,22 @@ class TableMessage:
         return remaining
 
     def read_from(self, sock: socket.socket, length: int):
-        """Parsea el cuerpo completo del mensaje de la tabla."""
+        """Parsea el cuerpo completo del mensaje de la tabla.
+        
+        Formato del mensaje del cliente:
+        [length:i32][nRows:i32][batchNumber:i64][rows...]
+        """
         remaining = length
         try:
+            # Leer número de filas
             (n_rows, remaining) = read_i32(sock, remaining, self.opcode)
             self.amount = n_rows
+            
+            # NUEVO: Leer número de batch
+            (batch_number, remaining) = read_i64(sock, remaining, self.opcode)
+            self.batch_number = batch_number
+            
+            # Leer todas las filas
             for _ in range(n_rows):
                 remaining = self.__read_row(sock, remaining)
 
