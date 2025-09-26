@@ -10,6 +10,9 @@ import (
 	"time"
 
 	"github.com/op/go-logging"
+
+	// Import protocol definitions
+	protocol "github.com/7574-sistemas-distribuidos/docker-compose-init/client/protocol"
 )
 
 // ResponseHandler handles server response communication
@@ -32,7 +35,7 @@ func NewResponseHandler(conn net.Conn, clientID string, logger *logging.Logger) 
 func (rh *ResponseHandler) handleReadError(err error) bool {
 	if errors.Is(err, io.EOF) {
 		rh.log.Infof("action: leer_respuesta | result: server_closed_connection")
-	} else if isConnectionError(err) {
+	} else if IsConnectionError(err) {
 		rh.log.Criticalf("action: leer_respuesta | result: connection_lost | err: %v", err)
 	} else {
 		rh.log.Errorf("action: leer_respuesta | result: fail | err: %v", err)
@@ -45,9 +48,9 @@ func (rh *ResponseHandler) handleResponseMessage(msg interface{}) {
 	// Use type assertion to access the GetOpCode() method
 	if respMsg, ok := msg.(interface{ GetOpCode() byte }); ok {
 		switch respMsg.GetOpCode() {
-		case BetsRecvSuccessOpCode:
+		case protocol.BetsRecvSuccessOpCode:
 			rh.log.Info("action: bets_enviadas | result: success")
-		case BetsRecvFailOpCode:
+		case protocol.BetsRecvFailOpCode:
 			rh.log.Error("action: bets_enviadas | result: fail")
 		}
 	}
@@ -56,7 +59,7 @@ func (rh *ResponseHandler) handleResponseMessage(msg interface{}) {
 // responseReaderLoop executes the main response reading loop
 func (rh *ResponseHandler) responseReaderLoop(reader *bufio.Reader) {
 	for {
-		msg, err := ReadMessage(reader)
+		msg, err := protocol.ReadMessage(reader)
 		if err != nil {
 			if rh.handleReadError(err) {
 				break
@@ -116,7 +119,7 @@ func (fms *FinishedMessageSender) SendFinished() {
 		return
 	}
 
-	finishedMsg := Finished{int32(agencyId)}
+	finishedMsg := protocol.Finished{int32(agencyId)}
 	if _, err := finishedMsg.WriteTo(fms.conn); err != nil {
 		fms.log.Errorf("action: send_finished | result: fail | error: %v", err)
 		return

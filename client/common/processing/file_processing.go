@@ -10,6 +10,11 @@ import (
 	"time"
 
 	"github.com/op/go-logging"
+
+	// Import protocol definitions
+	protocol "github.com/7574-sistemas-distribuidos/docker-compose-init/client/protocol"
+	// Import network utilities for connection error checking
+	network "github.com/7574-sistemas-distribuidos/docker-compose-init/client/common/network"
 )
 
 // FileProcessor handles CSV file processing logic
@@ -44,15 +49,15 @@ func NewTableTypeHandler(clientID string, logger *logging.Logger) *TableTypeHand
 func (tth *TableTypeHandler) GetHandlerAndOpCode(tableType string) (TableRowHandler, byte, error) {
 	switch tableType {
 	case "transactions":
-		return TransactionHandler{}, OpCodeNewTransaction, nil
+		return TransactionHandler{}, protocol.OpCodeNewTransaction, nil
 	case "transaction_items":
-		return TransactionItemHandler{}, OpCodeNewTransactionItems, nil
+		return TransactionItemHandler{}, protocol.OpCodeNewTransactionItems, nil
 	case "menu_items":
-		return MenuItemHandler{}, OpCodeNewMenuItems, nil
+		return MenuItemHandler{}, protocol.OpCodeNewMenuItems, nil
 	case "stores":
-		return StoreHandler{}, OpCodeNewStores, nil
+		return StoreHandler{}, protocol.OpCodeNewStores, nil
 	case "users":
-		return UserHandler{}, OpCodeNewUsers, nil
+		return UserHandler{}, protocol.OpCodeNewUsers, nil
 	default:
 		return nil, 0, fmt.Errorf("unknown table type: %s", tableType)
 	}
@@ -165,7 +170,7 @@ func (fp *FileProcessor) ProcessAllTables(ctx context.Context, processorFactory 
 		if entry.IsDir() {
 			if err := fp.ProcessTableType(ctx, dataDir, entry.Name(), processorFactory); err != nil {
 				lastErr = err
-				if isConnectionError(err) {
+				if network.IsConnectionError(err) {
 					fp.log.Criticalf("action: connection_lost | result: terminating | error: %v", err)
 					return err
 				}

@@ -9,6 +9,9 @@ import (
 	"net"
 
 	"github.com/op/go-logging"
+
+	// Import protocol definitions
+	protocol "github.com/7574-sistemas-distribuidos/docker-compose-init/client/protocol"
 )
 
 // BatchProcessor handles batch processing logic
@@ -48,7 +51,7 @@ func (bp *BatchProcessor) processNextRow(reader *csv.Reader, batchBuff *bytes.Bu
 	}
 
 	// Call the low-level generic function
-	if err := AddRowToBatch(rowMap, batchBuff, bp.conn, counter, bp.batchLimit, bp.opCode, batchNumber); err != nil {
+	if err := protocol.AddRowToBatch(rowMap, batchBuff, bp.conn, counter, bp.batchLimit, bp.opCode, batchNumber); err != nil {
 		return err
 	}
 	return nil
@@ -58,7 +61,7 @@ func (bp *BatchProcessor) processNextRow(reader *csv.Reader, batchBuff *bytes.Bu
 func (bp *BatchProcessor) handleCancellation(batchBuff *bytes.Buffer, counter *int32, currentBatchNumber *int64) error {
 	if *counter > 0 {
 		(*currentBatchNumber)++ // Increment only when we actually send a batch
-		if err := FlushBatch(batchBuff, bp.conn, *counter, bp.opCode, *currentBatchNumber, BatchCancel); err != nil {
+		if err := protocol.FlushBatch(batchBuff, bp.conn, *counter, bp.opCode, *currentBatchNumber, protocol.BatchCancel); err != nil {
 			return err
 		}
 		*counter = 0
@@ -70,7 +73,7 @@ func (bp *BatchProcessor) handleCancellation(batchBuff *bytes.Buffer, counter *i
 func (bp *BatchProcessor) handleEOF(batchBuff *bytes.Buffer, counter *int32, currentBatchNumber *int64) error {
 	if *counter > 0 {
 		(*currentBatchNumber)++ // Increment only when we actually send a batch
-		if err := FlushBatch(batchBuff, bp.conn, *counter, bp.opCode, *currentBatchNumber, BatchEOF); err != nil {
+		if err := protocol.FlushBatch(batchBuff, bp.conn, *counter, bp.opCode, *currentBatchNumber, protocol.BatchEOF); err != nil {
 			return err
 		}
 	}

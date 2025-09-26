@@ -6,6 +6,10 @@ import (
 	"syscall"
 
 	"github.com/op/go-logging"
+
+	// Import the refactored modules with aliases to avoid name conflicts
+	network "github.com/7574-sistemas-distribuidos/docker-compose-init/client/common/network"
+	processing "github.com/7574-sistemas-distribuidos/docker-compose-init/client/common/processing"
 )
 
 var log = logging.MustGetLogger("log")
@@ -21,14 +25,14 @@ type ClientConfig struct {
 // Client encapsulates the client behavior and orchestrates all components
 type Client struct {
 	config            ClientConfig
-	connectionManager *ConnectionManager
-	fileProcessor     *FileProcessor
+	connectionManager *network.ConnectionManager
+	fileProcessor     *processing.FileProcessor
 }
 
 // NewClient constructs a Client with the provided configuration
 func NewClient(config ClientConfig) *Client {
-	connectionManager := NewConnectionManager(config.ServerAddress, config.ID, log)
-	fileProcessor := NewFileProcessor(config.ID, log)
+	connectionManager := network.NewConnectionManager(config.ServerAddress, config.ID, log)
+	fileProcessor := processing.NewFileProcessor(config.ID, log)
 
 	return &Client{
 		config:            config,
@@ -52,19 +56,19 @@ func (c *Client) SendBatch() {
 
 	// Set up response handling
 	readDone := make(chan struct{})
-	responseHandler := NewResponseHandler(conn, c.config.ID, log)
+	responseHandler := network.NewResponseHandler(conn, c.config.ID, log)
 	responseHandler.ReadResponses(readDone)
 
 	// Process all tables with a factory function to create batch processors
-	processorFactory := func(handler TableRowHandler, opCode byte) *BatchProcessor {
-		return NewBatchProcessor(conn, handler, opCode, c.config.BatchLimit, c.config.ID, log)
+	processorFactory := func(handler processing.TableRowHandler, opCode byte) *processing.BatchProcessor {
+		return processing.NewBatchProcessor(conn, handler, opCode, c.config.BatchLimit, c.config.ID, log)
 	}
 
 	lastErr := c.fileProcessor.ProcessAllTables(ctx, processorFactory)
 
 	// Send finished message if no errors
 	if lastErr == nil {
-		finishedSender := NewFinishedMessageSender(conn, c.config.ID, log)
+		finishedSender := network.NewFinishedMessageSender(conn, c.config.ID, log)
 		finishedSender.SendFinished()
 	}
 

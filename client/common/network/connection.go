@@ -10,8 +10,8 @@ import (
 	"github.com/op/go-logging"
 )
 
-// isConnectionError checks if the error indicates a broken/lost connection
-func isConnectionError(err error) bool {
+// IsConnectionError checks if the error indicates a broken/lost connection
+func IsConnectionError(err error) bool {
 	if err == nil {
 		return false
 	}
