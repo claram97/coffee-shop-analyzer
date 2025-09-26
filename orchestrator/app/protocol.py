@@ -668,14 +668,8 @@ class DataBatch:
         message_bytes = self.to_bytes()
         sock.sendall(message_bytes)
 
-    def to_bytes(self) -> bytes:
-        """
-        Genera los bytes completos del DataBatch sin escribir a socket.
-        Requiere `self.batch_bytes` con el mensaje embebido ya enmarcado.
-        Retorna el mensaje completo serializado como bytes.
-        """
-        import logging
-        
+    def _validate_batch_bytes(self):
+        """Valida que batch_bytes esté presente y tenga formato correcto."""
         if self.batch_bytes is None:
             raise ProtocolError(
                 "missing embedded batch bytes for DataBatch serialization", self.opcode
@@ -684,6 +678,7 @@ class DataBatch:
         # Validación ligera del framing embebido
         if len(self.batch_bytes) < 5:
             raise ProtocolError("invalid embedded framing (too short)", self.opcode)
+        
         # Chequeo de consistencia del length interno
         inner_len = int.from_bytes(self.batch_bytes[1:5], "little", signed=True)
         if inner_len < 0 or inner_len != len(self.batch_bytes) - 5:
@@ -691,15 +686,31 @@ class DataBatch:
                 "invalid embedded framing (length mismatch)", self.opcode
             )
 
+    def _serialize_u8_list(self, items: List[int]) -> bytearray:
+        """Serializa una lista como [u8 count] + items."""
+        result = bytearray()
+        result.append(len(items))
+        result.extend(bytes(items))
+        return result
+
+    def _serialize_u8_dict(self, meta_dict: Dict[int, int]) -> bytearray:
+        """Serializa un diccionario como [u8 count] + key-value pairs."""
+        result = bytearray()
+        result.append(len(meta_dict))
+        for k, v in meta_dict.items():
+            result.append(int(k))
+            result.append(int(v))
+        return result
+
+    def _serialize_data_batch_body(self) -> bytearray:
+        """Serializa el cuerpo completo del DataBatch."""
         body = bytearray()
 
         # [u8 list: table_ids]
-        body.append(len(self.table_ids))
-        body.extend(bytes(self.table_ids))
+        body.extend(self._serialize_u8_list(self.table_ids))
 
         # [u8 list: query_ids]
-        body.append(len(self.query_ids))
-        body.extend(bytes(self.query_ids))
+        body.extend(self._serialize_u8_list(self.query_ids))
 
         # [u16 reserved]
         body.extend(int(self.reserved_u16).to_bytes(2, "little", signed=False))
@@ -708,10 +719,7 @@ class DataBatch:
         body.extend(int(self.batch_number).to_bytes(8, "little", signed=True))
 
         # [dict<u8,u8> meta]
-        body.append(len(self.meta))
-        for k, v in self.meta.items():
-            body.append(int(k))
-            body.append(int(v))
+        body.extend(self._serialize_u8_dict(self.meta))
 
         # [u16 total_shards][u16 shard_num]
         body.extend(int(self.total_shards).to_bytes(2, "little", signed=False))
@@ -720,15 +728,18 @@ class DataBatch:
         # [embedded message bytes]
         body.extend(self.batch_bytes)
 
-        # Frame final: [opcode][i32 length][body]
+        return body
+
+    def _create_final_message(self, body: bytearray) -> bytes:
+        """Crea el mensaje final con header [opcode][length][body]."""
         final_message = bytearray()
         final_message.append(int(self.opcode))  # opcode u8
         final_message.extend(len(body).to_bytes(4, "little", signed=True))  # length i32
         final_message.extend(body)  # body completo
+        return bytes(final_message)
 
-        result_bytes = bytes(final_message)
-        
-        # Log de lo que estamos generando
+    def _log_serialization_details(self, body: bytearray, result_bytes: bytes):
+        """Registra detalles de la serialización para debugging."""
         logging.debug(
             "action: data_batch_to_bytes | batch_number: %d | "
             "table_ids: %s | query_ids: %s | total_shards: %d | shard_num: %d | "
@@ -736,6 +747,24 @@ class DataBatch:
             getattr(self, 'batch_number', 0), self.table_ids, self.query_ids,
             self.total_shards, self.shard_num, len(body), len(result_bytes)
         )
+
+    def to_bytes(self) -> bytes:
+        """
+        Genera los bytes completos del DataBatch sin escribir a socket.
+        Requiere `self.batch_bytes` con el mensaje embebido ya enmarcado.
+        Retorna el mensaje completo serializado como bytes.
+        """
+        # Validar que tenemos los datos necesarios
+        self._validate_batch_bytes()
+
+        # Serializar el cuerpo del mensaje
+        body = self._serialize_data_batch_body()
+
+        # Crear el mensaje final con framing
+        result_bytes = self._create_final_message(body)
+        
+        # Log de lo que estamos generando
+        self._log_serialization_details(body, result_bytes)
         
         return result_bytes
 
