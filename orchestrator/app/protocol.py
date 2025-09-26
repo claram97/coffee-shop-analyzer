@@ -574,7 +574,7 @@ class DataBatch:
         self.query_ids: List[int] = [] if query_ids is None else list(query_ids)
         self.reserved_u16: int = int(reserved_u16)
         self.meta: Dict[int, int] = {} if meta is None else dict(meta)
-        self.total_shards: int = 1 if total_shards is None else int(total_shards)
+        self.total_shards: int = 0 if total_shards is None else int(total_shards)
         self.shard_num: int = 0 if shard_num is None else int(shard_num)
 
         # Contenido embebido:
@@ -655,6 +655,7 @@ class DataBatch:
                 _ = recv_exactly(sock, remaining)
             raise
 
+    # Dejo esta por si la usamos para escribir al socket del cliente
     # --- Serialización ---
     def write_to(self, sock: socket.socket):
         """
@@ -662,6 +663,18 @@ class DataBatch:
         Requiere `self.batch_bytes` con el mensaje embebido ya enmarcado
         ([u8 opcode][i32 length][body]).
         """
+        # Generar los bytes usando to_bytes() y enviarlos
+        message_bytes = self.to_bytes()
+        sock.sendall(message_bytes)
+
+    def to_bytes(self) -> bytes:
+        """
+        Genera los bytes completos del DataBatch sin escribir a socket.
+        Requiere `self.batch_bytes` con el mensaje embebido ya enmarcado.
+        Retorna el mensaje completo serializado como bytes.
+        """
+        import logging
+        
         if self.batch_bytes is None:
             raise ProtocolError(
                 "missing embedded batch bytes for DataBatch serialization", self.opcode
@@ -707,9 +720,23 @@ class DataBatch:
         body.extend(self.batch_bytes)
 
         # Frame final: [opcode][i32 length][body]
-        write_u8(sock, self.opcode)
-        write_i32(sock, len(body))
-        sock.sendall(body)
+        final_message = bytearray()
+        final_message.append(int(self.opcode))  # opcode u8
+        final_message.extend(len(body).to_bytes(4, "little", signed=True))  # length i32
+        final_message.extend(body)  # body completo
+
+        result_bytes = bytes(final_message)
+        
+        # Log de lo que estamos generando
+        logging.debug(
+            "action: data_batch_to_bytes | batch_number: %d | "
+            "table_ids: %s | query_ids: %s | total_shards: %d | shard_num: %d | "
+            "body_size: %d bytes | final_size: %d bytes",
+            getattr(self, 'batch_number', 0), self.table_ids, self.query_ids,
+            self.total_shards, self.shard_num, len(body), len(result_bytes)
+        )
+        
+        return result_bytes
 
 
 # --- FILTROS DE COLUMNAS ---
@@ -787,6 +814,153 @@ def filter_vouchers_columns(rows) -> List[dict]:
     return []
 
 
+# --- FUNCIONES DE SERIALIZACIÓN PARA BATCH_BYTES ---
+
+def serialize_filtered_menu_items(filtered_rows: List[dict], batch_number: int, batch_status: int) -> bytes:
+    """Serializa los datos filtrados de menu items en formato NewMenuItems."""
+    import logging
+    
+    body = bytearray()
+    n_rows = len(filtered_rows)
+    
+    # [i32 nRows][i64 batchNumber][u8 status][rows...]
+    body.extend(n_rows.to_bytes(4, "little", signed=True))
+    body.extend(batch_number.to_bytes(8, "little", signed=True))  
+    body.extend(batch_status.to_bytes(1, "little", signed=False))
+    
+    # Serializar cada fila filtrada
+    for row in filtered_rows:
+        # Cada fila: [i32 n_pairs] + n_pairs * ([string key][string value])
+        required_keys = ["product_id", "name", "price"]
+        body.extend(len(required_keys).to_bytes(4, "little", signed=True))
+        
+        for key in required_keys:
+            value = row.get(key, "")
+            # [string key]
+            key_bytes = key.encode("utf-8")
+            body.extend(len(key_bytes).to_bytes(4, "little", signed=True))
+            body.extend(key_bytes)
+            # [string value] 
+            value_bytes = str(value).encode("utf-8")
+            body.extend(len(value_bytes).to_bytes(4, "little", signed=True))
+            body.extend(value_bytes)
+    
+    logging.debug(f"action: serialize_menu_items | rows: {n_rows} | body_size: {len(body)} bytes")
+    return bytes(body)
+
+
+def serialize_filtered_stores(filtered_rows: List[dict], batch_number: int, batch_status: int) -> bytes:
+    """Serializa los datos filtrados de stores en formato NewStores.""" 
+    import logging
+    
+    body = bytearray()
+    n_rows = len(filtered_rows)
+    
+    body.extend(n_rows.to_bytes(4, "little", signed=True))
+    body.extend(batch_number.to_bytes(8, "little", signed=True))
+    body.extend(batch_status.to_bytes(1, "little", signed=False))
+    
+    for row in filtered_rows:
+        required_keys = ["store_id", "store_name"]
+        body.extend(len(required_keys).to_bytes(4, "little", signed=True))
+        
+        for key in required_keys:
+            value = row.get(key, "")
+            key_bytes = key.encode("utf-8")
+            body.extend(len(key_bytes).to_bytes(4, "little", signed=True))
+            body.extend(key_bytes)
+            value_bytes = str(value).encode("utf-8")
+            body.extend(len(value_bytes).to_bytes(4, "little", signed=True))
+            body.extend(value_bytes)
+    
+    logging.debug(f"action: serialize_stores | rows: {n_rows} | body_size: {len(body)} bytes")
+    return bytes(body)
+
+
+def serialize_filtered_transaction_items(filtered_rows: List[dict], batch_number: int, batch_status: int) -> bytes:
+    """Serializa los datos filtrados de transaction items en formato NewTransactionItems."""
+    import logging
+    
+    body = bytearray()
+    n_rows = len(filtered_rows)
+    
+    body.extend(n_rows.to_bytes(4, "little", signed=True))
+    body.extend(batch_number.to_bytes(8, "little", signed=True))
+    body.extend(batch_status.to_bytes(1, "little", signed=False))
+    
+    for row in filtered_rows:
+        required_keys = ["transaction_id", "item_id", "quantity", "subtotal", "created_at"]
+        body.extend(len(required_keys).to_bytes(4, "little", signed=True))
+        
+        for key in required_keys:
+            value = row.get(key, "")
+            key_bytes = key.encode("utf-8")
+            body.extend(len(key_bytes).to_bytes(4, "little", signed=True))
+            body.extend(key_bytes)
+            value_bytes = str(value).encode("utf-8")
+            body.extend(len(value_bytes).to_bytes(4, "little", signed=True))
+            body.extend(value_bytes)
+    
+    logging.debug(f"action: serialize_transaction_items | rows: {n_rows} | body_size: {len(body)} bytes")
+    return bytes(body)
+
+
+def serialize_filtered_transactions(filtered_rows: List[dict], batch_number: int, batch_status: int) -> bytes:
+    """Serializa los datos filtrados de transactions en formato NewTransactions."""
+    import logging
+    
+    body = bytearray()
+    n_rows = len(filtered_rows)
+    
+    body.extend(n_rows.to_bytes(4, "little", signed=True))
+    body.extend(batch_number.to_bytes(8, "little", signed=True))
+    body.extend(batch_status.to_bytes(1, "little", signed=False))
+    
+    for row in filtered_rows:
+        required_keys = ["transaction_id", "store_id", "user_id", "final_amount", "created_at"]
+        body.extend(len(required_keys).to_bytes(4, "little", signed=True))
+        
+        for key in required_keys:
+            value = row.get(key, "")
+            key_bytes = key.encode("utf-8")
+            body.extend(len(key_bytes).to_bytes(4, "little", signed=True))
+            body.extend(key_bytes)
+            value_bytes = str(value).encode("utf-8")
+            body.extend(len(value_bytes).to_bytes(4, "little", signed=True))
+            body.extend(value_bytes)
+    
+    logging.debug(f"action: serialize_transactions | rows: {n_rows} | body_size: {len(body)} bytes")
+    return bytes(body)
+
+
+def serialize_filtered_users(filtered_rows: List[dict], batch_number: int, batch_status: int) -> bytes:
+    """Serializa los datos filtrados de users en formato NewUsers."""
+    import logging
+    
+    body = bytearray()
+    n_rows = len(filtered_rows)
+    
+    body.extend(n_rows.to_bytes(4, "little", signed=True))
+    body.extend(batch_number.to_bytes(8, "little", signed=True))
+    body.extend(batch_status.to_bytes(1, "little", signed=False))
+    
+    for row in filtered_rows:
+        required_keys = ["user_id", "birthdate"]
+        body.extend(len(required_keys).to_bytes(4, "little", signed=True))
+        
+        for key in required_keys:
+            value = row.get(key, "")
+            key_bytes = key.encode("utf-8")
+            body.extend(len(key_bytes).to_bytes(4, "little", signed=True))
+            body.extend(key_bytes)
+            value_bytes = str(value).encode("utf-8")
+            body.extend(len(value_bytes).to_bytes(4, "little", signed=True))
+            body.extend(value_bytes)
+    
+    logging.debug(f"action: serialize_users | rows: {n_rows} | body_size: {len(body)} bytes")
+    return bytes(body)
+
+
 # --- FUNCIÓN DE CREACIÓN DEL WRAPPER ---
 
 def create_filtered_data_batch(original_msg) -> DataBatch:
@@ -823,9 +997,66 @@ def create_filtered_data_batch(original_msg) -> DataBatch:
     # Aplicar filtro
     filtered_rows = filter_func(original_msg.rows)
     
-    # Crear el diccionario para el wrapper
-    wrapper_data = {
-        "table_name": _get_table_name_for_opcode(original_msg.opcode),
+    # Mapeo de opcodes a funciones de serialización
+    import logging
+    serialize_functions = {
+        Opcodes.NEW_MENU_ITEMS: serialize_filtered_menu_items,
+        Opcodes.NEW_STORES: serialize_filtered_stores,
+        Opcodes.NEW_TRANSACTION_ITEMS: serialize_filtered_transaction_items,
+        Opcodes.NEW_TRANSACTION: serialize_filtered_transactions,
+        Opcodes.NEW_USERS: serialize_filtered_users,
+    }
+    
+    # Obtener función de serialización
+    serialize_func = serialize_functions.get(original_msg.opcode)
+    if serialize_func is None:
+        raise ValueError(f"No serialize function defined for opcode {original_msg.opcode}")
+    
+    # Serializar datos filtrados
+    inner_body = serialize_func(filtered_rows, original_msg.batch_number, original_msg.batch_status)
+    
+    # Crear el mensaje embebido completo [opcode][length][body]
+    batch_bytes = DataBatch.make_embedded(
+        inner_opcode=original_msg.opcode,
+        inner_body=inner_body
+    )
+    
+    # Log detallado de lo que estamos armando
+    table_name = _get_table_name_for_opcode(original_msg.opcode)
+    logging.info(
+        "action: create_data_batch | table: %s | opcode: %d | query_ids: %s | "
+        "original_rows: %d | filtered_rows: %d | batch_number: %d | "
+        "inner_body_size: %d bytes | batch_bytes_size: %d bytes",
+        table_name, original_msg.opcode, query_ids, 
+        original_msg.amount, len(filtered_rows), original_msg.batch_number,
+        len(inner_body), len(batch_bytes)
+    )
+    
+    # Log de muestra de datos filtrados
+    if filtered_rows:
+        sample_row = filtered_rows[0]
+        logging.debug(
+            "action: filtered_sample | table: %s | batch_number: %d | "
+            "sample_keys: %s | sample_row: %s",
+            table_name, original_msg.batch_number, list(sample_row.keys()), sample_row
+        )
+    
+    # Crear DataBatch wrapper completo
+    wrapper = DataBatch(
+        table_ids=[1],  # Por ahora usamos 1 como table_id genérico
+        query_ids=query_ids,  # Queries específicas según la tabla
+        meta={},
+        total_shards=1,
+        shard_num=0,
+        batch_bytes=batch_bytes  # ¡AQUÍ está el mensaje filtrado serializado!
+    )
+    
+    # También asignar batch_number para que sea accesible
+    wrapper.batch_number = original_msg.batch_number
+    
+    # Crear el diccionario para backward compatibility (si lo usas en otro lado)
+    wrapper.filtered_data = {
+        "table_name": table_name,
         "rows": filtered_rows,
         "original_row_count": original_msg.amount,
         "filtered_row_count": len(filtered_rows),
@@ -833,17 +1064,11 @@ def create_filtered_data_batch(original_msg) -> DataBatch:
         "batch_status": original_msg.batch_status
     }
     
-    # Crear DataBatch wrapper
-    wrapper = DataBatch(
-        table_ids=[1],  # Por ahora usamos 1 como table_id genérico
-        query_ids=query_ids,  # Queries específicas según la tabla
-        meta={},
-        total_shards=None,
-        shard_num=None
+    logging.info(
+        "action: data_batch_ready | table: %s | batch_number: %d | "
+        "ready_for_transmission: True | can_use_write_to: True",
+        table_name, original_msg.batch_number
     )
-    
-    # Asignar los datos filtrados al wrapper
-    wrapper.filtered_data = wrapper_data
     
     return wrapper
 

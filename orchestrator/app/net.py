@@ -21,6 +21,7 @@ class Orchestrator:
         self._server_socket.listen(listen_backlog)
         self._stop = threading.Event()
         self._threads: list[threading.Thread] = []
+        # self._filter_router_queue = new MessageMiddlewareQueue('host','queue_name')
 
     def run(self):
         """Main server loop.
@@ -108,6 +109,11 @@ class Orchestrator:
                 # 2. Crear mensaje filtrado usando la nueva función
                 try:
                     filtered_batch = protocol.create_filtered_data_batch(msg)
+                    
+                    # Generar los bytes y loggear información
+                    batch_bytes = filtered_batch.to_bytes()
+                   
+                    # self._filter_router_queue.send(batch_bytes)
                     
                     # 3. Escribir el mensaje filtrado a un archivo separado
                     with open("filtered_messages.txt", "a", encoding="utf-8") as f:

@@ -5,6 +5,6 @@ loop:
   amount: 5
   period: "5s"
 log:
-  level: "INFO"
+  level: "DEBUG"
 batch:
   maxAmount: 4
