@@ -817,149 +817,87 @@ def filter_vouchers_columns(rows) -> List[dict]:
 
 # --- FUNCIONES DE SERIALIZACIÓN PARA BATCH_BYTES ---
 
-def serialize_filtered_menu_items(filtered_rows: List[dict], batch_number: int, batch_status: int) -> bytes:
-    """Serializa los datos filtrados de menu items en formato NewMenuItems."""
-    import logging
-    
+def _serialize_header(n_rows: int, batch_number: int, batch_status: int) -> bytearray:
+    """Serializa el header común de todos los mensajes filtrados."""
     body = bytearray()
-    n_rows = len(filtered_rows)
-    
-    # [i32 nRows][i64 batchNumber][u8 status][rows...]
+    # [i32 nRows][i64 batchNumber][u8 status]
     body.extend(n_rows.to_bytes(4, "little", signed=True))
     body.extend(batch_number.to_bytes(8, "little", signed=True))  
     body.extend(batch_status.to_bytes(1, "little", signed=False))
+    return body
+
+
+def _serialize_key_value_pair(key: str, value: str) -> bytearray:
+    """Serializa un par clave-valor como [string key][string value]."""
+    pair_bytes = bytearray()
+    # [string key]
+    key_bytes = key.encode("utf-8")
+    pair_bytes.extend(len(key_bytes).to_bytes(4, "little", signed=True))
+    pair_bytes.extend(key_bytes)
+    # [string value] 
+    value_bytes = str(value).encode("utf-8")
+    pair_bytes.extend(len(value_bytes).to_bytes(4, "little", signed=True))
+    pair_bytes.extend(value_bytes)
+    return pair_bytes
+
+
+def _serialize_row(row: dict, required_keys: List[str]) -> bytearray:
+    """Serializa una fila con las claves requeridas."""
+    row_bytes = bytearray()
+    # [i32 n_pairs]
+    row_bytes.extend(len(required_keys).to_bytes(4, "little", signed=True))
+    
+    # Serializar cada par clave-valor
+    for key in required_keys:
+        value = row.get(key, "")
+        row_bytes.extend(_serialize_key_value_pair(key, value))
+    
+    return row_bytes
+
+
+def _serialize_filtered_data(filtered_rows: List[dict], batch_number: int, batch_status: int, required_keys: List[str], table_name: str) -> bytes:
+    """Función genérica para serializar datos filtrados."""
+    n_rows = len(filtered_rows)
+    
+    # Serializar header
+    body = _serialize_header(n_rows, batch_number, batch_status)
     
     # Serializar cada fila filtrada
     for row in filtered_rows:
-        # Cada fila: [i32 n_pairs] + n_pairs * ([string key][string value])
-        required_keys = ["product_id", "name", "price"]
-        body.extend(len(required_keys).to_bytes(4, "little", signed=True))
-        
-        for key in required_keys:
-            value = row.get(key, "")
-            # [string key]
-            key_bytes = key.encode("utf-8")
-            body.extend(len(key_bytes).to_bytes(4, "little", signed=True))
-            body.extend(key_bytes)
-            # [string value] 
-            value_bytes = str(value).encode("utf-8")
-            body.extend(len(value_bytes).to_bytes(4, "little", signed=True))
-            body.extend(value_bytes)
+        body.extend(_serialize_row(row, required_keys))
     
-    logging.debug(f"action: serialize_menu_items | rows: {n_rows} | body_size: {len(body)} bytes")
+    logging.debug(f"action: serialize_{table_name} | rows: {n_rows} | body_size: {len(body)} bytes")
     return bytes(body)
+
+
+def serialize_filtered_menu_items(filtered_rows: List[dict], batch_number: int, batch_status: int) -> bytes:
+    """Serializa los datos filtrados de menu items en formato NewMenuItems."""
+    required_keys = ["product_id", "name", "price"]
+    return _serialize_filtered_data(filtered_rows, batch_number, batch_status, required_keys, "menu_items")
 
 
 def serialize_filtered_stores(filtered_rows: List[dict], batch_number: int, batch_status: int) -> bytes:
     """Serializa los datos filtrados de stores en formato NewStores.""" 
-    import logging
-    
-    body = bytearray()
-    n_rows = len(filtered_rows)
-    
-    body.extend(n_rows.to_bytes(4, "little", signed=True))
-    body.extend(batch_number.to_bytes(8, "little", signed=True))
-    body.extend(batch_status.to_bytes(1, "little", signed=False))
-    
-    for row in filtered_rows:
-        required_keys = ["store_id", "store_name"]
-        body.extend(len(required_keys).to_bytes(4, "little", signed=True))
-        
-        for key in required_keys:
-            value = row.get(key, "")
-            key_bytes = key.encode("utf-8")
-            body.extend(len(key_bytes).to_bytes(4, "little", signed=True))
-            body.extend(key_bytes)
-            value_bytes = str(value).encode("utf-8")
-            body.extend(len(value_bytes).to_bytes(4, "little", signed=True))
-            body.extend(value_bytes)
-    
-    logging.debug(f"action: serialize_stores | rows: {n_rows} | body_size: {len(body)} bytes")
-    return bytes(body)
+    required_keys = ["store_id", "store_name"]
+    return _serialize_filtered_data(filtered_rows, batch_number, batch_status, required_keys, "stores")
 
 
 def serialize_filtered_transaction_items(filtered_rows: List[dict], batch_number: int, batch_status: int) -> bytes:
     """Serializa los datos filtrados de transaction items en formato NewTransactionItems."""
-    import logging
-    
-    body = bytearray()
-    n_rows = len(filtered_rows)
-    
-    body.extend(n_rows.to_bytes(4, "little", signed=True))
-    body.extend(batch_number.to_bytes(8, "little", signed=True))
-    body.extend(batch_status.to_bytes(1, "little", signed=False))
-    
-    for row in filtered_rows:
-        required_keys = ["transaction_id", "item_id", "quantity", "subtotal", "created_at"]
-        body.extend(len(required_keys).to_bytes(4, "little", signed=True))
-        
-        for key in required_keys:
-            value = row.get(key, "")
-            key_bytes = key.encode("utf-8")
-            body.extend(len(key_bytes).to_bytes(4, "little", signed=True))
-            body.extend(key_bytes)
-            value_bytes = str(value).encode("utf-8")
-            body.extend(len(value_bytes).to_bytes(4, "little", signed=True))
-            body.extend(value_bytes)
-    
-    logging.debug(f"action: serialize_transaction_items | rows: {n_rows} | body_size: {len(body)} bytes")
-    return bytes(body)
+    required_keys = ["transaction_id", "item_id", "quantity", "subtotal", "created_at"]
+    return _serialize_filtered_data(filtered_rows, batch_number, batch_status, required_keys, "transaction_items")
 
 
 def serialize_filtered_transactions(filtered_rows: List[dict], batch_number: int, batch_status: int) -> bytes:
     """Serializa los datos filtrados de transactions en formato NewTransactions."""
-    import logging
-    
-    body = bytearray()
-    n_rows = len(filtered_rows)
-    
-    body.extend(n_rows.to_bytes(4, "little", signed=True))
-    body.extend(batch_number.to_bytes(8, "little", signed=True))
-    body.extend(batch_status.to_bytes(1, "little", signed=False))
-    
-    for row in filtered_rows:
-        required_keys = ["transaction_id", "store_id", "user_id", "final_amount", "created_at"]
-        body.extend(len(required_keys).to_bytes(4, "little", signed=True))
-        
-        for key in required_keys:
-            value = row.get(key, "")
-            key_bytes = key.encode("utf-8")
-            body.extend(len(key_bytes).to_bytes(4, "little", signed=True))
-            body.extend(key_bytes)
-            value_bytes = str(value).encode("utf-8")
-            body.extend(len(value_bytes).to_bytes(4, "little", signed=True))
-            body.extend(value_bytes)
-    
-    logging.debug(f"action: serialize_transactions | rows: {n_rows} | body_size: {len(body)} bytes")
-    return bytes(body)
+    required_keys = ["transaction_id", "store_id", "user_id", "final_amount", "created_at"]
+    return _serialize_filtered_data(filtered_rows, batch_number, batch_status, required_keys, "transactions")
 
 
 def serialize_filtered_users(filtered_rows: List[dict], batch_number: int, batch_status: int) -> bytes:
     """Serializa los datos filtrados de users en formato NewUsers."""
-    import logging
-    
-    body = bytearray()
-    n_rows = len(filtered_rows)
-    
-    body.extend(n_rows.to_bytes(4, "little", signed=True))
-    body.extend(batch_number.to_bytes(8, "little", signed=True))
-    body.extend(batch_status.to_bytes(1, "little", signed=False))
-    
-    for row in filtered_rows:
-        required_keys = ["user_id", "birthdate"]
-        body.extend(len(required_keys).to_bytes(4, "little", signed=True))
-        
-        for key in required_keys:
-            value = row.get(key, "")
-            key_bytes = key.encode("utf-8")
-            body.extend(len(key_bytes).to_bytes(4, "little", signed=True))
-            body.extend(key_bytes)
-            value_bytes = str(value).encode("utf-8")
-            body.extend(len(value_bytes).to_bytes(4, "little", signed=True))
-            body.extend(value_bytes)
-    
-    logging.debug(f"action: serialize_users | rows: {n_rows} | body_size: {len(body)} bytes")
-    return bytes(body)
+    required_keys = ["user_id", "birthdate"]
+    return _serialize_filtered_data(filtered_rows, batch_number, batch_status, required_keys, "users")
 
 
 # --- FUNCIÓN DE CREACIÓN DEL WRAPPER ---
