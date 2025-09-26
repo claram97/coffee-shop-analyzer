@@ -1,5 +1,6 @@
 import socket
 import struct
+import logging
 from typing import Optional, List, Dict
 
 
@@ -963,65 +964,78 @@ def serialize_filtered_users(filtered_rows: List[dict], batch_number: int, batch
 
 # --- FUNCIÓN DE CREACIÓN DEL WRAPPER ---
 
-def create_filtered_data_batch(original_msg) -> DataBatch:
-    """
-    Toma un mensaje original (NewMenuItems, NewStores, etc.) y crea un DataBatch wrapper
-    con las columnas filtradas y metadatos apropiados.
-    """
-    # Mapeo de opcodes a funciones de filtrado
-    filter_functions = {
+def _get_filter_functions_mapping():
+    """Retorna el mapeo de opcodes a funciones de filtrado."""
+    return {
         Opcodes.NEW_MENU_ITEMS: filter_menu_items_columns,
         Opcodes.NEW_STORES: filter_stores_columns,
         Opcodes.NEW_TRANSACTION_ITEMS: filter_transaction_items_columns,
         Opcodes.NEW_TRANSACTION: filter_transactions_columns,
         Opcodes.NEW_USERS: filter_users_columns,
     }
-    
-    # Mapeo de opcodes a query IDs específicos para cada tabla
-    query_mappings = {
+
+
+def _get_query_mappings():
+    """Retorna el mapeo de opcodes a query IDs específicos para cada tabla."""
+    return {
         Opcodes.NEW_TRANSACTION: [1, 3, 4],       # Transaction: query 1, query 3, query 4
         Opcodes.NEW_TRANSACTION_ITEMS: [2],        # TransactionItem: query 2
         Opcodes.NEW_MENU_ITEMS: [2],               # MenuItem: query 2
         Opcodes.NEW_STORES: [3],                   # Store: query 3
         Opcodes.NEW_USERS: [4],                    # User: query 4
     }
-    
-    # Obtener función de filtrado
-    filter_func = filter_functions.get(original_msg.opcode)
-    if filter_func is None:
-        raise ValueError(f"No filter function defined for opcode {original_msg.opcode}")
-    
-    # Obtener query IDs para esta tabla
-    query_ids = query_mappings.get(original_msg.opcode, [1])  # Default a [1] si no se encuentra
-    
-    # Aplicar filtro
-    filtered_rows = filter_func(original_msg.rows)
-    
-    # Mapeo de opcodes a funciones de serialización
-    import logging
-    serialize_functions = {
+
+
+def _get_serialize_functions_mapping():
+    """Retorna el mapeo de opcodes a funciones de serialización."""
+    return {
         Opcodes.NEW_MENU_ITEMS: serialize_filtered_menu_items,
         Opcodes.NEW_STORES: serialize_filtered_stores,
         Opcodes.NEW_TRANSACTION_ITEMS: serialize_filtered_transaction_items,
         Opcodes.NEW_TRANSACTION: serialize_filtered_transactions,
         Opcodes.NEW_USERS: serialize_filtered_users,
     }
-    
-    # Obtener función de serialización
-    serialize_func = serialize_functions.get(original_msg.opcode)
+
+
+def _get_filter_function_for_opcode(opcode: int):
+    """Obtiene la función de filtrado para el opcode dado."""
+    filter_functions = _get_filter_functions_mapping()
+    filter_func = filter_functions.get(opcode)
+    if filter_func is None:
+        raise ValueError(f"No filter function defined for opcode {opcode}")
+    return filter_func
+
+
+def _get_query_ids_for_opcode(opcode: int):
+    """Obtiene los query IDs para el opcode dado."""
+    query_mappings = _get_query_mappings()
+    return query_mappings.get(opcode, [1])  # Default a [1] si no se encuentra
+
+
+def _get_serialize_function_for_opcode(opcode: int):
+    """Obtiene la función de serialización para el opcode dado."""
+    serialize_functions = _get_serialize_functions_mapping()
+    serialize_func = serialize_functions.get(opcode)
     if serialize_func is None:
-        raise ValueError(f"No serialize function defined for opcode {original_msg.opcode}")
+        raise ValueError(f"No serialize function defined for opcode {opcode}")
+    return serialize_func
+
+
+def _filter_and_serialize_data(original_msg):
+    """Filtra los datos del mensaje original y los serializa."""
+    # Obtener función de filtrado y aplicar filtro
+    filter_func = _get_filter_function_for_opcode(original_msg.opcode)
+    filtered_rows = filter_func(original_msg.rows)
     
-    # Serializar datos filtrados
+    # Obtener función de serialización y serializar datos filtrados
+    serialize_func = _get_serialize_function_for_opcode(original_msg.opcode)
     inner_body = serialize_func(filtered_rows, original_msg.batch_number, original_msg.batch_status)
     
-    # Crear el mensaje embebido completo [opcode][length][body]
-    batch_bytes = DataBatch.make_embedded(
-        inner_opcode=original_msg.opcode,
-        inner_body=inner_body
-    )
-    
-    # Log detallado de lo que estamos armando
+    return filtered_rows, inner_body
+
+
+def _log_data_batch_creation(original_msg, query_ids, filtered_rows, inner_body, batch_bytes):
+    """Registra información detallada sobre la creación del data batch."""
     table_name = _get_table_name_for_opcode(original_msg.opcode)
     logging.info(
         "action: create_data_batch | table: %s | opcode: %d | query_ids: %s | "
@@ -1031,17 +1045,22 @@ def create_filtered_data_batch(original_msg) -> DataBatch:
         original_msg.amount, len(filtered_rows), original_msg.batch_number,
         len(inner_body), len(batch_bytes)
     )
-    
-    # Log de muestra de datos filtrados
+
+
+def _log_filtered_sample(original_msg, filtered_rows):
+    """Registra una muestra de los datos filtrados para debugging."""
     if filtered_rows:
+        table_name = _get_table_name_for_opcode(original_msg.opcode)
         sample_row = filtered_rows[0]
         logging.debug(
             "action: filtered_sample | table: %s | batch_number: %d | "
             "sample_keys: %s | sample_row: %s",
             table_name, original_msg.batch_number, list(sample_row.keys()), sample_row
         )
-    
-    # Crear DataBatch wrapper completo
+
+
+def _create_data_batch_wrapper(original_msg, query_ids, batch_bytes):
+    """Crea el wrapper DataBatch con todos los metadatos necesarios."""
     wrapper = DataBatch(
         table_ids=[1],  # Por ahora usamos 1 como table_id genérico
         query_ids=query_ids,  # Queries específicas según la tabla
@@ -1051,10 +1070,15 @@ def create_filtered_data_batch(original_msg) -> DataBatch:
         batch_bytes=batch_bytes  # ¡AQUÍ está el mensaje filtrado serializado!
     )
     
-    # También asignar batch_number para que sea accesible
+    # Asignar batch_number para que sea accesible
     wrapper.batch_number = original_msg.batch_number
     
-    # Crear el diccionario para backward compatibility (si lo usas en otro lado)
+    return wrapper
+
+
+def _add_backward_compatibility_data(wrapper, original_msg, filtered_rows):
+    """Añade el diccionario filtered_data para backward compatibility."""
+    table_name = _get_table_name_for_opcode(original_msg.opcode)
     wrapper.filtered_data = {
         "table_name": table_name,
         "rows": filtered_rows,
@@ -1063,12 +1087,49 @@ def create_filtered_data_batch(original_msg) -> DataBatch:
         "batch_number": original_msg.batch_number,
         "batch_status": original_msg.batch_status
     }
-    
+
+
+def _log_data_batch_ready(original_msg):
+    """Registra que el data batch está listo para transmisión."""
+    table_name = _get_table_name_for_opcode(original_msg.opcode)
     logging.info(
         "action: data_batch_ready | table: %s | batch_number: %d | "
         "ready_for_transmission: True | can_use_write_to: True",
         table_name, original_msg.batch_number
     )
+
+
+def create_filtered_data_batch(original_msg) -> DataBatch:
+    """
+    Toma un mensaje original (NewMenuItems, NewStores, etc.) y crea un DataBatch wrapper
+    con las columnas filtradas y metadatos apropiados.
+    """
+    # Obtener query IDs para esta tabla
+    query_ids = _get_query_ids_for_opcode(original_msg.opcode)
+    
+    # Filtrar y serializar datos
+    filtered_rows, inner_body = _filter_and_serialize_data(original_msg)
+    
+    # Crear el mensaje embebido completo [opcode][length][body]
+    batch_bytes = DataBatch.make_embedded(
+        inner_opcode=original_msg.opcode,
+        inner_body=inner_body
+    )
+    
+    # Log detallado de lo que estamos armando
+    _log_data_batch_creation(original_msg, query_ids, filtered_rows, inner_body, batch_bytes)
+    
+    # Log de muestra de datos filtrados
+    _log_filtered_sample(original_msg, filtered_rows)
+    
+    # Crear DataBatch wrapper completo
+    wrapper = _create_data_batch_wrapper(original_msg, query_ids, batch_bytes)
+    
+    # Crear el diccionario para backward compatibility
+    _add_backward_compatibility_data(wrapper, original_msg, filtered_rows)
+    
+    # Log final
+    _log_data_batch_ready(original_msg)
     
     return wrapper
 
