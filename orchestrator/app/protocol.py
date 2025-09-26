@@ -1046,7 +1046,7 @@ def create_filtered_data_batch(original_msg) -> DataBatch:
         table_ids=[1],  # Por ahora usamos 1 como table_id genérico
         query_ids=query_ids,  # Queries específicas según la tabla
         meta={},
-        total_shards=1,
+        total_shards=0,
         shard_num=0,
         batch_bytes=batch_bytes  # ¡AQUÍ está el mensaje filtrado serializado!
     )

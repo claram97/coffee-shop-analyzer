@@ -5,6 +5,12 @@ loop:
   amount: 5
   period: "5s"
 log:
-  level: "DEBUG"
+  level: "info"
 batch:
-  maxAmount: 4
+  maxAmount: 4 # number of lines
+  maxSize: 128 # in KB
+data:
+  folder: "./data" # folder with CSV files
+retries:
+  attempts: 5
+  retryInterval: "2s"

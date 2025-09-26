@@ -45,7 +45,7 @@ func isConnectionError(err error) bool {
 	return errors.As(err, &syscallErr)
 }
 
-// --- NUEVO: Interfaz para manejar cualquier tipo de fila de tabla ---
+// --- Interfaz para manejar cualquier tipo de fila de tabla ---
 type TableRowHandler interface {
 	// ProcessRecord convierte una línea de CSV en el mapa clave-valor del protocolo.
 	ProcessRecord(record []string) (map[string]string, error)
@@ -60,10 +60,10 @@ func (m MenuItemHandler) ProcessRecord(record []string) (map[string]string, erro
 		return nil, fmt.Errorf("expected 7 fields, got %d: %v", len(record), record)
 	}
 	return map[string]string{
-		"product_id":     record[0], // item_id from CSV
-		"name":           record[1], // item_name from CSV
-		"category":       record[2], // category from CSV
-		"price":          record[3], // price from CSV
+		"product_id":     record[0],
+		"name":           record[1],
+		"category":       record[2],
+		"price":          record[3],
 		"is_seasonal":    record[4],
 		"available_from": record[5],
 		"available_to":   record[6],
@@ -214,6 +214,51 @@ func (c *Client) processNextRow(reader *csv.Reader, batchBuff *bytes.Buffer, cou
 	return nil
 }
 
+// handleCancellation maneja la cancelación del contexto y envía batch pendiente si hay datos
+func (c *Client) handleCancellation(batchBuff *bytes.Buffer, counter *int32, currentBatchNumber *int64) error {
+	if *counter > 0 {
+		(*currentBatchNumber)++ // Incrementar solo cuando realmente enviamos un batch
+		if err := FlushBatch(batchBuff, c.conn, *counter, c.opCode, *currentBatchNumber, BatchCancel); err != nil {
+			return err
+		}
+		*counter = 0
+	}
+	return context.Canceled
+}
+
+// handleEOF maneja el final del archivo y envía batch pendiente si hay datos
+func (c *Client) handleEOF(batchBuff *bytes.Buffer, counter *int32, currentBatchNumber *int64) error {
+	if *counter > 0 {
+		(*currentBatchNumber)++ // Incrementar solo cuando realmente enviamos un batch
+		if err := FlushBatch(batchBuff, c.conn, *counter, c.opCode, *currentBatchNumber, BatchEOF); err != nil {
+			return err
+		}
+	}
+	return nil // EOF exitoso
+}
+
+// processCSVLoop procesa el loop principal de lectura del CSV
+func (c *Client) processCSVLoop(ctx context.Context, reader *csv.Reader, batchBuff *bytes.Buffer, counter *int32, currentBatchNumber *int64) error {
+	for {
+		// Verificar cancelación
+		select {
+		case <-ctx.Done():
+			return c.handleCancellation(batchBuff, counter, currentBatchNumber)
+		default:
+			// Continuar procesamiento normal
+		}
+
+		// Leer y procesar la siguiente línea del CSV
+		if err := c.processNextRow(reader, batchBuff, counter, currentBatchNumber); err != nil {
+			if errors.Is(err, io.EOF) {
+				return c.handleEOF(batchBuff, counter, currentBatchNumber)
+			}
+			// Cualquier otro error (CSV malformado, I/O, etc.)
+			return err
+		}
+	}
+}
+
 // buildAndSendBatches streams the CSV, incrementally building table data
 // bodies into batchBuff and flushing to c.conn as limits are reached.
 // On context cancellation, it flushes any partial batch and returns the
@@ -224,43 +269,67 @@ func (c *Client) buildAndSendBatches(ctx context.Context, reader *csv.Reader, ba
 	var counter int32 = 0
 	currentBatchNumber := batchNumber // Número del batch actual (no se incrementa por línea)
 
-	// Loop principal que procesa línea por línea del archivo CSV actual
-	for {
+	return c.processCSVLoop(ctx, reader, &batchBuff, &counter, &currentBatchNumber)
+}
 
-		// Verificar si se recibió señal de cancelación (Ctrl+C, SIGTERM, etc.)
-		select {
-		case <-ctx.Done():
-			// Si hay datos pendientes en el buffer, enviarlos antes de terminar
-			if counter > 0 {
-				currentBatchNumber++ // Incrementar solo cuando realmente enviamos un batch
-				if err := FlushBatch(&batchBuff, c.conn, counter, c.opCode, currentBatchNumber, BatchCancel); err != nil {
-					return err
-				}
-				counter = 0
-			}
-			return ctx.Err() // Retornar el error de cancelación
-		default:
-			// Continuar procesamiento normal si no hay cancelación
-		}
+// logConnectionAttempt registra el intento de conexión
+func (c *Client) logConnectionAttempt(attempt, maxRetries int) {
+	log.Infof(
+		"action: connect | attempt: %d/%d | client_id: %v | server: %v",
+		attempt,
+		maxRetries,
+		c.config.ID,
+		c.config.ServerAddress,
+	)
+}
 
-		// Leer y procesar la siguiente línea del CSV
-		if err := c.processNextRow(reader, &batchBuff, &counter, &currentBatchNumber); err != nil {
-			// Si llegamos al final del archivo (EOF = End Of File)
-			if errors.Is(err, io.EOF) {
-				// Enviar cualquier batch parcial que quede en el buffer
-				if counter > 0 {
-					currentBatchNumber++ // Incrementar solo cuando realmente enviamos un batch
-					if err := FlushBatch(&batchBuff, c.conn, counter, c.opCode, currentBatchNumber, BatchEOF); err != nil {
-						return err
-					}
-				}
-				break // Salir del loop - archivo completamente procesado
-			}
-			// Si es cualquier otro error (CSV malformado, I/O, etc.), propagarlo
-			return err
-		}
+// handleConnectionSuccess maneja una conexión exitosa
+func (c *Client) handleConnectionSuccess(conn net.Conn, attempt int) {
+	c.conn = conn
+	log.Infof(
+		"action: connect | result: success | client_id: %v | attempt: %d",
+		c.config.ID,
+		attempt,
+	)
+}
+
+// handleConnectionFailure maneja un fallo de conexión
+func (c *Client) handleConnectionFailure(err error, attempt, maxRetries int) {
+	log.Warningf(
+		"action: connect | result: fail | client_id: %v | attempt: %d/%d | error: %v",
+		c.config.ID,
+		attempt,
+		maxRetries,
+		err,
+	)
+}
+
+// waitBeforeRetry espera antes del siguiente intento si no es el último
+func (c *Client) waitBeforeRetry(attempt, maxRetries int, retryInterval time.Duration) {
+	if attempt < maxRetries {
+		log.Infof(
+			"action: connect_retry | waiting: %v | client_id: %v | next_attempt: %d",
+			retryInterval,
+			c.config.ID,
+			attempt+1,
+		)
+		time.Sleep(retryInterval)
 	}
-	return nil
+}
+
+// logAllRetriesFailed registra cuando todos los intentos fallan
+func (c *Client) logAllRetriesFailed(maxRetries int, lastErr error) {
+	log.Criticalf(
+		"action: connect | result: fail_all_retries | client_id: %v | attempts: %d | error: %v",
+		c.config.ID,
+		maxRetries,
+		lastErr,
+	)
+}
+
+// attemptConnection intenta una sola conexión TCP
+func (c *Client) attemptConnection() (net.Conn, error) {
+	return net.Dial("tcp", c.config.ServerAddress)
 }
 
 // createClientSocket dials the configured ServerAddress and assigns the
@@ -274,53 +343,20 @@ func (c *Client) createClientSocket() error {
 	var lastErr error
 
 	for attempt := 1; attempt <= maxRetries; attempt++ {
-		log.Infof(
-			"action: connect | attempt: %d/%d | client_id: %v | server: %v",
-			attempt,
-			maxRetries,
-			c.config.ID,
-			c.config.ServerAddress,
-		)
+		c.logConnectionAttempt(attempt, maxRetries)
 
-		conn, err := net.Dial("tcp", c.config.ServerAddress)
+		conn, err := c.attemptConnection()
 		if err == nil {
-			c.conn = conn
-			log.Infof(
-				"action: connect | result: success | client_id: %v | attempt: %d",
-				c.config.ID,
-				attempt,
-			)
+			c.handleConnectionSuccess(conn, attempt)
 			return nil
 		}
 
 		lastErr = err
-		log.Warningf(
-			"action: connect | result: fail | client_id: %v | attempt: %d/%d | error: %v",
-			c.config.ID,
-			attempt,
-			maxRetries,
-			err,
-		)
-
-		// Si no es el último intento, esperar antes del siguiente
-		if attempt < maxRetries {
-			log.Infof(
-				"action: connect_retry | waiting: %v | client_id: %v | next_attempt: %d",
-				retryInterval,
-				c.config.ID,
-				attempt+1,
-			)
-			time.Sleep(retryInterval)
-		}
+		c.handleConnectionFailure(err, attempt, maxRetries)
+		c.waitBeforeRetry(attempt, maxRetries, retryInterval)
 	}
 
-	// Si llegamos aquí, todos los intentos fallaron
-	log.Criticalf(
-		"action: connect | result: fail_all_retries | client_id: %v | attempts: %d | error: %v",
-		c.config.ID,
-		maxRetries,
-		lastErr,
-	)
+	c.logAllRetriesFailed(maxRetries, lastErr)
 	return lastErr
 }
 
@@ -333,7 +369,7 @@ func (c *Client) closeConnection() {
 	}
 }
 
-func (c *Client) SendBets() {
+func (c *Client) SendBatch() {
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGTERM)
 	defer stop()
 
@@ -342,107 +378,106 @@ func (c *Client) SendBets() {
 	}
 	defer c.conn.Close()
 
-	// Start the response reader ONCE, outside the loop
 	readDone := make(chan struct{})
 	readResponse(c.conn, readDone)
 
-	// Loop configuration - now based on directory structure
-	var lastErr error
-	var batchNumber int64 = 1
-	// Read .data directory to get all subdirectories/table types
-	dataDir := "./data"
-	entries, dirErr := os.ReadDir(dataDir)
-	if dirErr != nil {
-		log.Errorf("Error reading data directory: %v", dirErr)
-		return
-	}
+	lastErr := c.processTables(ctx)
 
-	// Loop through each subdirectory (table type)
-	for _, entry := range entries {
-		if entry.IsDir() {
-			subDirPath := filepath.Join(dataDir, entry.Name())
-			tableType := entry.Name()
-
-			log.Infof("action: processing_table_type | table_type: %s | client_id: %v", tableType, c.config.ID)
-
-			// Set appropriate handler and opcode based on table type
-			if err := c.setHandlerForTableType(tableType); err != nil {
-				log.Infof("action: skip_table_type | table_type: %s | reason: unsupported | client_id: %v | error: %v", tableType, c.config.ID, err)
-				continue
-			}
-
-			// Read files in this subdirectory
-			files, err := os.ReadDir(subDirPath)
-			if err != nil {
-				log.Errorf("Error reading subdirectory %s: %v", subDirPath, err)
-				continue
-			}
-
-			// Process each file in this table type directory
-			for _, fileEntry := range files {
-				batchNumber = 0 // Reset batch number for each new file
-				if !fileEntry.IsDir() && filepath.Ext(fileEntry.Name()) == ".csv" {
-					fileName := fileEntry.Name()
-					filePath := filepath.Join(subDirPath, fileName)
-					log.Infof("action: processing_file: %s | result: success", filePath)
-
-					var file *os.File
-					file, err = os.Open(filePath)
-					if err != nil {
-						log.Criticalf("action: read_file | result: fail | file: %s | error: %v", filePath, err)
-						continue
-					}
-
-					reader := csv.NewReader(file)
-					reader.Comma = ','
-					// Skip header
-					if _, err := reader.Read(); err != nil {
-						log.Criticalf("action: read_file | result: fail | error: encabezado: %v", err)
-						file.Close()
-						continue
-					}
-					reader.FieldsPerRecord = -1
-
-					writeDone := make(chan error, 1)
-					go func() {
-						writeDone <- c.buildAndSendBatches(ctx, reader, batchNumber)
-					}()
-
-					lastErr = <-writeDone
-					if lastErr != nil && !errors.Is(lastErr, context.Canceled) {
-						log.Errorf("action: send_bets | result: fail | file: %s | error: %v", filePath, lastErr)
-						file.Close()
-
-						// Si es un error de conexión, terminar el programa completamente
-						if isConnectionError(lastErr) {
-							log.Criticalf("action: connection_lost | result: terminating | error: %v", lastErr)
-							c.closeConnection()
-							return // Salir de SendBets completamente
-						}
-						continue
-					}
-
-					file.Close()
-					log.Infof("action: completed_processing_file: %s | result: success", fileName)
-
-					// Add delay between files
-					time.Sleep(1 * time.Second)
-				}
-			}
-		}
-	}
-
-	// Send FINISHED only after all iterations are complete
 	if lastErr == nil {
 		c.sendFinished()
 	}
 
-	// Wait for final responses and cleanup
+	c.waitForResponses(ctx, readDone)
+}
+
+func (c *Client) processTables(ctx context.Context) error {
+	dataDir := "./data"
+	entries, err := os.ReadDir(dataDir)
+	if err != nil {
+		log.Errorf("Error reading data directory: %v", err)
+		return err
+	}
+
+	var lastErr error
+	for _, entry := range entries {
+		if entry.IsDir() {
+			if err := c.processTableType(ctx, dataDir, entry.Name()); err != nil {
+				lastErr = err
+				if isConnectionError(err) {
+					log.Criticalf("action: connection_lost | result: terminating | error: %v", err)
+					c.closeConnection()
+					return err
+				}
+			}
+		}
+	}
+	return lastErr
+}
+
+func (c *Client) processTableType(ctx context.Context, dataDir, tableType string) error {
+	subDirPath := filepath.Join(dataDir, tableType)
+	log.Infof("action: processing_table_type | table_type: %s | client_id: %v", tableType, c.config.ID)
+
+	if err := c.setHandlerForTableType(tableType); err != nil {
+		log.Infof("action: skip_table_type | table_type: %s | reason: unsupported | client_id: %v | error: %v", tableType, c.config.ID, err)
+		return nil
+	}
+
+	files, err := os.ReadDir(subDirPath)
+	if err != nil {
+		log.Errorf("Error reading subdirectory %s: %v", subDirPath, err)
+		return err
+	}
+
+	for _, fileEntry := range files {
+		if !fileEntry.IsDir() && filepath.Ext(fileEntry.Name()) == ".csv" {
+			if err := c.processFileAndSendBatch(ctx, subDirPath, fileEntry.Name()); err != nil {
+				return err
+			}
+			time.Sleep(1 * time.Second) // delay entre archivos
+		}
+	}
+	return nil
+}
+
+func (c *Client) processFileAndSendBatch(ctx context.Context, dir, fileName string) error {
+	filePath := filepath.Join(dir, fileName)
+	log.Infof("action: processing_file: %s | result: success", filePath)
+
+	file, err := os.Open(filePath)
+	if err != nil {
+		log.Criticalf("action: read_file | result: fail | file: %s | error: %v", filePath, err)
+		return err
+	}
+	defer file.Close()
+
+	reader := csv.NewReader(file)
+	reader.Comma = ','
+	if _, err := reader.Read(); err != nil { // skip header
+		log.Criticalf("action: read_file | result: fail | error: encabezado: %v", err)
+		return err
+	}
+	reader.FieldsPerRecord = -1
+
+	writeDone := make(chan error, 1)
+	go func() {
+		writeDone <- c.buildAndSendBatches(ctx, reader, 0) // batchNumber reseteado en cada archivo
+	}()
+
+	if err := <-writeDone; err != nil && !errors.Is(err, context.Canceled) {
+		log.Errorf("action: send_bets | result: fail | file: %s | error: %v", filePath, err)
+		return err
+	}
+
+	log.Infof("action: completed_processing_file: %s | result: success", fileName)
+	return nil
+}
+
+func (c *Client) waitForResponses(ctx context.Context, readDone chan struct{}) {
 	select {
 	case <-ctx.Done():
 		_ = c.conn.SetReadDeadline(time.Now().Add(2 * time.Second))
 		<-readDone
-		return
 	case <-readDone:
 		if tcp, ok := c.conn.(*net.TCPConn); ok {
 			_ = tcp.CloseWrite()
