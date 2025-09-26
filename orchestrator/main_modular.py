@@ -4,8 +4,6 @@ import logging
 import os
 from configparser import ConfigParser
 
-# Import both versions for flexibility
-from app.net import Orchestrator as LegacyOrchestrator
 from app.net_modular import ModularOrchestrator
 
 
@@ -39,11 +37,6 @@ def initialize_config():
         )
         config_params["clients_amount"] = os.getenv("CLIENTS_AMOUNT")
         
-        # New config parameter to choose between legacy and modular
-        config_params["use_modular"] = os.getenv(
-            "USE_MODULAR_ARCHITECTURE", config.get("DEFAULT", "USE_MODULAR_ARCHITECTURE", fallback="true")
-        ).lower() in ("true", "1", "yes")
-        
     except KeyError as e:
         raise KeyError("Key was not found. Error: {} .Aborting server".format(e))
     except ValueError as e:
@@ -60,7 +53,6 @@ def main():
     port = config_params["port"]
     listen_backlog = config_params["listen_backlog"]
     clients_amount = config_params["clients_amount"]
-    use_modular = config_params["use_modular"]
 
     initialize_log(logging_level)
 
@@ -68,18 +60,12 @@ def main():
     # of the component
     logging.debug(
         f"action: config | result: success | port: {port} | "
-        f"listen_backlog: {listen_backlog} | logging_level: {logging_level} | "
-        f"use_modular: {use_modular}"
+        f"listen_backlog: {listen_backlog} | logging_level: {logging_level}"
     )
 
-    # Initialize server based on configuration
-    if use_modular:
-        logging.info("action: server_init | architecture: modular")
-        server = ModularOrchestrator(port, listen_backlog)
-    else:
-        logging.info("action: server_init | architecture: legacy")
-        server = LegacyOrchestrator(port, listen_backlog)
-        
+    # Initialize server
+    logging.info("action: server_init | architecture: modular")
+    server = ModularOrchestrator(port, listen_backlog)
     server.run()
 
 
