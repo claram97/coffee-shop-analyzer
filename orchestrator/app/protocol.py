@@ -145,23 +145,24 @@ class TableMessage:
         # `row_factory` es una función o clase que convierte un dict en un objeto
         self._row_factory = row_factory
 
-    def __read_row(self, sock: socket.socket, remaining: int) -> int:
-        """Lee un único registro (fila) de la tabla."""
-        current_row_data: dict[str, str] = {}
-        (n_pairs, remaining) = read_i32(sock, remaining, self.opcode)
-
-        # La validación ahora es genérica
+    def _validate_pair_count(self, n_pairs: int):
+        """Valida que el número de pares coincida con las claves requeridas."""
         if n_pairs != len(self.required_keys):
             raise ProtocolError(
                 f"Expected {len(self.required_keys)} pairs, got {n_pairs}", self.opcode
             )
 
+    def _read_key_value_pairs(self, sock: socket.socket, remaining: int, n_pairs: int) -> tuple[dict[str, str], int]:
+        """Lee todos los pares clave-valor de una fila."""
+        current_row_data: dict[str, str] = {}
         for _ in range(n_pairs):
             (key, remaining) = read_string(sock, remaining, self.opcode)
             (value, remaining) = read_string(sock, remaining, self.opcode)
             current_row_data[key] = value
+        return current_row_data, remaining
 
-        # Verificación de claves genérica
+    def _validate_required_keys(self, current_row_data: dict[str, str]):
+        """Valida que todas las claves requeridas estén presentes."""
         missing_keys = [
             key for key in self.required_keys if key not in current_row_data
         ]
@@ -172,10 +173,64 @@ class TableMessage:
                 self.opcode,
             )
 
+    def _create_row_object(self, current_row_data: dict[str, str]):
+        """Crea el objeto de fila usando el row_factory."""
         # Por defecto: claves a minúsculas
         kwargs = {key.lower(): value for key, value in current_row_data.items()}
         self.rows.append(self._row_factory(**kwargs))
+
+    def __read_row(self, sock: socket.socket, remaining: int) -> int:
+        """Lee un único registro (fila) de la tabla."""
+        # Leer número de pares
+        (n_pairs, remaining) = read_i32(sock, remaining, self.opcode)
+        
+        # Validar número de pares
+        self._validate_pair_count(n_pairs)
+        
+        # Leer todos los pares clave-valor
+        current_row_data, remaining = self._read_key_value_pairs(sock, remaining, n_pairs)
+        
+        # Validar que todas las claves requeridas estén presentes
+        self._validate_required_keys(current_row_data)
+        
+        # Crear el objeto de fila
+        self._create_row_object(current_row_data)
+        
         return remaining
+
+    def _read_table_header(self, sock: socket.socket, remaining: int) -> int:
+        """Lee el header de la tabla: número de filas, número de batch y status."""
+        # Leer número de filas
+        (n_rows, remaining) = read_i32(sock, remaining, self.opcode)
+        self.amount = n_rows
+        
+        # Leer número de batch
+        (batch_number, remaining) = read_i64(sock, remaining, self.opcode)
+        self.batch_number = batch_number
+        
+        # NUEVO: Leer status del batch
+        (batch_status, remaining) = _read_u8_with_remaining(sock, remaining, self.opcode)
+        self.batch_status = batch_status
+        
+        return remaining
+
+    def _read_all_rows(self, sock: socket.socket, remaining: int, n_rows: int) -> int:
+        """Lee todas las filas de la tabla."""
+        for _ in range(n_rows):
+            remaining = self.__read_row(sock, remaining)
+        return remaining
+
+    def _validate_message_length(self, remaining: int):
+        """Valida que no queden bytes sin procesar."""
+        if remaining != 0:
+            raise ProtocolError(
+                "Indicated length doesn't match body length", self.opcode
+            )
+
+    def _handle_protocol_error(self, sock: socket.socket, remaining: int):
+        """Maneja errores de protocolo consumiendo bytes restantes."""
+        if remaining > 0:
+            _ = recv_exactly(sock, remaining)
 
     def read_from(self, sock: socket.socket, length: int):
         """Parsea el cuerpo completo del mensaje de la tabla.
@@ -185,29 +240,17 @@ class TableMessage:
         """
         remaining = length
         try:
-            # Leer número de filas
-            (n_rows, remaining) = read_i32(sock, remaining, self.opcode)
-            self.amount = n_rows
-            
-            # Leer número de batch
-            (batch_number, remaining) = read_i64(sock, remaining, self.opcode)
-            self.batch_number = batch_number
-            
-            # NUEVO: Leer status del batch
-            (batch_status, remaining) = _read_u8_with_remaining(sock, remaining, self.opcode)
-            self.batch_status = batch_status
+            # Leer header de la tabla
+            remaining = self._read_table_header(sock, remaining)
             
             # Leer todas las filas
-            for _ in range(n_rows):
-                remaining = self.__read_row(sock, remaining)
+            remaining = self._read_all_rows(sock, remaining, self.amount)
 
-            if remaining != 0:
-                raise ProtocolError(
-                    "Indicated length doesn't match body length", self.opcode
-                )
+            # Validar que no queden bytes sin procesar
+            self._validate_message_length(remaining)
+            
         except ProtocolError:
-            if remaining > 0:
-                _ = recv_exactly(sock, remaining)
+            self._handle_protocol_error(sock, remaining)
             raise
 
 
