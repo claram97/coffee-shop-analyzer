@@ -440,37 +440,63 @@ func (c *Client) processTableType(ctx context.Context, dataDir, tableType string
 	return nil
 }
 
-func (c *Client) processFileAndSendBatch(ctx context.Context, dir, fileName string) error {
-	filePath := filepath.Join(dir, fileName)
-	log.Infof("action: processing_file: %s | result: success", filePath)
+// openAndPrepareFile abre el archivo y registra el inicio del procesamiento
+func (c *Client) openAndPrepareFile(filePath string) (*os.File, error) {
+	log.Infof("action: processing_file | file: %s", filePath)
 
 	file, err := os.Open(filePath)
 	if err != nil {
 		log.Criticalf("action: read_file | result: fail | file: %s | error: %v", filePath, err)
-		return err
+		return nil, err
 	}
-	defer file.Close()
+	return file, nil
+}
 
+// setupCSVReader configura el lector CSV y salta el header
+func (c *Client) setupCSVReader(file *os.File) (*csv.Reader, error) {
 	reader := csv.NewReader(file)
 	reader.Comma = ','
-	if _, err := reader.Read(); err != nil { // skip header
-		log.Criticalf("action: read_file | result: fail | error: encabezado: %v", err)
-		return err
-	}
 	reader.FieldsPerRecord = -1
 
+	// Skip header
+	if _, err := reader.Read(); err != nil {
+		log.Criticalf("action: read_header | result: fail | error: %v", err)
+		return nil, err
+	}
+	return reader, nil
+}
+
+// processFileAsync procesa el archivo de forma asíncrona y maneja los resultados
+func (c *Client) processFileAsync(ctx context.Context, reader *csv.Reader, fileName string) error {
 	writeDone := make(chan error, 1)
 	go func() {
 		writeDone <- c.buildAndSendBatches(ctx, reader, 0) // batchNumber reseteado en cada archivo
 	}()
 
 	if err := <-writeDone; err != nil && !errors.Is(err, context.Canceled) {
-		log.Errorf("action: send_bets | result: fail | file: %s | error: %v", filePath, err)
+		log.Errorf("action: send_batches | result: fail | file: %s | error: %v", fileName, err)
 		return err
 	}
 
-	log.Infof("action: completed_processing_file: %s | result: success", fileName)
+	log.Infof("action: completed_processing_file | file: %s | result: success", fileName)
 	return nil
+}
+
+func (c *Client) processFileAndSendBatch(ctx context.Context, dir, fileName string) error {
+	filePath := filepath.Join(dir, fileName)
+
+	file, err := c.openAndPrepareFile(filePath)
+	if err != nil {
+		return err
+	}
+	defer file.Close()
+
+	reader, err := c.setupCSVReader(file)
+	if err != nil {
+		return err
+	}
+
+	return c.processFileAsync(ctx, reader, fileName)
 }
 
 func (c *Client) waitForResponses(ctx context.Context, readDone chan struct{}) {
@@ -485,6 +511,45 @@ func (c *Client) waitForResponses(ctx context.Context, readDone chan struct{}) {
 	}
 }
 
+// handleReadError maneja los diferentes tipos de errores de lectura
+func handleReadError(err error) bool {
+	if errors.Is(err, io.EOF) {
+		log.Infof("action: leer_respuesta | result: server_closed_connection")
+	} else if isConnectionError(err) {
+		log.Criticalf("action: leer_respuesta | result: connection_lost | err: %v", err)
+	} else {
+		log.Errorf("action: leer_respuesta | result: fail | err: %v", err)
+	}
+	return true // Indica que se debe terminar el loop
+}
+
+// handleResponseMessage procesa un mensaje de respuesta recibido
+func handleResponseMessage(msg interface{}) {
+	// Usamos type assertion para acceder al método GetOpCode()
+	if respMsg, ok := msg.(interface{ GetOpCode() byte }); ok {
+		switch respMsg.GetOpCode() {
+		case BetsRecvSuccessOpCode:
+			log.Info("action: bets_enviadas | result: success")
+		case BetsRecvFailOpCode:
+			log.Error("action: bets_enviadas | result: fail")
+		}
+	}
+}
+
+// responseReaderLoop ejecuta el loop principal de lectura de respuestas
+func responseReaderLoop(reader *bufio.Reader) {
+	for {
+		msg, err := ReadMessage(reader)
+		if err != nil {
+			if handleReadError(err) {
+				break
+			}
+			continue
+		}
+		handleResponseMessage(msg)
+	}
+}
+
 // readResponse consumes server responses from conn in a dedicated goroutine.
 // It logs per-message results and terminates when:
 //   - an I/O error occurs (EOF included), or
@@ -493,25 +558,7 @@ func (c *Client) waitForResponses(ctx context.Context, readDone chan struct{}) {
 func readResponse(conn net.Conn, readDone chan struct{}) {
 	reader := bufio.NewReader(conn)
 	go func() {
-		for {
-			msg, err := ReadMessage(reader)
-			if err != nil {
-				if errors.Is(err, io.EOF) {
-					log.Infof("action: leer_respuesta | result: server_closed_connection")
-				} else if isConnectionError(err) {
-					log.Criticalf("action: leer_respuesta | result: connection_lost | err: %v", err)
-				} else {
-					log.Errorf("action: leer_respuesta | result: fail | err: %v", err)
-				}
-				break
-			}
-			switch msg.GetOpCode() {
-			case BetsRecvSuccessOpCode:
-				log.Info("action: bets_enviadas | result: success")
-			case BetsRecvFailOpCode:
-				log.Error("action: bets_enviadas | result: fail")
-			}
-		}
+		responseReaderLoop(reader)
 		close(readDone)
 	}()
 }
