@@ -111,6 +111,46 @@ func writeStringMap(buff *bytes.Buffer, body map[string]string) error {
 	return nil
 }
 
+// serializeRowToBuffer serializes a row to a temporary buffer for size calculation
+func serializeRowToBuffer(row map[string]string) (*bytes.Buffer, error) {
+	var buff bytes.Buffer
+	if err := writeStringMap(&buff, row); err != nil {
+		return nil, err
+	}
+	return &buff, nil
+}
+
+// canFitInCurrentBatch checks if a new row can fit in the current batch
+func canFitInCurrentBatch(currentBatchSize, newRowSize int, counter int32, batchLimit int32) bool {
+	const headerOverhead = 18 // +1 (opcode) +4 (length) +4 (nLines) +8 (batchNumber) +1 (status)
+	return currentBatchSize+newRowSize+headerOverhead <= MaxBatchSizeBytes && counter+1 <= batchLimit
+}
+
+// addRowToCurrentBatch adds a serialized row to the current batch buffer
+func addRowToCurrentBatch(to *bytes.Buffer, rowBuffer *bytes.Buffer, counter *int32) error {
+	_, err := io.Copy(to, rowBuffer)
+	if err != nil {
+		return err
+	}
+	*counter++
+	return nil
+}
+
+// flushCurrentBatch flushes the current batch and increments the batch number
+func flushCurrentBatch(to *bytes.Buffer, finalOutput io.Writer, counter int32, opCode byte, batchNumber *int64) error {
+	*batchNumber++ // Incrementar el número de batch antes de enviarlo
+	return FlushBatch(to, finalOutput, counter, opCode, *batchNumber, BatchContinue)
+}
+
+// startNewBatchWithRow starts a new batch with the given row
+func startNewBatchWithRow(to *bytes.Buffer, row map[string]string, counter *int32) error {
+	if err := writeStringMap(to, row); err != nil {
+		return err
+	}
+	*counter = 1
+	return nil
+}
+
 // AddRowToBatch serializes a single row as a [string map] and attempts to
 // append it to the current batch buffer `to`. If appending would exceed the
 // MaxBatchSizeBytes limit (including opcode+length+n headers) or the given
@@ -119,35 +159,61 @@ func writeStringMap(buff *bytes.Buffer, body map[string]string) error {
 // On success, it increments *counter and returns nil; any I/O/encoding
 // error is returned. NOTE: batchNumber is used for the current batch being built.
 func AddRowToBatch(row map[string]string, to *bytes.Buffer, finalOutput io.Writer, counter *int32, batchLimit int32, opCode byte, batchNumber *int64) error {
-	var buff bytes.Buffer
-	if err := writeStringMap(&buff, row); err != nil {
+	// Serialize the row to calculate its size
+	rowBuffer, err := serializeRowToBuffer(row)
+	if err != nil {
 		return err
 	}
 
-	// Verificar si la nueva fila cabe en el batch actual (MaxBatchSizeBytes y límite de filas)
-	// +1 (opcode) +4 (length) +4 (nLines) +8 (batchNumber) +1 (status) = 18 bytes de overhead
-	const headerOverhead = 18
-	if to.Len()+buff.Len()+headerOverhead <= MaxBatchSizeBytes && *counter+1 <= batchLimit {
-		// Cabe en el batch actual, agregarlo
-		_, err := io.Copy(to, &buff)
-		if err != nil {
-			return err
-		}
-		*counter++
-		return nil
+	// Check if the row fits in current batch
+	if canFitInCurrentBatch(to.Len(), rowBuffer.Len(), *counter, batchLimit) {
+		return addRowToCurrentBatch(to, rowBuffer, counter)
 	}
 
-	// No cabe en el batch actual, hacer flush del batch completo
-	*batchNumber++ // Incrementar el número de batch antes de enviarlo
-	if err := FlushBatch(to, finalOutput, *counter, opCode, *batchNumber, BatchContinue); err != nil {
+	// Flush current batch and start new one
+	if err := flushCurrentBatch(to, finalOutput, *counter, opCode, batchNumber); err != nil {
 		return err
 	}
 
-	// Empezar un nuevo batch con esta fila
-	if err := writeStringMap(to, row); err != nil {
+	return startNewBatchWithRow(to, row, counter)
+}
+
+// writeOpCode writes the opcode field to the output
+func writeOpCode(out io.Writer, opCode byte) error {
+	return binary.Write(out, binary.LittleEndian, opCode)
+}
+
+// calculateMessageLength calculates the total message length including headers and body
+func calculateMessageLength(bodyLen int) int32 {
+	return int32(4 + 8 + 1 + bodyLen) // nLines + batchNumber + status + bodyLen
+}
+
+// writeMessageLength writes the message length field to the output
+func writeMessageLength(out io.Writer, length int32) error {
+	return binary.Write(out, binary.LittleEndian, length)
+}
+
+// writeLineCounter writes the number of lines field to the output
+func writeLineCounter(out io.Writer, counter int32) error {
+	return binary.Write(out, binary.LittleEndian, counter)
+}
+
+// writeBatchNumber writes the batch number field to the output
+func writeBatchNumber(out io.Writer, batchNumber int64) error {
+	return binary.Write(out, binary.LittleEndian, batchNumber)
+}
+
+// writeBatchStatus writes the batch status field to the output
+func writeBatchStatus(out io.Writer, batchStatus byte) error {
+	return binary.Write(out, binary.LittleEndian, batchStatus)
+}
+
+// writeMessageBody writes the message body and resets the batch buffer
+func writeMessageBody(out io.Writer, batch *bytes.Buffer) error {
+	if _, err := io.Copy(out, batch); err != nil {
 		return err
 	}
-	*counter = 1
+	batch.Reset()
 	return nil
 }
 
@@ -158,38 +224,34 @@ func AddRowToBatch(row map[string]string, to *bytes.Buffer, finalOutput io.Write
 //
 // After a successful write it resets the batch buffer. Any write error is returned.
 func FlushBatch(batch *bytes.Buffer, out io.Writer, counter int32, opCode byte, batchNumber int64, batchStatus byte) error {
-	// [opcode:1]
-	if err := binary.Write(out, binary.LittleEndian, opCode); err != nil {
+	// Write opcode
+	if err := writeOpCode(out, opCode); err != nil {
 		return err
 	}
 
-	// [length:i32] - Ahora incluye 4 (nLines) + 8 (batchNumber) + 1 (status) + bodyLen
-	if err := binary.Write(out, binary.LittleEndian, int32(4+8+1+batch.Len())); err != nil {
+	// Write message length
+	length := calculateMessageLength(batch.Len())
+	if err := writeMessageLength(out, length); err != nil {
 		return err
 	}
 
-	// [nLines:i32]
-	if err := binary.Write(out, binary.LittleEndian, counter); err != nil {
+	// Write line counter
+	if err := writeLineCounter(out, counter); err != nil {
 		return err
 	}
 
-	// [batchNumber:i64]
-	if err := binary.Write(out, binary.LittleEndian, batchNumber); err != nil {
+	// Write batch number
+	if err := writeBatchNumber(out, batchNumber); err != nil {
 		return err
 	}
 
-	// [status:u8] ← NUEVO CAMPO - BatchStatus (Continue/EOF/Cancel)
-	if err := binary.Write(out, binary.LittleEndian, batchStatus); err != nil {
+	// Write batch status
+	if err := writeBatchStatus(out, batchStatus); err != nil {
 		return err
 	}
 
-	// [body]
-	if _, err := io.Copy(out, batch); err != nil {
-		return err
-	}
-
-	batch.Reset()
-	return nil
+	// Write message body and reset buffer
+	return writeMessageBody(out, batch)
 }
 
 // Readable is implemented by inbound messages that can parse themselves
