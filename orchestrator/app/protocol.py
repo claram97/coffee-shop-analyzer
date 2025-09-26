@@ -554,19 +554,17 @@ class DataBatch:
       [embedded message]          # [u8 inner_opcode][i32 inner_len][inner_body]
     """
 
-    def __init__(
+    def _initialize_fields(
         self,
-        *,
-        # Parámetros para SERIALIZACIÓN (todos los previos al batch interno):
-        table_ids: Optional[List[int]] = None,
-        query_ids: Optional[List[int]] = None,
-        meta: Optional[Dict[int, int]] = None,
-        total_shards: Optional[int] = None,
-        shard_num: Optional[int] = None,
-        reserved_u16: int = 0,
-        # Bytes ya enmarcados del mensaje embebido (opcional; se requiere para write_to)
-        batch_bytes: Optional[bytes] = None,
+        table_ids: Optional[List[int]],
+        query_ids: Optional[List[int]], 
+        meta: Optional[Dict[int, int]],
+        total_shards: Optional[int],
+        shard_num: Optional[int],
+        reserved_u16: int,
+        batch_bytes: Optional[bytes]
     ):
+        """Inicializa todos los campos del DataBatch con valores por defecto o los proporcionados."""
         self.opcode = Opcodes.DATA_BATCH
 
         # Si los campos vienen None, asumimos que se usará para DESERIALIZAR y se inicializan
@@ -582,29 +580,69 @@ class DataBatch:
         self.batch_msg = None  # instancia parseada (solo deserialización)
         self.batch_bytes: Optional[bytes] = batch_bytes  # framing crudo (serialización)
 
+    def _validate_u8_list(self, items: List[int], field_name: str):
+        """Valida que una lista contenga solo valores u8 válidos."""
+        if len(items) > 255:
+            raise ValueError(f"{field_name} must have at most 255 items")
+        if any(not 0 <= x <= 255 for x in items):
+            raise ValueError(f"{field_name} must contain only u8 values (0-255)")
+
+    def _validate_u8_dict(self, meta_dict: Dict[int, int]):
+        """Valida que un diccionario tenga claves y valores u8 válidos."""
+        if len(meta_dict) > 255:
+            raise ValueError("meta size must be <= 255")
+        for k, v in meta_dict.items():
+            if not (0 <= int(k) <= 255 and 0 <= int(v) <= 255):
+                raise ValueError("meta keys/values must be u8")
+
+    def _validate_u16_field(self, value: int, field_name: str):
+        """Valida que un valor esté en el rango u16 válido."""
+        if not (0 <= value <= 0xFFFF):
+            raise ValueError(f"{field_name} must be u16 (0-65535)")
+
+    def _validate_serialization_parameters(
+        self,
+        table_ids: Optional[List[int]],
+        query_ids: Optional[List[int]],
+        meta: Optional[Dict[int, int]]
+    ):
+        """Valida los parámetros solo si el objeto parece destinado a serialización."""
         # Validaciones solo si el objeto parece destinado a serialización
         if table_ids is not None:
-            if len(self.table_ids) > 255 or any(
-                not 0 <= x <= 255 for x in self.table_ids
-            ):
-                raise ValueError("table_ids must be u8 and at most 255 items")
+            self._validate_u8_list(self.table_ids, "table_ids")
+        
         if query_ids is not None:
-            if len(self.query_ids) > 255 or any(
-                not 0 <= x <= 255 for x in self.query_ids
-            ):
-                raise ValueError("query_ids must be u8 and at most 255 items")
+            self._validate_u8_list(self.query_ids, "query_ids")
+        
         if meta is not None:
-            if len(self.meta) > 255:
-                raise ValueError("meta size must be <= 255")
-            for k, v in self.meta.items():
-                if not (0 <= int(k) <= 255 and 0 <= int(v) <= 255):
-                    raise ValueError("meta keys/values must be u8")
-        if not (0 <= self.reserved_u16 <= 0xFFFF):
-            raise ValueError("reserved_u16 must be u16")
-        if not (0 <= self.total_shards <= 0xFFFF):
-            raise ValueError("total_shards must be u16")
-        if not (0 <= self.shard_num <= 0xFFFF):
-            raise ValueError("shard_num must be u16")
+            self._validate_u8_dict(self.meta)
+        
+        # Validar campos u16
+        self._validate_u16_field(self.reserved_u16, "reserved_u16")
+        self._validate_u16_field(self.total_shards, "total_shards")
+        self._validate_u16_field(self.shard_num, "shard_num")
+
+    def __init__(
+        self,
+        *,
+        # Parámetros para SERIALIZACIÓN (todos los previos al batch interno):
+        table_ids: Optional[List[int]] = None,
+        query_ids: Optional[List[int]] = None,
+        meta: Optional[Dict[int, int]] = None,
+        total_shards: Optional[int] = None,
+        shard_num: Optional[int] = None,
+        reserved_u16: int = 0,
+        # Bytes ya enmarcados del mensaje embebido (opcional; se requiere para write_to)
+        batch_bytes: Optional[bytes] = None,
+    ):
+        # Inicializar todos los campos
+        self._initialize_fields(
+            table_ids, query_ids, meta, total_shards, 
+            shard_num, reserved_u16, batch_bytes
+        )
+
+        # Validar parámetros de serialización
+        self._validate_serialization_parameters(table_ids, query_ids, meta)
 
     # --- Helper para framing del mensaje interno (opcional) ---
     @staticmethod
@@ -622,38 +660,59 @@ class DataBatch:
         framed.extend(inner_body)
         return bytes(framed)
 
+    def _read_data_batch_header(self, sock: socket.socket, remaining: int) -> int:
+        """Lee el header del DataBatch: table_ids, query_ids, reserved, batch_number, meta, shards."""
+        self.table_ids, remaining = _read_u8_list(sock, remaining, self.opcode)
+        self.query_ids, remaining = _read_u8_list(sock, remaining, self.opcode)
+        self.reserved_u16, remaining = read_u16(sock, remaining, self.opcode)
+        self.batch_number, remaining = read_i64(sock, remaining, self.opcode)
+        self.meta, remaining = _read_u8_u8_dict(sock, remaining, self.opcode)
+        self.total_shards, remaining = read_u16(sock, remaining, self.opcode)
+        self.shard_num, remaining = read_u16(sock, remaining, self.opcode)
+        return remaining
+
+    def _read_embedded_message(self, sock: socket.socket, remaining: int) -> int:
+        """Lee el mensaje embebido dentro del DataBatch."""
+        # Leer opcode y longitud del mensaje interno
+        inner_opcode, remaining = _read_u8_with_remaining(sock, remaining, self.opcode)
+        inner_len, remaining = read_i32(sock, remaining, self.opcode)
+
+        # Crear e instanciar el mensaje apropiado
+        inner_msg = _instantiate_message_for_opcode(inner_opcode)
+        inner_msg.read_from(sock, inner_len)  # esta llamada consume exactamente inner_len o lanza
+        self.batch_msg = inner_msg
+        
+        # Actualizar remaining después de leer el mensaje embebido
+        remaining -= inner_len
+        return remaining
+
+    def _validate_remaining_bytes(self, remaining: int):
+        """Valida que no queden bytes sin procesar después de la deserialización."""
+        if remaining != 0:
+            raise ProtocolError(
+                "Indicated length doesn't match body length", self.opcode
+            )
+
+    def _handle_protocol_error(self, sock: socket.socket, remaining: int):
+        """Maneja errores de protocolo consumiendo bytes restantes."""
+        if remaining > 0:
+            _ = recv_exactly(sock, remaining)
+
     # --- Deserialización (igual que antes) ---
     def read_from(self, sock: socket.socket, length: int):
         remaining = length
         try:
-            self.table_ids, remaining = _read_u8_list(sock, remaining, self.opcode)
-            self.query_ids, remaining = _read_u8_list(sock, remaining, self.opcode)
-            self.reserved_u16, remaining = read_u16(sock, remaining, self.opcode)
-            self.batch_number, remaining = read_i64(sock, remaining, self.opcode)
-            self.meta, remaining = _read_u8_u8_dict(sock, remaining, self.opcode)
-            self.total_shards, remaining = read_u16(sock, remaining, self.opcode)
-            self.shard_num, remaining = read_u16(sock, remaining, self.opcode)
+            # Leer header del DataBatch
+            remaining = self._read_data_batch_header(sock, remaining)
 
-            inner_opcode, remaining = _read_u8_with_remaining(
-                sock, remaining, self.opcode
-            )
-            inner_len, remaining = read_i32(sock, remaining, self.opcode)
+            # Leer mensaje embebido
+            remaining = self._read_embedded_message(sock, remaining)
 
-            inner_msg = _instantiate_message_for_opcode(inner_opcode)
-            inner_msg.read_from(
-                sock, inner_len
-            )  # esta llamada consume exactamente inner_len o lanza
-            self.batch_msg = inner_msg
-            remaining -= inner_len
-
-            if remaining != 0:
-                raise ProtocolError(
-                    "Indicated length doesn't match body length", self.opcode
-                )
+            # Validar que no queden bytes sin procesar
+            self._validate_remaining_bytes(remaining)
 
         except ProtocolError:
-            if remaining > 0:
-                _ = recv_exactly(sock, remaining)
+            self._handle_protocol_error(sock, remaining)
             raise
 
     # Dejo esta por si la usamos para escribir al socket del cliente
