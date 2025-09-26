@@ -91,92 +91,136 @@ class Orchestrator:
                 break
         client_sock.close()
 
-    def __process_msg(self, msg, client_sock) -> bool:
-        """Process a decoded message.""" # <-- CORRECCIÓN 2: Docstring simplificado
-        if msg.opcode != protocol.Opcodes.FINISHED and msg.opcode != protocol.Opcodes.BETS_RECV_SUCCESS and msg.opcode != protocol.Opcodes.BETS_RECV_FAIL:
-            try:
-                # Mapear el status a texto legible
-                status_names = {0: "Continue", 1: "EOF", 2: "Cancel"}
-                status_text = status_names.get(msg.batch_status, f"Unknown({msg.batch_status})")
-                
-                # 1. Escribir el mensaje original recibido
-                with open("received_messages.txt", "a", encoding="utf-8") as f:
-                    f.write(f"=== Mensaje ORIGINAL - Opcode: {msg.opcode} - Cantidad: {msg.amount} - Batch: {msg.batch_number} - Status: {status_text} ===\n")
-                    for i, row in enumerate(msg.rows):
-                        f.write(f"Row {i+1}: {row.__dict__}\n")
-                    f.write("\n")
-                
-                # 2. Crear mensaje filtrado usando la nueva función
-                try:
-                    filtered_batch = protocol.create_filtered_data_batch(msg)
-                    
-                    # Generar los bytes y loggear información
-                    batch_bytes = filtered_batch.to_bytes()
-                   
-                    # self._filter_router_queue.send(batch_bytes)
-                    
-                    # 3. Escribir el mensaje filtrado a un archivo separado
-                    with open("filtered_messages.txt", "a", encoding="utf-8") as f:
-                        f.write(f"=== Mensaje FILTRADO - Tabla: {filtered_batch.filtered_data['table_name']} - Original: {filtered_batch.filtered_data['original_row_count']} - Filtrado: {filtered_batch.filtered_data['filtered_row_count']} - Batch: {filtered_batch.filtered_data['batch_number']} - Status: {status_text} ===\n")
-                        f.write(f"Query IDs: {filtered_batch.query_ids}\n")
-                        f.write(f"Table IDs: {filtered_batch.table_ids}\n")
-                        f.write(f"Total Shards: {filtered_batch.total_shards}, Shard Num: {filtered_batch.shard_num}\n")
-                        for i, row in enumerate(filtered_batch.filtered_data['rows']):
-                            f.write(f"Row {i+1}: {row}\n")
-                        f.write("\n")
-                        
-                    # Log del filtrado
-                    logging.info(
-                        "action: batch_filtered | table: %s | original_count: %d | filtered_count: %d | batch_number: %d | status: %s",
-                        filtered_batch.filtered_data['table_name'],
-                        filtered_batch.filtered_data['original_row_count'],
-                        filtered_batch.filtered_data['filtered_row_count'],
-                        filtered_batch.filtered_data['batch_number'],
-                        status_text
-                    )
-                    
-                except Exception as filter_error:
-                    logging.warning(
-                        "action: batch_filter | result: fail | batch_number: %d | opcode: %d | error: %s",
-                        getattr(msg, 'batch_number', 0), msg.opcode, str(filter_error)
-                    )
-                
-            except Exception as e:
-                protocol.BetsRecvFail().write_to(client_sock)
-                logging.error(
-                    "action: batch_recibido | result: fail | batch_number: %d | cantidad: %d | error: %s", 
-                    getattr(msg, 'batch_number', 0), msg.amount, str(e)
-                )
-                return True
+    def _get_status_text(self, batch_status: int) -> str:
+        """Convierte el batch status a texto legible."""
+        status_names = {0: "Continue", 1: "EOF", 2: "Cancel"}
+        return status_names.get(batch_status, f"Unknown({batch_status})")
+
+    def _write_original_message(self, msg, status_text: str):
+        """Escribe el mensaje original a archivo para debugging."""
+        with open("received_messages.txt", "a", encoding="utf-8") as f:
+            f.write(f"=== Mensaje ORIGINAL - Opcode: {msg.opcode} - Cantidad: {msg.amount} - Batch: {msg.batch_number} - Status: {status_text} ===\n")
+            for i, row in enumerate(msg.rows):
+                f.write(f"Row {i+1}: {row.__dict__}\n")
+            f.write("\n")
+
+    def _process_filtered_batch(self, msg, status_text: str):
+        """Procesa y escribe el batch filtrado."""
+        try:
+            filtered_batch = protocol.create_filtered_data_batch(msg)
             
-            # Log mejorado con batch_number y status
-            logging.info(
-                "action: batch_recibido | result: success | opcode: %d | cantidad: %d | batch_number: %d | status: %s",
-                msg.opcode, msg.amount, msg.batch_number, status_text
+            # Generar los bytes y loggear información
+            batch_bytes = filtered_batch.to_bytes()
+           
+            # self._filter_router_queue.send(batch_bytes)
+            
+            # Escribir el mensaje filtrado a archivo
+            self._write_filtered_message(filtered_batch, status_text)
+            
+            # Log del filtrado
+            self._log_batch_filtered(filtered_batch, status_text)
+            
+        except Exception as filter_error:
+            logging.warning(
+                "action: batch_filter | result: fail | batch_number: %d | opcode: %d | error: %s",
+                getattr(msg, 'batch_number', 0), msg.opcode, str(filter_error)
             )
-            
-            # Log adicional con preview de datos
-            try:
-                if msg.rows and len(msg.rows) > 0:
-                    sample_rows = msg.rows[:2]  # Primeras 2 filas como muestra
-                    all_keys = set()
-                    for row in sample_rows:
-                        all_keys.update(row.__dict__.keys())
-                    
-                    sample_data = [row.__dict__ for row in sample_rows]
-                    
-                    logging.debug(
-                        "action: batch_preview | batch_number: %d | status: %s | opcode: %d | keys: %s | sample_count: %d | sample: %s",
-                        msg.batch_number, status_text, msg.opcode, sorted(list(all_keys)), len(sample_rows), sample_data
-                    )
-            except Exception:
-                logging.debug("action: batch_preview | batch_number: %d | result: skip", getattr(msg, 'batch_number', 0))
+
+    def _write_filtered_message(self, filtered_batch, status_text: str):
+        """Escribe el mensaje filtrado a archivo para debugging."""
+        with open("filtered_messages.txt", "a", encoding="utf-8") as f:
+            f.write(f"=== Mensaje FILTRADO - Tabla: {filtered_batch.filtered_data['table_name']} - Original: {filtered_batch.filtered_data['original_row_count']} - Filtrado: {filtered_batch.filtered_data['filtered_row_count']} - Batch: {filtered_batch.filtered_data['batch_number']} - Status: {status_text} ===\n")
+            f.write(f"Query IDs: {filtered_batch.query_ids}\n")
+            f.write(f"Table IDs: {filtered_batch.table_ids}\n")
+            f.write(f"Total Shards: {filtered_batch.total_shards}, Shard Num: {filtered_batch.shard_num}\n")
+            for i, row in enumerate(filtered_batch.filtered_data['rows']):
+                f.write(f"Row {i+1}: {row}\n")
+            f.write("\n")
+
+    def _log_batch_filtered(self, filtered_batch, status_text: str):
+        """Registra información del batch filtrado."""
+        logging.info(
+            "action: batch_filtered | table: %s | original_count: %d | filtered_count: %d | batch_number: %d | status: %s",
+            filtered_batch.filtered_data['table_name'],
+            filtered_batch.filtered_data['original_row_count'],
+            filtered_batch.filtered_data['filtered_row_count'],
+            filtered_batch.filtered_data['batch_number'],
+            status_text
+        )
+
+    def _log_batch_received_success(self, msg, status_text: str):
+        """Registra el éxito del procesamiento del batch."""
+        logging.info(
+            "action: batch_recibido | result: success | opcode: %d | cantidad: %d | batch_number: %d | status: %s",
+            msg.opcode, msg.amount, msg.batch_number, status_text
+        )
+
+    def _log_batch_preview(self, msg, status_text: str):
+        """Registra un preview de los datos del batch para debugging."""
+        try:
+            if msg.rows and len(msg.rows) > 0:
+                sample_rows = msg.rows[:2]  # Primeras 2 filas como muestra
+                all_keys = set()
+                for row in sample_rows:
+                    all_keys.update(row.__dict__.keys())
                 
+                sample_data = [row.__dict__ for row in sample_rows]
+                
+                logging.debug(
+                    "action: batch_preview | batch_number: %d | status: %s | opcode: %d | keys: %s | sample_count: %d | sample: %s",
+                    msg.batch_number, status_text, msg.opcode, sorted(list(all_keys)), len(sample_rows), sample_data
+                )
+        except Exception:
+            logging.debug("action: batch_preview | batch_number: %d | result: skip", getattr(msg, 'batch_number', 0))
+
+    def _handle_batch_processing_error(self, msg, client_sock, error: Exception) -> bool:
+        """Maneja errores durante el procesamiento del batch."""
+        protocol.BetsRecvFail().write_to(client_sock)
+        logging.error(
+            "action: batch_recibido | result: fail | batch_number: %d | cantidad: %d | error: %s", 
+            getattr(msg, 'batch_number', 0), msg.amount, str(error)
+        )
+        return True
+
+    def _is_data_message(self, msg) -> bool:
+        """Determina si el mensaje contiene datos de tabla."""
+        return (msg.opcode != protocol.Opcodes.FINISHED and 
+                msg.opcode != protocol.Opcodes.BETS_RECV_SUCCESS and 
+                msg.opcode != protocol.Opcodes.BETS_RECV_FAIL)
+
+    def _process_data_message(self, msg, client_sock) -> bool:
+        """Procesa mensajes que contienen datos de tabla."""
+        try:
+            status_text = self._get_status_text(msg.batch_status)
+            
+            # 1. Escribir el mensaje original recibido
+            self._write_original_message(msg, status_text)
+            
+            # 2. Procesar mensaje filtrado
+            self._process_filtered_batch(msg, status_text)
+            
+            # 3. Logging de éxito
+            self._log_batch_received_success(msg, status_text)
+            
+            # 4. Log adicional con preview de datos
+            self._log_batch_preview(msg, status_text)
+            
             protocol.BetsRecvSuccess().write_to(client_sock)
             return True
             
+        except Exception as e:
+            return self._handle_batch_processing_error(msg, client_sock, e)
+
+    def __process_msg(self, msg, client_sock) -> bool:
+        """Process a decoded message."""
+        if self._is_data_message(msg):
+            return self._process_data_message(msg, client_sock)
+            
         if msg.opcode == protocol.Opcodes.FINISHED:
             return False
+        
+        # Handle other opcodes (BETS_RECV_SUCCESS, BETS_RECV_FAIL) if needed
+        return True
         
     def __handle_sigterm(self, *_):
         """SIGTERM handler.
