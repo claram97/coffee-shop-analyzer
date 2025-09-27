@@ -1,5 +1,6 @@
 """
-Connection management and client handling for the orchestrator.
+Provides classes for managing network connections and handling client
+communications for a server application.
 """
 
 import logging
@@ -11,41 +12,51 @@ from ..protocol import recv_msg, ProtocolError
 
 
 class ConnectionManager:
-    """Manages TCP connections and client communication."""
-    
+    """
+    Handles the low-level tasks of managing TCP connections, including listening for,
+    accepting, and handling individual client communications in separate threads.
+    """
+
     def __init__(self, port: int, listen_backlog: int):
-        """Initialize connection manager with listening socket.
-        
+        """
+        Initializes the ConnectionManager by creating and binding a server socket.
+
         Args:
-            port: Port number to listen on
-            listen_backlog: Maximum number of pending connections
+            port: The port number on which the server will listen for connections.
+            listen_backlog: The maximum number of queued connections pending acceptance.
         """
         self._server_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         self._server_socket.bind(("", port))
         self._server_socket.listen(listen_backlog)
         self._stop = threading.Event()
         self._threads: List[threading.Thread] = []
-        
+
     def set_stop_flag(self):
-        """Set the stop flag to terminate the server."""
+        """Signals the server to begin the shutdown process by setting an internal stop flag."""
         self._stop.set()
-        
+
     def close_server_socket(self):
-        """Close the listening socket."""
+        """Closes the main server listening socket to prevent new connections during shutdown."""
         self._server_socket.close()
-        
+
     def is_stopped(self) -> bool:
-        """Check if server is stopped."""
-        return self._stop.is_set()
-        
-    def accept_connection(self) -> socket.socket:
-        """Accept a single client connection.
-        
+        """
+        Checks if the server's stop flag has been set.
+
         Returns:
-            Connected client socket
-            
+            True if the stop flag is set, False otherwise.
+        """
+        return self._stop.is_set()
+
+    def accept_connection(self) -> socket.socket:
+        """
+        Blocks until a new client connection is received and accepts it.
+
+        Returns:
+            A new socket object representing the connection with the client.
+
         Raises:
-            OSError: If accept fails and server is not stopped
+            OSError: If the accept call fails and the server is not in a stopped state.
         """
         logging.info("action: accept_connections | result: in_progress")
         try:
@@ -54,38 +65,48 @@ class ConnectionManager:
             return client_sock
         except OSError:
             if self._stop.is_set():
+                # This exception is expected during a graceful shutdown
                 raise OSError("Server stopped")
             raise
-            
+
     def create_client_thread(self, client_sock: socket.socket, message_handler: Callable) -> threading.Thread:
-        """Create and start a thread for handling client connection.
-        
+        """
+        Creates, starts, and tracks a new thread to handle communication with a connected client.
+
         Args:
-            client_sock: Connected client socket
-            message_handler: Function to handle messages from this client
-            
+            client_sock: The socket object for the connected client.
+            message_handler: A callable that will be invoked to process messages
+                             received from this client.
+
         Returns:
-            Created thread
+            The newly created and started thread object.
         """
         thread = threading.Thread(
-            target=self._handle_client_connection, 
+            target=self._handle_client_connection,
             args=(client_sock, message_handler)
         )
         self._threads.append(thread)
         thread.start()
         return thread
-        
+
     def join_all_threads(self):
-        """Wait for all client threads to complete."""
+        """
+        Waits for all active client handler threads to finish their execution,
+        typically during a graceful shutdown.
+        """
         for thread in self._threads:
             thread.join()
-            
+
     def _handle_client_connection(self, client_sock: socket.socket, message_handler: Callable):
-        """Handle messages from a single client connection.
-        
+        """
+        The target function for a client handler thread.
+
+        Enters a loop to continuously receive and process messages from a single
+        client until the connection is closed, an error occurs, or the server stops.
+
         Args:
-            client_sock: Client socket
-            message_handler: Function to process received messages
+            client_sock: The client's socket object.
+            message_handler: The function to process messages from the client.
         """
         while not self._stop.is_set():
             try:
@@ -96,50 +117,61 @@ class ConnectionManager:
                     addr[0],
                     msg.opcode,
                 )
-                
-                # Call the message handler - if it returns False, close connection
+
+                # The message_handler returns False to signal that the connection
+                # should be closed from the application logic side.
                 if not message_handler(msg, client_sock):
                     break
-                    
+
             except ProtocolError as e:
                 logging.error("action: receive_message | result: protocol error | error: %s", e)
                 break  # Close connection on protocol errors
             except EOFError:
+                # This occurs when the client gracefully closes the connection.
                 break
             except OSError as e:
+                # This can happen if the connection is forcibly closed.
                 logging.error("action: receive_message | result: fail | error: %s", e)
                 break
-                
+
         client_sock.close()
 
 
 class ServerManager:
-    """High-level server management with signal handling."""
-    
+    """
+    Provides a high-level abstraction for running the server, integrating connection
+    management with graceful shutdown via OS signal handling.
+    """
+
     def __init__(self, port: int, listen_backlog: int, message_handler: Callable):
-        """Initialize server manager.
-        
+        """
+        Initializes the server manager.
+
         Args:
-            port: Port to listen on
-            listen_backlog: Maximum pending connections
-            message_handler: Function to handle received messages
+            port: The port number for the server to listen on.
+            listen_backlog: The maximum number of pending connections.
+            message_handler: The function responsible for processing client messages.
         """
         self.connection_manager = ConnectionManager(port, listen_backlog)
         self.message_handler = message_handler
-        
+
     def setup_signal_handler(self):
-        """Setup SIGTERM handler for graceful shutdown."""
+        """
+        Configures a signal handler for SIGTERM to allow for a graceful server
+        shutdown when requested by the operating system or process manager.
+        """
         import signal
         signal.signal(signal.SIGTERM, self._handle_sigterm)
-        
+
     def run(self):
-        """Main server loop.
-        
-        Accepts connections until stopped, spawns worker threads,
-        and handles graceful shutdown.
+        """
+        Starts the main server loop.
+
+        This method configures signal handling and then continuously accepts new
+        connections, delegating each to a new worker thread until a shutdown is initiated.
         """
         self.setup_signal_handler()
-        
+
         while not self.connection_manager.is_stopped():
             try:
                 client_sock = self.connection_manager.accept_connection()
@@ -148,12 +180,17 @@ class ServerManager:
                 if self.connection_manager.is_stopped():
                     break
                 raise
-                
-        # Wait for all threads to complete and shutdown logging
+
+        # After the loop exits, wait for all threads to complete before shutting down.
         self.connection_manager.join_all_threads()
         logging.shutdown()
-        
+
     def _handle_sigterm(self, *_):
-        """SIGTERM handler for graceful shutdown."""
+        """
+        The callback function executed upon receiving a SIGTERM signal.
+
+        It initiates a graceful shutdown by setting the stop flag and closing the
+        main server socket to unblock the accept call in the main loop.
+        """
         self.connection_manager.set_stop_flag()
         self.connection_manager.close_server_socket()
