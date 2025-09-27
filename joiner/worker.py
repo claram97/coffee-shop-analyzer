@@ -1,3 +1,4 @@
+# joiner/worker.py
 from __future__ import annotations
 
 import copy
@@ -5,7 +6,16 @@ import os
 import shelve
 import threading
 from collections import defaultdict
-from typing import Any, Dict, List, Optional, Set
+from typing import Any, Callable, Dict, List, NamedTuple, Optional, Set
+
+# ==== Protocolo ====
+from protocol_utils import (
+    table_eof_from_bytes,
+)  # -> Optional[int] (table_id) si es TABLE_EOF
+from protocol_utils import databatch_from_bytes, databatch_to_bytes
+
+# ==== Middleware ====
+from middleware.middleware_client import MessageMiddleware, MessageMiddlewareQueue
 
 # ==== IDs de tablas ====
 T_TRANSACTIONS = 0
@@ -17,13 +27,11 @@ T_STORES = 11
 # ==== Queries ====
 Q1, Q2, Q3, Q4 = 1, 2, 3, 4
 
-# ==== Proyecto (interfaces/helpers) ====
-# from middleware_iface import MessageMiddleware
-# from protocol_utils import (
-#     databatch_from_bytes, databatch_to_bytes,
-#     table_eof_from_bytes, table_eof_to_bytes
-# )
-# from protocol_types import DataBatch
+
+# ---------------------- DTO auxiliares ----------------------
+class CopyInfo(NamedTuple):
+    index: int
+    total: int
 
 
 # ---------------------- Storage simple ----------------------
@@ -108,7 +116,7 @@ def join_embed_rows(
 
 
 def metadata_only(db) -> None:
-    if db.batch_msg and hasattr(db.batch_msg, "rows"):
+    if getattr(db, "batch_msg", None) and hasattr(db.batch_msg, "rows"):
         db.batch_msg.rows = []
 
 
@@ -123,17 +131,18 @@ def table_id_of(db) -> int:
 # ---------------------- Joiner Worker con gating por colas ----------------------
 class JoinerWorker:
     """
-    Fases controladas por qué colas están en consumo:
-      - Inicio: solo menu_items y stores.
-      - Al EOF(menu_items) y EOF(stores): comenzar a consumir transaction_items.
-      - Al EOF(transaction_items): comenzar a consumir transactions.
-      - Al EOF(transactions): comenzar a consumir users.
+    Fases controladas por cuáles colas están en consumo:
+      - Inicio: sólo menu_items y stores (tablas livianas).
+      - Al TABLE_EOF(menu_items) y TABLE_EOF(stores) → consumir transaction_items.
+      - Al TABLE_EOF(transaction_items) → consumir transactions.
+      - Al TABLE_EOF(transactions) → consumir users.
+    No se leen colas pesadas hasta tener listas las livianas.
     """
 
     def __init__(
         self,
-        in_mw: Dict[int, "MessageMiddleware"],  # {table_id: mw} una cola por tabla
-        out_results_mw: "MessageMiddleware",
+        in_mw: Dict[int, MessageMiddleware],  # {table_id: mw} una cola por tabla
+        out_results_mw: MessageMiddleware,  # cola/queue del Results Controller
         data_dir: str = "./data/joiner",
     ):
         self._in = in_mw
@@ -145,15 +154,14 @@ class JoinerWorker:
 
         self._eof: Set[int] = set()
         self._lock = threading.Lock()
-
         self._threads: Dict[int, threading.Thread] = {}
 
     # ---------- arranque ----------
     def run(self):
-        # Solo livianas al inicio
+        # Sólo livianas al inicio
         self._start_queue(T_MENU_ITEMS, self._on_raw_menu)
         self._start_queue(T_STORES, self._on_raw_stores)
-        # Esperar indefinidamente; en prod, coordinás con el proceso principal
+        # Espera bloqueante simple; en prod podés coordinar cierre con otro mecanismo
         threading.Event().wait()
 
     # ---------- control de colas ----------
@@ -181,17 +189,17 @@ class JoinerWorker:
         eof_tid = table_eof_from_bytes(raw)
         if eof_tid is not None:
             self._on_table_eof(eof_tid)
-            # Podés detener la cola tras EOF si querés liberar recursos
             self._stop_queue(T_MENU_ITEMS)
             self._maybe_enable_ti_phase()
             return
 
         db = databatch_from_bytes(raw)
-        rows = db.batch_msg.rows or []
+        rows = (db.batch_msg.rows or []) if getattr(db, "batch_msg", None) else []
         idx = rows_to_index(rows, "item_id")
         self._store.put("menu_items", "full", idx)
         self._cache_menu = idx
 
+        # Emitir metadata-only al RC para contabilidad
         meta = copy.deepcopy(db)
         metadata_only(meta)
         self._send(meta)
@@ -205,7 +213,7 @@ class JoinerWorker:
             return
 
         db = databatch_from_bytes(raw)
-        rows = db.batch_msg.rows or []
+        rows = (db.batch_msg.rows or []) if getattr(db, "batch_msg", None) else []
         idx = rows_to_index(rows, "store_id")
         self._store.put("stores", "full", idx)
         self._cache_stores = idx
@@ -230,13 +238,15 @@ class JoinerWorker:
 
         menu = self._cache_menu or self._store.get("menu_items", "full", default=None)
         if not menu:
-            # Por contrato de gating, no debería pasar
+            # Por contrato de gating, no debería ocurrir
             return
-        rows = db.batch_msg.rows or []
+
+        rows = (db.batch_msg.rows or []) if getattr(db, "batch_msg", None) else []
         joined = join_embed_rows(rows, menu, "item_id", "item_id", "menu")
         if T_MENU_ITEMS not in db.table_ids:
             db.table_ids.append(T_MENU_ITEMS)
-        db.batch_msg.rows = joined
+        if getattr(db, "batch_msg", None) and hasattr(db.batch_msg, "rows"):
+            db.batch_msg.rows = joined
         self._send(db)
 
     def _on_raw_tx(self, raw: bytes):
@@ -250,27 +260,29 @@ class JoinerWorker:
         db = databatch_from_bytes(raw)
         qset = queries_set(db)
 
+        # Q1: directo al RC
         if qset == {Q1}:
             self._send(db)
             return
 
         stores = self._cache_stores or self._store.get("stores", "full", default=None)
         if not stores:
-            # Por contrato de gating, no debería pasar
-            return
+            return  # Por gating, no debería pasar
 
-        rows = db.batch_msg.rows or []
+        rows = (db.batch_msg.rows or []) if getattr(db, "batch_msg", None) else []
         joined_tx_st = join_embed_rows(rows, stores, "store_id", "store_id", "store")
 
+        # Q3: join en memoria y emitir
         if Q3 in qset:
             if T_STORES not in db.table_ids:
                 db.table_ids.append(T_STORES)
-            db.batch_msg.rows = joined_tx_st
+            if getattr(db, "batch_msg", None) and hasattr(db.batch_msg, "rows"):
+                db.batch_msg.rows = joined_tx_st
             self._send(db)
             return
 
+        # Q4: persistir parcial por user_id; NO emitir aún
         if Q4 in qset:
-            # Persistir parcial por user_id: {template_raw, rows}
             template = copy.deepcopy(db)
             metadata_only(template)
             template_raw = databatch_to_bytes(template)
@@ -298,42 +310,46 @@ class JoinerWorker:
             return
 
         db = databatch_from_bytes(raw)
+        rows = (db.batch_msg.rows or []) if getattr(db, "batch_msg", None) else []
+
         if Q4 in queries_set(db):
-            rows = db.batch_msg.rows or []
-        for u in rows:
-            uid = norm(u.get("user_id"))
-            items = self._store.pop_all("q4_by_user", uid)
-            if not items:
-                continue
-            usr_idx = {uid: u}
+            for u in rows:
+                uid = norm(u.get("user_id"))
+                items = self._store.pop_all("q4_by_user", uid)
+                if not items:
+                    continue
+                usr_idx = {uid: u}
 
-            # enumerar para asignar 'index' consistente en este worker
-            for i, it in enumerate(items):
-                template_raw: bytes = it["template_raw"]
-                tx_rows: List[Dict[str, Any]] = it["rows"]
-                total: int = int(it.get("total", len(items)))
+                for i, it in enumerate(items):
+                    template_raw: bytes = it["template_raw"]
+                    tx_rows: List[Dict[str, Any]] = it["rows"]
+                    total: int = int(it.get("total", len(items)))
 
-                joined = join_embed_rows(tx_rows, usr_idx, "user_id", "user_id", "user")
-                out_db = databatch_from_bytes(template_raw)
+                    joined = join_embed_rows(
+                        tx_rows, usr_idx, "user_id", "user_id", "user"
+                    )
+                    out_db = databatch_from_bytes(template_raw)
 
-                # asegurar tablas
-                if T_STORES not in out_db.table_ids:
-                    out_db.table_ids.append(T_STORES)
-                if T_TRANSACTIONS not in out_db.table_ids:
-                    out_db.table_ids.append(T_TRANSACTIONS)
+                    # asegurar tablas
+                    if T_STORES not in out_db.table_ids:
+                        out_db.table_ids.append(T_STORES)
+                    if T_TRANSACTIONS not in out_db.table_ids:
+                        out_db.table_ids.append(T_TRANSACTIONS)
 
-                # set rows
-                if out_db.batch_msg and hasattr(out_db.batch_msg, "rows"):
-                    out_db.batch_msg.rows = joined
+                    if getattr(out_db, "batch_msg", None) and hasattr(
+                        out_db.batch_msg, "rows"
+                    ):
+                        out_db.batch_msg.rows = joined
 
-                # marcar fan-out para que el RC cuente correcto
-                ci = getattr(out_db, "copy_info", None)
-                if ci is None:
-                    out_db.copy_info = []
-                out_db.copy_info.append(CopyInfo(index=i, total=total))
+                    # marcar fan-out para que el RC cuente correcto
+                    ci = getattr(out_db, "copy_info", None)
+                    if ci is None:
+                        out_db.copy_info = []
+                    out_db.copy_info.append(CopyInfo(index=i, total=total))
 
-                self._send(out_db)
-        # Siempre metadata-only de users para contabilidad en RC
+                    self._send(out_db)
+
+        # Siempre metadata-only del batch de users para contabilidad en RC
         meta = copy.deepcopy(db)
         metadata_only(meta)
         self._send(meta)
@@ -368,7 +384,9 @@ class JoinerWorker:
                     out_db.table_ids.append(T_STORES)
                 if T_TRANSACTIONS not in out_db.table_ids:
                     out_db.table_ids.append(T_TRANSACTIONS)
-                if out_db.batch_msg and hasattr(out_db.batch_msg, "rows"):
+                if getattr(out_db, "batch_msg", None) and hasattr(
+                    out_db.batch_msg, "rows"
+                ):
                     out_db.batch_msg.rows = tx_rows
                 self._send(out_db)
 
