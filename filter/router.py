@@ -7,7 +7,27 @@ from collections import defaultdict
 from dataclasses import dataclass, field
 from typing import Any, Dict, List, NamedTuple, Optional
 
+# ==== Protocolo (asumo helpers existentes en tu proyecto) ====
+# Ajustá el import al módulo real:
+from protocol_utils import (
+    databatch_from_bytes,
+    databatch_to_bytes,
+    partition_eof_to_bytes,
+    table_eof_from_bytes,
+    table_eof_to_bytes,
+)
 
+# ==== Middleware ====
+from middleware.middleware_client import (
+    MessageMiddleware,
+    MessageMiddlewareMessageError,
+    MessageMiddlewareQueue,
+)
+
+
+# ==========================
+# Tipos internos (los tuyos)
+# ==========================
 class CopyInfo(NamedTuple):
     index: int
     total: int
@@ -33,6 +53,9 @@ class TableEOF:
     table_name: str
 
 
+# ==========================
+# Utilidades
+# ==========================
 def is_bit_set(mask: int, idx: int) -> bool:
     return ((mask >> idx) & 1) == 1
 
@@ -74,7 +97,9 @@ def _group_rows_by_partition(
     rows: List[Dict[str, Any]],
     num_parts: int,
 ) -> Dict[int, List[Dict[str, Any]]]:
-    parts: Dict[int, List[Dict[str, Any]]] = defaultdict(list)
+    from collections import defaultdict as _dd
+
+    parts: Dict[int, List[Dict[str, Any]]] = _dd(list)
     if num_parts <= 1:
         parts[0] = list(rows)
         return parts
@@ -92,27 +117,104 @@ def _group_rows_by_partition(
     return parts
 
 
+# ==========================
+# Abstracciones de salida
+# ==========================
 class BusProducer:
+    """
+    Implementación de BusProducer sobre RabbitMQ (MessageMiddlewareQueue).
+    - Envía batches al pool de filtros (cola única).
+    - Envía batches a Aggregators shardeados (una cola por partición).
+    - Reencola al router (para fan-out/recirculación).
+    """
+
+    def __init__(
+        self,
+        *,
+        host: str,
+        filters_pool_queue: str,
+        router_input_queue: str,
+        agg_queue_fmt: str = "agg.{table}.p{pid}",  # ej: agg.transactions.p3
+    ):
+        self._host = host
+        self._filters_pool_q = filters_pool_queue
+        self._router_in_q = router_input_queue
+        self._agg_fmt = agg_queue_fmt
+
+        # Publishers fijos
+        self._filters_pub: MessageMiddleware = MessageMiddlewareQueue(
+            host, filters_pool_queue
+        )
+        self._router_pub: MessageMiddleware = MessageMiddlewareQueue(
+            host, router_input_queue
+        )
+
+        # Cache por cola de aggregator
+        self._agg_publishers: Dict[str, MessageMiddleware] = {}
+
+    # --------- API usada por el FilterRouter ---------
+
     def send_to_filters_pool(self, batch: DataBatch, step: int) -> None:
-        raise NotImplementedError
+        """
+        El 'step' ya viene reflejado en batch.metadata.reserved_u16 por el router;
+        solo serializamos y publicamos.
+        """
+        raw = databatch_to_bytes(batch)
+        self._filters_pub.send(raw)
 
     def send_to_aggregator_partition(self, partition_id: int, batch: DataBatch) -> None:
-        raise NotImplementedError
+        table = batch.metadata.table_name
+        pub = self._get_agg_pub(table, int(partition_id))
+        raw = databatch_to_bytes(batch)
+        pub.send(raw)
 
     def send_table_eof_to_aggregator_partition(
         self, table_name: str, partition_id: int
     ) -> None:
-        raise NotImplementedError
+        pub = self._get_agg_pub(table_name, int(partition_id))
+        raw = partition_eof_to_bytes(table_name, int(partition_id))
+        pub.send(raw)
 
     def requeue_to_router(self, batch: DataBatch) -> None:
-        raise NotImplementedError
+        raw = databatch_to_bytes(batch)
+        self._router_pub.send(raw)
+
+    # --------- internos ---------
+
+    def _get_agg_pub(self, table: str, pid: int) -> MessageMiddleware:
+        qname = self._agg_fmt.format(table=table, pid=pid)
+        pub = self._agg_publishers.get(qname)
+        if pub is None:
+            pub = MessageMiddlewareQueue(self._host, qname)
+            self._agg_publishers[qname] = pub
+        return pub
+
+    # (opcional) liberar recursos ordenadamente
+    def close(self) -> None:
+        try:
+            self._filters_pub.close()
+        except Exception:
+            pass
+        try:
+            self._router_pub.close()
+        except Exception:
+            pass
+        for pub in self._agg_publishers.values():
+            try:
+                pub.close()
+            except Exception:
+                pass
+        self._agg_publishers.clear()
 
 
 class TableConfig:
     def num_aggregator_partitions(self, table_name: str) -> int:
-        raise NotImplementedError
+        return 3  # esto deberia leerse de env
 
 
+# ==========================
+# Policy (tu versión)
+# ==========================
 class QueryPolicyResolver:
     def steps_remaining(
         self, batch_table_name: str, batch_queries: list[int], steps_done: int
@@ -148,6 +250,9 @@ class QueryPolicyResolver:
         return list(batch_queries)
 
 
+# ==========================
+# Router de filtros (core)
+# ==========================
 class FilterRouter:
     def __init__(
         self, producer: BusProducer, policy: QueryPolicyResolver, table_cfg: TableConfig
@@ -173,29 +278,17 @@ class FilterRouter:
 
         if int(m.reserved_u16) == 0:
             self._pending_batches[table] += 1
-            self._log.debug(
-                "pending++ table=%s → %d", table, self._pending_batches[table]
-            )
 
         next_step = first_zero_bit(m.reserved_u16, m.total_filter_steps)
         if next_step is not None and self._pol.steps_remaining(
             table, m.queries, steps_done=next_step
         ):
             m.reserved_u16 = set_bit(m.reserved_u16, next_step)
-            self._log.debug(
-                "→ filters step=%d table=%s mask=%s",
-                next_step,
-                table,
-                bin(m.reserved_u16),
-            )
             self._p.send_to_filters_pool(batch, step=next_step)
             return
 
         dup_count = int(self._pol.get_duplication_count(m.queries) or 1)
         if dup_count > 1:
-            self._log.debug(
-                "Fan-out x%d table=%s queries=%s", dup_count, table, m.queries
-            )
             for i in range(dup_count):
                 new_queries = self._pol.get_new_batch_queries(
                     table, m.queries, copy_number=i
@@ -210,7 +303,6 @@ class FilterRouter:
 
         self._send_sharded_to_aggregators(batch)
         self._pending_batches[table] = max(0, self._pending_batches[table] - 1)
-        self._log.debug("pending-- table=%s → %d", table, self._pending_batches[table])
         self._maybe_flush_pending_eof(table)
 
     def _send_sharded_to_aggregators(self, batch: DataBatch) -> None:
@@ -221,7 +313,6 @@ class FilterRouter:
 
         if not isinstance(rows, list):
             pid = self._pick_part_for_empty_payload(table, m)
-            self._log.debug("→ aggregator (no-rows) part=%d table=%s", pid, table)
             self._p.send_to_aggregator_partition(pid, batch)
             return
 
@@ -237,9 +328,6 @@ class FilterRouter:
                 b.payload["rows"] = subrows
             else:
                 b.payload = type("RowsPayload", (), {"rows": subrows})()
-            self._log.debug(
-                "→ aggregator part=%d table=%s rows=%d", pid, table, len(subrows)
-            )
             self._p.send_to_aggregator_partition(int(pid), b)
 
     def _pick_part_for_empty_payload(self, table: str, m: Metadata) -> int:
@@ -252,11 +340,6 @@ class FilterRouter:
 
     def _handle_table_eof(self, eof: TableEOF) -> None:
         table = eof.table_name
-        self._log.debug(
-            "TABLE_EOF received: table=%s pending=%d",
-            table,
-            self._pending_batches[table],
-        )
         self._pending_eof[table] = eof
         self._maybe_flush_pending_eof(table)
 
@@ -267,8 +350,124 @@ class FilterRouter:
             return
         total_parts = max(1, int(self._cfg.num_aggregator_partitions(table)))
         for part in range(total_parts):
-            self._log.debug("TABLE_EOF → aggregator part=%d table=%s", part, table)
             self._p.send_table_eof_to_aggregator_partition(table, part)
         self._pending_eof.pop(table, None)
         self._pending_batches.pop(table, None)
-        self._log.debug("TABLE_EOF flushed (all parts): table=%s", table)
+
+
+# ==========================
+# Integración con middleware
+# ==========================
+class QueueTableConfig(TableConfig):
+    """
+    Define particiones por tabla.
+    """
+
+    def __init__(self, table_parts: Dict[str, int]):
+        self._parts = {str(k): int(v) for k, v in table_parts.items()}
+
+    def num_aggregator_partitions(self, table_name: str) -> int:
+        return int(self._parts.get(str(table_name), 1))
+
+
+class QueueBusProducer(BusProducer):
+    """
+    Publica a:
+      - pool de filtros (cola única)
+      - agregators shardeados: una cola por partición (agg_fmt)
+      - requeue al router: cola de entrada del router
+    """
+
+    def __init__(
+        self,
+        host: str,
+        filters_pool_queue: str,
+        router_input_queue: str,
+        agg_queue_fmt: str = "agg.{table}.p{pid}",  # ejemplo
+    ):
+        self._host = host
+        self._filters_pool_q = filters_pool_queue
+        self._router_in_q = router_input_queue
+        self._agg_fmt = agg_queue_fmt
+
+        self._filters_pub = MessageMiddlewareQueue(host, filters_pool_queue)
+        self._router_pub = MessageMiddlewareQueue(host, router_input_queue)
+        self._agg_publishers: Dict[str, MessageMiddleware] = {}
+
+    def _agg_queue_name(self, table: str, pid: int) -> str:
+        return self._agg_fmt.format(table=table, pid=int(pid))
+
+    def _get_agg_pub(self, table: str, pid: int) -> MessageMiddleware:
+        qname = self._agg_queue_name(table, pid)
+        pub = self._agg_publishers.get(qname)
+        if pub is None:
+            pub = MessageMiddlewareQueue(self._host, qname)
+            self._agg_publishers[qname] = pub
+        return pub
+
+    def send_to_filters_pool(self, batch: DataBatch, step: int) -> None:
+        raw = databatch_to_bytes(batch)  # el step ya está reflejado en reserved_u16
+        self._filters_pub.send(raw)
+
+    def send_to_aggregator_partition(self, partition_id: int, batch: DataBatch) -> None:
+        table = batch.metadata.table_name
+        pub = self._get_agg_pub(table, partition_id)
+        raw = databatch_to_bytes(batch)
+        pub.send(raw)
+
+    def send_table_eof_to_aggregator_partition(
+        self, table_name: str, partition_id: int
+    ) -> None:
+        raw = partition_eof_to_bytes(table_name, int(partition_id))
+        pub = self._get_agg_pub(table_name, partition_id)
+        pub.send(raw)
+
+    def requeue_to_router(self, batch: DataBatch) -> None:
+        raw = databatch_to_bytes(batch)
+        self._router_pub.send(raw)
+
+
+# ==========================
+# Servidor del router (consumo)
+# ==========================
+class RouterServer:
+    """
+    Levanta el consumidor del router y despacha al FilterRouter.
+    """
+
+    def __init__(
+        self,
+        host: str,
+        router_input_queue: str,
+        producer: QueueBusProducer,
+        policy: QueryPolicyResolver,
+        table_cfg: QueueTableConfig,
+    ):
+        self._host = host
+        self._in_q = router_input_queue
+        self._mw_in = MessageMiddlewareQueue(host, router_input_queue)
+        self._router = FilterRouter(
+            producer=producer, policy=policy, table_cfg=table_cfg
+        )
+        self._log = logging.getLogger("filter-router-server")
+
+    def run(self) -> None:
+        def _cb(body: bytes):
+            # 1) ¿Es TABLE_EOF?
+            tbl = table_eof_from_bytes(body)
+            if tbl is not None:
+                self._router.process_message(TableEOF(table_name=str(tbl)))
+                return
+            # 2) Sino, DataBatch
+            db = databatch_from_bytes(body)
+            # Adaptación mínima: si usás tu DataBatch del protocolo, mapear a nuestro DTO
+            # Asumo que `db.metadata` y `db.payload.rows` tienen misma estructura semántica.
+            self._router.process_message(db)
+
+        self._mw_in.start_consuming(_cb)
+
+    def stop(self) -> None:
+        try:
+            self._mw_in.stop_consuming()
+        except Exception:
+            pass
