@@ -59,6 +59,9 @@ class Opcodes:
     # A data message containing a batch of new users.
     NEW_USERS = 8
 
+    # A control signal indicating end of file/stream.
+    EOF = 9
+
 
 class BatchStatus:
     """

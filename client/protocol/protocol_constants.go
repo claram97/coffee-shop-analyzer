@@ -10,6 +10,7 @@ const (
 	OpCodeNewTransactionItems byte = 6
 	OpCodeNewTransaction      byte = 7
 	OpCodeNewUsers            byte = 8
+	OpCodeEOF                 byte = 9
 )
 
 // BatchStatus defines the status of a batch being sent
