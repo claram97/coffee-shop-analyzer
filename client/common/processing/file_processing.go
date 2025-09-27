@@ -157,8 +157,7 @@ func (fp *FileProcessor) ProcessTableType(ctx context.Context, dataDir, tableTyp
 }
 
 // ProcessAllTables processes all table types in the data directory
-func (fp *FileProcessor) ProcessAllTables(ctx context.Context, processorFactory func(TableRowHandler, byte) *BatchProcessor) error {
-	dataDir := "./data"
+func (fp *FileProcessor) ProcessAllTables(ctx context.Context, processorFactory func(TableRowHandler, byte) *BatchProcessor, dataDir string) error {
 	entries, err := os.ReadDir(dataDir)
 	if err != nil {
 		fp.log.Errorf("Error reading data directory: %v", err)

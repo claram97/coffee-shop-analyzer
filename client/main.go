@@ -94,10 +94,10 @@ func main() {
 	PrintConfig(v)
 
 	clientConfig := common.ClientConfig{
-		ServerAddress: v.GetString("orchestrator.address"),
-		ID:            v.GetString("id"),
-		BetsFilePath:  "./data/users/users_202506.csv",
-		BatchLimit:    v.GetInt32("batch.maxAmount"),
+		ServerAddress:   v.GetString("orchestrator.address"),
+		ID:              v.GetString("id"),
+		TablesDirectory: v.GetString("data.folder"),
+		BatchLimit:      v.GetInt32("batch.maxAmount"),
 	}
 
 	client := common.NewClient(clientConfig)

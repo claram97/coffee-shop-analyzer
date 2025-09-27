@@ -16,10 +16,10 @@ var log = logging.MustGetLogger("log")
 
 // ClientConfig holds the runtime configuration for a client instance.
 type ClientConfig struct {
-	ID            string
-	ServerAddress string
-	BetsFilePath  string
-	BatchLimit    int32
+	ID              string
+	ServerAddress   string
+	TablesDirectory string
+	BatchLimit      int32
 }
 
 // Client encapsulates the client behavior and orchestrates all components
@@ -64,7 +64,7 @@ func (c *Client) SendBatch() {
 		return processing.NewBatchProcessor(conn, handler, opCode, c.config.BatchLimit, c.config.ID, log)
 	}
 
-	lastErr := c.fileProcessor.ProcessAllTables(ctx, processorFactory)
+	lastErr := c.fileProcessor.ProcessAllTables(ctx, processorFactory, c.config.TablesDirectory)
 
 	// Send finished message if no errors
 	if lastErr == nil {
