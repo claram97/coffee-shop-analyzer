@@ -119,7 +119,7 @@ func (fms *FinishedMessageSender) SendFinished() {
 		return
 	}
 
-	finishedMsg := protocol.Finished{int32(agencyId)}
+	finishedMsg := protocol.Finished{AgencyId: int32(agencyId)}
 	if _, err := finishedMsg.WriteTo(fms.conn); err != nil {
 		fms.log.Errorf("action: send_finished | result: fail | error: %v", err)
 		return

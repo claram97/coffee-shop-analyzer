@@ -27,8 +27,11 @@ type Message interface {
 // Writeable is implemented by outbound messages that can serialize themselves
 // to the wire format: [opcode:1][length:i32 LE][body]. It returns the total
 // number of bytes written (header + body) and any I/O error.
+//
+// Note: This interface follows Go's standard io.WriterTo interface signature,
+// returning int64 for the number of bytes written.
 type Writeable interface {
-	WriteTo(out io.Writer) (int32, error)
+	WriteTo(out io.Writer) (int64, error)
 }
 
 // Readable is implemented by inbound messages that can parse themselves
