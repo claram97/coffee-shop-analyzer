@@ -17,17 +17,25 @@ func (msg *Finished) GetLength() int32 { return 4 }
 
 // WriteTo writes the FINISHED frame with little-endian length and agencyId.
 // It returns the total bytes written (1 + 4 + 4) or an error.
-func (msg *Finished) WriteTo(out io.Writer) (int32, error) {
+func (msg *Finished) WriteTo(out io.Writer) (int64, error) {
+	var totalWritten int64
+
 	if err := binary.Write(out, binary.LittleEndian, msg.GetOpCode()); err != nil {
-		return 0, err
+		return totalWritten, err
 	}
+	totalWritten += 1
+
 	if err := binary.Write(out, binary.LittleEndian, msg.GetLength()); err != nil {
-		return 0, err
+		return totalWritten, err
 	}
+	totalWritten += 4
+
 	if err := binary.Write(out, binary.LittleEndian, msg.AgencyId); err != nil {
-		return 0, err
+		return totalWritten, err
 	}
-	return 5 + msg.GetLength(), nil
+	totalWritten += 4
+
+	return totalWritten, nil
 }
 
 // BetsRecvSuccess is the server→client acknowledgment for a batch processed
