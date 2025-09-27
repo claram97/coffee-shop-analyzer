@@ -2,7 +2,7 @@
 
 from .filters import (
     filter_menu_items_columns, filter_stores_columns, filter_transaction_items_columns,
-    filter_transactions_columns, filter_users_columns, filter_vouchers_columns
+    filter_transactions_columns, filter_users_columns
 )
 from .serialization import (
     serialize_filtered_menu_items, serialize_filtered_stores, serialize_filtered_transaction_items,
@@ -14,7 +14,7 @@ from .file_utils import MessageLogger, message_logger
 __all__ = [
     # Filter functions
     'filter_menu_items_columns', 'filter_stores_columns', 'filter_transaction_items_columns',
-    'filter_transactions_columns', 'filter_users_columns', 'filter_vouchers_columns',
+    'filter_transactions_columns', 'filter_users_columns',
     
     # Serialization functions
     'serialize_filtered_menu_items', 'serialize_filtered_stores', 'serialize_filtered_transaction_items',

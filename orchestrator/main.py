@@ -4,7 +4,7 @@ import logging
 import os
 from configparser import ConfigParser
 
-from app.net import ModularOrchestrator
+from app.net import Orchestrator
 
 
 def initialize_config():
@@ -65,7 +65,7 @@ def main():
 
     # Initialize server
     logging.info("action: server_init | architecture: modular")
-    server = ModularOrchestrator(port, listen_backlog)
+    server = Orchestrator(port, listen_backlog)
     server.run()
 
 
