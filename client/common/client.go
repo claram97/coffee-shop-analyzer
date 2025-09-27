@@ -4,6 +4,7 @@ import (
 	"context"
 	"os/signal"
 	"syscall"
+	"time"
 
 	"github.com/op/go-logging"
 
@@ -20,6 +21,8 @@ type ClientConfig struct {
 	ServerAddress   string
 	TablesDirectory string
 	BatchLimit      int32
+	Attempts        int
+	RetryInterval   time.Duration
 }
 
 // Client encapsulates the client behavior and orchestrates all components
@@ -47,7 +50,7 @@ func (c *Client) SendBatch() {
 	defer stop()
 
 	// Establish connection
-	if err := c.connectionManager.Connect(); err != nil {
+	if err := c.connectionManager.Connect(c.config.Attempts, c.config.RetryInterval*time.Second); err != nil {
 		return
 	}
 	defer c.connectionManager.Close()

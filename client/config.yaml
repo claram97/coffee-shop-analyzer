@@ -13,4 +13,4 @@ data:
   folder: "./data" # folder with CSV files
 retries:
   attempts: 5
-  retryInterval: "2s"
+  retryInterval: 2 # in seconds

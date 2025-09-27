@@ -112,14 +112,12 @@ func (cm *ConnectionManager) attemptConnection() (net.Conn, error) {
 }
 
 // Connect establishes the TCP connection with retry logic
-func (cm *ConnectionManager) Connect() error {
-	const maxRetries = 3
-	const retryInterval = 2 * time.Second
+func (cm *ConnectionManager) Connect(attempts int, retryInterval time.Duration) error {
 
 	var lastErr error
 
-	for attempt := 1; attempt <= maxRetries; attempt++ {
-		cm.logConnectionAttempt(attempt, maxRetries)
+	for attempt := 1; attempt <= attempts; attempt++ {
+		cm.logConnectionAttempt(attempt, attempts)
 
 		conn, err := cm.attemptConnection()
 		if err == nil {
@@ -128,11 +126,11 @@ func (cm *ConnectionManager) Connect() error {
 		}
 
 		lastErr = err
-		cm.handleConnectionFailure(err, attempt, maxRetries)
-		cm.waitBeforeRetry(attempt, maxRetries, retryInterval)
+		cm.handleConnectionFailure(err, attempt, attempts)
+		cm.waitBeforeRetry(attempt, attempts, retryInterval)
 	}
 
-	cm.logAllRetriesFailed(maxRetries, lastErr)
+	cm.logAllRetriesFailed(attempts, lastErr)
 	return lastErr
 }
 

@@ -98,6 +98,8 @@ func main() {
 		ID:              v.GetString("id"),
 		TablesDirectory: v.GetString("data.folder"),
 		BatchLimit:      v.GetInt32("batch.maxAmount"),
+		Attempts:        v.GetInt("retries.attempts"),
+		RetryInterval:   v.GetDuration("retries.retryInterval"),
 	}
 
 	client := common.NewClient(clientConfig)
