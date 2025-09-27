@@ -3,7 +3,7 @@ Protocol constants and opcode definitions for the coffee shop analyzer.
 """
 
 # Protocol limits
-MAX_BATCH_SIZE_BYTES = 90 * 1024 * 1024  # 90MB - Límite máximo del tamaño de batch en bytes
+MAX_BATCH_SIZE_BYTES = 1024 * 1024  # 1MB - Límite máximo del tamaño de batch en bytes
 
 
 class ProtocolError(Exception):

@@ -58,7 +58,8 @@ class ModularOrchestrator:
             status_text = self.message_handler.get_status_text(getattr(msg, 'batch_status', 0))
             
             # 1. Write original received message
-            message_logger.write_original_message(msg, status_text)
+            # Not performant at all, but useful for debugging purposes
+            # message_logger.write_original_message(msg, status_text)
             
             # 2. Process filtered batch
             self._process_filtered_batch(msg, status_text)
@@ -87,7 +88,8 @@ class ModularOrchestrator:
             # self._filter_router_queue.send(batch_bytes)
             
             # Write filtered message to file
-            message_logger.write_filtered_message(filtered_batch, status_text)
+            # Useful for debugging large batches, but not performant at all
+            # message_logger.write_filtered_message(filtered_batch, status_text)
             
             # Log filtered batch information
             message_logger.log_batch_filtered(filtered_batch, status_text)
