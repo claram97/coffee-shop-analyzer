@@ -7,7 +7,7 @@ import (
 )
 
 // Finished is a client→server message that indicates the agency finished
-// sending all its bets. Body: [agencyId:i32].
+// sending all its batch messages. Body: [agencyId:i32].
 type Finished struct {
 	AgencyId int32
 }
@@ -38,42 +38,42 @@ func (msg *Finished) WriteTo(out io.Writer) (int64, error) {
 	return totalWritten, nil
 }
 
-// BetsRecvSuccess is the server→client acknowledgment for a batch processed
+// BatchRecvSuccess is the server→client acknowledgment for a batch processed
 // successfully. Its body length is always 0.
-type BetsRecvSuccess struct{}
+type BatchRecvSuccess struct{}
 
-func (msg *BetsRecvSuccess) GetOpCode() byte  { return BetsRecvSuccessOpCode }
-func (msg *BetsRecvSuccess) GetLength() int32 { return 0 }
+func (msg *BatchRecvSuccess) GetOpCode() byte  { return BatchRecvSuccessOpCode }
+func (msg *BatchRecvSuccess) GetLength() int32 { return 0 }
 
 // readFrom validates that the next i32 body length is exactly 0.
 // It consumes the field and returns nil on success.
-func (msg *BetsRecvSuccess) readFrom(reader *bufio.Reader) error {
+func (msg *BatchRecvSuccess) readFrom(reader *bufio.Reader) error {
 	var length int32
 	if err := binary.Read(reader, binary.LittleEndian, &length); err != nil {
 		return err
 	}
 	if length != msg.GetLength() {
-		return &ProtocolError{"invalid body length", BetsRecvSuccessOpCode}
+		return &ProtocolError{"invalid body length", BatchRecvSuccessOpCode}
 	}
 	return nil
 }
 
-// BetsRecvFail is the server→client negative acknowledgment for a batch.
+// BatchRecvFail is the server→client negative acknowledgment for a batch.
 // Its body length is always 0.
-type BetsRecvFail struct{}
+type BatchRecvFail struct{}
 
-func (msg *BetsRecvFail) GetOpCode() byte  { return BetsRecvFailOpCode }
-func (msg *BetsRecvFail) GetLength() int32 { return 0 }
+func (msg *BatchRecvFail) GetOpCode() byte  { return BatchRecvFailOpCode }
+func (msg *BatchRecvFail) GetLength() int32 { return 0 }
 
 // readFrom validates that the next i32 body length is exactly 0.
 // It consumes the field and returns nil on success.
-func (msg *BetsRecvFail) readFrom(reader *bufio.Reader) error {
+func (msg *BatchRecvFail) readFrom(reader *bufio.Reader) error {
 	var length int32
 	if err := binary.Read(reader, binary.LittleEndian, &length); err != nil {
 		return err
 	}
 	if length != msg.GetLength() {
-		return &ProtocolError{"invalid body length", BetsRecvFailOpCode}
+		return &ProtocolError{"invalid body length", BatchRecvFailOpCode}
 	}
 	return nil
 }
@@ -90,15 +90,15 @@ func ReadMessage(reader *bufio.Reader) (Readable, error) {
 		return nil, err
 	}
 	switch opcode {
-	case BetsRecvSuccessOpCode:
+	case BatchRecvSuccessOpCode:
 		{
-			var msg BetsRecvSuccess
+			var msg BatchRecvSuccess
 			err := msg.readFrom(reader)
 			return &msg, err
 		}
-	case BetsRecvFailOpCode:
+	case BatchRecvFailOpCode:
 		{
-			var msg BetsRecvFail
+			var msg BatchRecvFail
 			err := msg.readFrom(reader)
 			return &msg, err
 		}

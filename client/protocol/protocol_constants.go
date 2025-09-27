@@ -2,8 +2,8 @@ package common
 
 // Protocol Operation Codes
 const (
-	BetsRecvSuccessOpCode     byte = 1
-	BetsRecvFailOpCode        byte = 2
+	BatchRecvSuccessOpCode    byte = 1
+	BatchRecvFailOpCode       byte = 2
 	OpCodeFinished            byte = 3
 	OpCodeNewMenuItems        byte = 4
 	OpCodeNewStores           byte = 5

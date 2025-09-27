@@ -251,11 +251,11 @@ class Finished:
         self.agency_id = agency_id
 
 
-class BetsRecvSuccess:
-    """Outbound BETS_RECV_SUCCESS response (empty body)."""
+class BatchRecvSuccess:
+    """Outbound BATCH_RECV_SUCCESS response (empty body)."""
 
     def __init__(self):
-        self.opcode = Opcodes.BETS_RECV_SUCCESS
+        self.opcode = Opcodes.BATCH_RECV_SUCCESS
 
     def write_to(self, sock: socket.socket):
         """Frame and send the success response: [opcode][length=0]."""
@@ -264,11 +264,11 @@ class BetsRecvSuccess:
         write_i32(sock, 0)
 
 
-class BetsRecvFail:
-    """Outbound BETS_RECV_FAIL response (empty body)."""
+class BatchRecvFail:
+    """Outbound BATCH_RECV_SUCCESS response (empty body)."""
 
     def __init__(self):
-        self.opcode = Opcodes.BETS_RECV_FAIL
+        self.opcode = Opcodes.BATCH_RECV_FAIL
 
     def write_to(self, sock: socket.socket):
         """Frame and send the failure response: [opcode][length=0]."""

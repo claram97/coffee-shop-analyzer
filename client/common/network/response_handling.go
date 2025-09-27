@@ -48,10 +48,10 @@ func (rh *ResponseHandler) handleResponseMessage(msg interface{}) {
 	// Use type assertion to access the GetOpCode() method
 	if respMsg, ok := msg.(interface{ GetOpCode() byte }); ok {
 		switch respMsg.GetOpCode() {
-		case protocol.BetsRecvSuccessOpCode:
-			rh.log.Info("action: bets_enviadas | result: success")
-		case protocol.BetsRecvFailOpCode:
-			rh.log.Error("action: bets_enviadas | result: fail")
+		case protocol.BatchRecvSuccessOpCode:
+			rh.log.Info("action: batch_enviado | result: success")
+		case protocol.BatchRecvFailOpCode:
+			rh.log.Error("action: batch_enviado | result: fail")
 		}
 	}
 }

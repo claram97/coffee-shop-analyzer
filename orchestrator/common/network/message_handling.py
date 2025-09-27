@@ -6,7 +6,7 @@ standardized responses within a network communication protocol.
 import logging
 from typing import Dict, Any
 
-from ..protocol import Opcodes, BetsRecvSuccess, BetsRecvFail
+from ..protocol import Opcodes, BatchRecvSuccess, BatchRecvFail
 
 
 class MessageHandler:
@@ -57,8 +57,8 @@ class MessageHandler:
             True if the message is considered a data message, False otherwise.
         """
         return (msg.opcode != Opcodes.FINISHED and
-                msg.opcode != Opcodes.BETS_RECV_SUCCESS and
-                msg.opcode != Opcodes.BETS_RECV_FAIL)
+                msg.opcode != Opcodes.BATCH_RECV_SUCCESS and
+                msg.opcode != Opcodes.BATCH_RECV_FAIL)
 
     def handle_message(self, msg: Any, client_sock: Any) -> bool:
         """
@@ -116,12 +116,12 @@ class MessageHandler:
             return True
 
     def send_success_response(self, client_sock: Any):
-        """Sends a predefined success (BETS_RECV_SUCCESS) response to the client."""
-        BetsRecvSuccess().write_to(client_sock)
+        """Sends a predefined success (BATCH_RECV_SUCCESS) response to the client."""
+        BatchRecvSuccess().write_to(client_sock)
 
     def send_failure_response(self, client_sock: Any):
-        """Sends a predefined failure (BETS_RECV_FAIL) response to the client."""
-        BetsRecvFail().write_to(client_sock)
+        """Sends a predefined failure (BATCH_RECV_FAIL) response to the client."""
+        BatchRecvFail().write_to(client_sock)
 
     def log_batch_preview(self, msg: Any, status_text: str):
         """
@@ -156,13 +156,13 @@ class ResponseHandler:
 
     @staticmethod
     def send_success(client_sock: Any):
-        """Sends a BETS_RECV_SUCCESS response to the specified client."""
-        BetsRecvSuccess().write_to(client_sock)
+        """Sends a BATCH_RECV_SUCCESS response to the specified client."""
+        BatchRecvSuccess().write_to(client_sock)
 
     @staticmethod
     def send_failure(client_sock: Any):
-        """Sends a BETS_RECV_FAIL response to the specified client."""
-        BetsRecvFail().write_to(client_sock)
+        """Sends a BATCH_RECV_FAIL response to the specified client."""
+        BatchRecvFail().write_to(client_sock)
 
     @staticmethod
     def handle_processing_error(msg: Any, client_sock: Any, error: Exception) -> bool:

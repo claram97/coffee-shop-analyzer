@@ -1,15 +1,24 @@
 """
-Protocol constants and opcode definitions for the coffee shop analyzer.
+Defines the core constants, custom exceptions, and enumerations for the
+coffee shop data transfer protocol.
+
+This includes message operation codes (opcodes), batch processing statuses,
+and protocol-wide limits.
 """
 
-# Protocol limits
-MAX_BATCH_SIZE_BYTES = 1024 * 1024  # 1MB - Límite máximo del tamaño de batch en bytes
+# The maximum size in bytes for a single batch message payload. This acts as a
+# safeguard against excessively large messages consuming too much memory.
+MAX_BATCH_SIZE_BYTES = 1024 * 1024  # 1MB
 
 
 class ProtocolError(Exception):
-    """Represents a framing/validation error while parsing or writing messages.
+    """
+    A custom exception raised for framing or validation errors encountered
+    during the parsing or writing of protocol messages.
 
-    `opcode` optionally identifies the message context in which the error occurred.
+    Attributes:
+        opcode (int, optional): Identifies the message context (the operation code)
+                                in which the error occurred, aiding in debugging.
     """
 
     def __init__(self, message, opcode=None):
@@ -18,20 +27,49 @@ class ProtocolError(Exception):
 
 
 class Opcodes:
-    """Protocol operation codes for different message types."""
-    DATA_BATCH = 0  # Envuelve a los mensajes de tabla
-    BETS_RECV_SUCCESS = 1
-    BETS_RECV_FAIL = 2
+    """
+    Defines the protocol operation codes (opcodes) used to identify the
+    type of each message.
+    """
+    # A wrapper message that contains another, more specific message type inside.
+    # Used for routing and generic batch handling.
+    DATA_BATCH = 0
+
+    # Acknowledgment sent by a receiver to indicate successful processing of a batch.
+    BATCH_RECV_SUCCESS = 1
+
+    # Notification sent by a receiver to indicate a failure in processing a batch.
+    BATCH_RECV_FAIL = 2
+
+    # A control signal indicating the sender has finished transmitting all data.
     FINISHED = 3
+
+    # A data message containing a batch of new menu items.
     NEW_MENU_ITEMS = 4
+
+    # A data message containing a batch of new stores.
     NEW_STORES = 5
+
+    # A data message containing a batch of new items within transactions.
     NEW_TRANSACTION_ITEMS = 6
+
+    # A data message containing a batch of new transactions.
     NEW_TRANSACTION = 7
+
+    # A data message containing a batch of new users.
     NEW_USERS = 8
 
 
 class BatchStatus:
-    """Status values for batch messages."""
-    CONTINUE = 0  # Hay más batches en el archivo
-    EOF = 1       # Último batch del archivo
-    CANCEL = 2    # Batch enviado por cancelación
+    """
+    Defines status codes included in data batch messages to indicate the state
+    of the data stream.
+    """
+    # Indicates that more data batches will follow this one.
+    CONTINUE = 0
+
+    # Indicates this is the final data batch in the stream (End of File).
+    EOF = 1
+
+    # Indicates that this batch was sent as part of a cancellation process.
+    CANCEL = 2

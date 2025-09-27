@@ -8,7 +8,7 @@ from common.processing import create_filtered_data_batch, message_logger
 from common.protocol import Opcodes
 
 
-class ModularOrchestrator:
+class Orchestrator:
     """Orchestrator using modular network and processing components."""
     
     def __init__(self, port: int, listen_backlog: int):
@@ -59,7 +59,7 @@ class ModularOrchestrator:
             
             # 1. Write original received message
             # Not performant at all, but useful for debugging purposes
-            # message_logger.write_original_message(msg, status_text)
+            message_logger.write_original_message(msg, status_text)
             
             # 2. Process filtered batch
             self._process_filtered_batch(msg, status_text)
@@ -89,7 +89,7 @@ class ModularOrchestrator:
             
             # Write filtered message to file
             # Useful for debugging large batches, but not performant at all
-            # message_logger.write_filtered_message(filtered_batch, status_text)
+            message_logger.write_filtered_message(filtered_batch, status_text)
             
             # Log filtered batch information
             message_logger.log_batch_filtered(filtered_batch, status_text)
@@ -103,9 +103,3 @@ class ModularOrchestrator:
     def run(self):
         """Start the orchestrator server."""
         self.server_manager.run()
-
-
-# Backward compatibility - keep the old Orchestrator class working
-class Orchestrator(ModularOrchestrator):
-    """Backward compatible orchestrator class."""
-    pass
