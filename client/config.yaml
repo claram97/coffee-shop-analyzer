@@ -7,8 +7,7 @@ loop:
 log:
   level: "info"
 batch:
-  maxAmount: 4 # number of lines
-  maxSize: 128 # in KB
+  maxAmount: 50 # number of lines
 data:
   folder: "./data" # folder with CSV files
 retries:
