@@ -59,7 +59,7 @@ class Orchestrator:
             
             # 1. Write original received message
             # Not performant at all, but useful for debugging purposes
-            message_logger.write_original_message(msg, status_text)
+            # message_logger.write_original_message(msg, status_text)
             
             # 2. Process filtered batch
             self._process_filtered_batch(msg, status_text)
@@ -89,7 +89,7 @@ class Orchestrator:
             
             # Write filtered message to file
             # Useful for debugging large batches, but not performant at all
-            message_logger.write_filtered_message(filtered_batch, status_text)
+            # message_logger.write_filtered_message(filtered_batch, status_text)
             
             # Log filtered batch information
             message_logger.log_batch_filtered(filtered_batch, status_text)
