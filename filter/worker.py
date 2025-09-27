@@ -4,6 +4,10 @@ from datetime import datetime, timezone
 from typing import Any, Callable, Dict, List, Optional, Tuple
 from zoneinfo import ZoneInfo
 
+from protocol_utils import databatch_from_bytes, databatch_to_bytes
+
+from middleware.middleware_client import MessageMiddlewareQueue
+
 MYT_TZ = ZoneInfo("Asia/Kuala_Lumpur")
 
 
@@ -81,21 +85,26 @@ REGISTRY: FilterRegistry = {}
 REGISTRY[(TRANSACTIONS, 0, qkey([1, 3, 4]))] = year_filter
 REGISTRY[(TRANSACTIONS, 1, qkey([1, 3]))] = hour_filter
 REGISTRY[(TRANSACTIONS, 2, qkey([1]))] = final_amount_filter
-
 REGISTRY[(TRANSACTION_ITEMS, 0, qkey([2]))] = year_filter
 
 
 # ---------- worker ----------
 class FilterWorker:
+    """
+    Consume de una cola (Filter Workers pool), aplica el filtro adecuado según (table_id, step, queries)
+    y reenvía el batch al Filter Router.
+    """
+
     def __init__(
         self,
-        in_mw,
-        out_router_mw,
-        filters: FilterRegistry,
+        host: str,
+        in_queue: str,
+        out_router_queue: str,
+        filters: FilterRegistry | None = None,
     ):
-        self._in = in_mw
-        self._out = out_router_mw
-        self._filters = filters
+        self._in = MessageMiddlewareQueue(host, in_queue)
+        self._out = MessageMiddlewareQueue(host, out_router_queue)
+        self._filters = filters or REGISTRY
 
     def run(self) -> None:
         self._in.start_consuming(self._on_raw)
@@ -103,30 +112,40 @@ class FilterWorker:
     def _on_raw(self, raw: bytes) -> None:
         db = databatch_from_bytes(raw)
 
-        if not db.table_ids:
+        # Tabla principal
+        if not getattr(db, "table_ids", None):
             self._out.send(raw)
             return
-        table_id = int(db.payload.table_id)
+        try:
+            table_id = int(db.table_ids[0])
+        except Exception:
+            self._out.send(raw)
+            return
 
-        step = current_step_from_mask(int(db.reserved_u16))
+        # Step actual desde la máscara (u16 contiguous-ones)
+        step = current_step_from_mask(int(getattr(db, "reserved_u16", 0)))
         if step is None:
             self._out.send(raw)
             return
 
-        inner = db.batch_msg
+        # Filas
+        inner = getattr(db, "batch_msg", None)
         if inner is None or not hasattr(inner, "rows"):
             self._out.send(raw)
             return
-        rows: List[Dict[str, Any]] = getattr(inner, "rows")
+        rows: List[Dict[str, Any]] = getattr(inner, "rows") or []
 
-        queries = getattr(db, "query_ids", []) or []
+        # Queries → key
+        queries = list(getattr(db, "query_ids", []) or [])
         key = (table_id, step, qkey(queries))
 
+        # Resolver filtro
         fn = self._filters.get(key)
         if fn is None:
             self._out.send(raw)
             return
 
+        # Aplicar filtro (fail-closed: si falla, reenviamos sin cambios)
         try:
             new_rows = fn(rows) or []
         except Exception:
