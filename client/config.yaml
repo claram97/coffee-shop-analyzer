@@ -9,7 +9,7 @@ log:
 batch:
   maxAmount: 50000 # number of lines
 data:
-  folder: "./data" # folder with CSV files
+  folder: "/data" # folder with CSV files
 retries:
   attempts: 5
   retryInterval: 2 # in seconds

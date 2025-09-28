@@ -360,7 +360,7 @@ class BatchRecvSuccess:
 
     def write_to(self, sock: socket.socket):
         """Frame and send the success response: [opcode][length=0]."""
-        from .parsing import write_u8, write_i32
+        from .socket_parsing import write_u8, write_i32
         write_u8(sock, self.opcode)
         write_i32(sock, 0)
 
@@ -373,6 +373,6 @@ class BatchRecvFail:
 
     def write_to(self, sock: socket.socket):
         """Frame and send the failure response: [opcode][length=0]."""
-        from .parsing import write_u8, write_i32
+        from .socket_parsing import write_u8, write_i32
         write_u8(sock, self.opcode)
         write_i32(sock, 0)

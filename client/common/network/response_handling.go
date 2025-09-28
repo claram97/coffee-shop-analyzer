@@ -49,7 +49,7 @@ func (rh *ResponseHandler) handleResponseMessage(msg interface{}) {
 	if respMsg, ok := msg.(interface{ GetOpCode() byte }); ok {
 		switch respMsg.GetOpCode() {
 		case protocol.BatchRecvSuccessOpCode:
-			rh.log.Info("action: batch_enviado | result: success")
+			rh.log.Debug("action: batch_enviado | result: success")
 		case protocol.BatchRecvFailOpCode:
 			rh.log.Error("action: batch_enviado | result: fail")
 		}

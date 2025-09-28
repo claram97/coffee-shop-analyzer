@@ -79,7 +79,7 @@ class MessageLogger:
             msg: The original message object.
             status_text: A human-readable string describing the batch status.
         """
-        logging.info(
+        logging.debug(
             "action: batch_received | result: success | opcode: %d | amount: %d | batch_number: %d | status: %s",
             msg.opcode, msg.amount, msg.batch_number, status_text
         )
@@ -93,7 +93,7 @@ class MessageLogger:
             filtered_batch: The processed `DataBatch` object.
             status_text: A human-readable string describing the batch status.
         """
-        logging.info(
+        logging.debug(
             "action: batch_filtered | table: %s | original_count: %d | filtered_count: %d | batch_number: %d | status: %s",
             filtered_batch.filtered_data['table_name'],
             filtered_batch.filtered_data['original_row_count'],

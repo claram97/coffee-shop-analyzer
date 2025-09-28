@@ -6,7 +6,8 @@ into filtered, serialized, and wrapped DataBatch messages for downstream process
 import logging
 from typing import Dict, List, Callable
 
-from protocol import Opcodes, DataBatch
+from protocol.constants import Opcodes
+from protocol.databatch import DataBatch
 from .filters import (
     filter_menu_items_columns, filter_stores_columns, filter_transaction_items_columns,
     filter_transactions_columns, filter_users_columns
@@ -161,7 +162,7 @@ class BatchProcessor:
     def log_data_batch_creation(self, original_msg, query_ids, filtered_rows, inner_body, batch_bytes):
         """Logs a comprehensive summary of the data batch creation process."""
         table_name = self.get_table_name_for_opcode(original_msg.opcode)
-        logging.info(
+        logging.debug(
             "action: create_data_batch | table: %s | opcode: %d | query_ids: %s | "
             "original_rows: %d | filtered_rows: %d | batch_number: %d | "
             "inner_body_size: %d bytes | batch_bytes_size: %d bytes",
@@ -222,7 +223,7 @@ class BatchProcessor:
     def log_data_batch_ready(self, original_msg):
         """Logs a final confirmation that a `DataBatch` has been fully created and is ready."""
         table_name = self.get_table_name_for_opcode(original_msg.opcode)
-        logging.info(
+        logging.debug(
             "action: data_batch_ready | table: %s | batch_number: %d | "
             "ready_for_transmission: True | can_use_write_to: True",
             table_name, original_msg.batch_number

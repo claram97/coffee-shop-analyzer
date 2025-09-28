@@ -6,7 +6,8 @@ standardized responses within a network communication protocol.
 import logging
 from typing import Dict, Any
 
-from protocol import Opcodes, BatchRecvSuccess, BatchRecvFail
+from protocol.constants import Opcodes
+from protocol.messages import BatchRecvSuccess, BatchRecvFail
 
 
 class MessageHandler:

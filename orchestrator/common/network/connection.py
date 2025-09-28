@@ -8,7 +8,8 @@ import socket
 import threading
 from typing import List, Callable, Optional
 
-from protocol import recv_msg, ProtocolError
+from protocol.dispatcher import recv_msg
+from protocol.constants import ProtocolError
 
 
 class ConnectionManager:
@@ -112,7 +113,7 @@ class ConnectionManager:
             try:
                 msg = recv_msg(client_sock)
                 addr = client_sock.getpeername()
-                logging.info(
+                logging.debug(
                     "action: receive_message | result: success | ip: %s | opcode: %i",
                     addr[0],
                     msg.opcode,
