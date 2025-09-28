@@ -3,8 +3,7 @@ from __future__ import annotations
 from datetime import datetime, timezone
 from typing import Any, Callable, Dict, List, Optional, Tuple
 from zoneinfo import ZoneInfo
-
-from protocol_utils import databatch_from_bytes, databatch_to_bytes
+from protocol.databatch import DataBatch
 
 from middleware.middleware_client import MessageMiddlewareQueue
 
@@ -110,7 +109,7 @@ class FilterWorker:
         self._in.start_consuming(self._on_raw)
 
     def _on_raw(self, raw: bytes) -> None:
-        db = databatch_from_bytes(raw)
+        db = DataBatch.deserialize_from_bytes(raw)
 
         # Tabla principal
         if not getattr(db, "table_ids", None):
@@ -153,5 +152,5 @@ class FilterWorker:
             return
 
         inner.rows = new_rows
-        out_raw = databatch_to_bytes(db)
+        out_raw = db.to_bytes()
         self._out.send(out_raw)

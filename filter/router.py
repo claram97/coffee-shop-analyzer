@@ -7,15 +7,9 @@ from collections import defaultdict
 from dataclasses import dataclass, field
 from typing import Any, Dict, List, NamedTuple, Optional
 
-# ==== Protocolo (asumo helpers existentes en tu proyecto) ====
-# Ajustá el import al módulo real:
-from protocol_utils import (
-    databatch_from_bytes,
-    databatch_to_bytes,
-    partition_eof_to_bytes,
-    table_eof_from_bytes,
-    table_eof_to_bytes,
-)
+from protocol.databatch import DataBatch
+from protocol.messages import EOFMessage
+from protocol.constants import Opcodes
 
 # ==== Middleware ====
 from middleware.middleware_client import (
@@ -51,6 +45,17 @@ class DataBatch:
 @dataclass
 class TableEOF:
     table_name: str
+
+
+# ==========================
+# Protocol utilities
+# ==========================
+def partition_eof_to_bytes(table_name: str, partition_id: int) -> bytes:
+    """Create EOF message bytes for a specific table and partition."""
+    from protocol.messages import EOFMessage
+    eof_msg = EOFMessage()
+    eof_msg.create_eof_message(batch_number=0, table_type=table_name)
+    return eof_msg.to_bytes()
 
 
 # ==========================
@@ -159,14 +164,12 @@ class BusProducer:
         El 'step' ya viene reflejado en batch.metadata.reserved_u16 por el router;
         solo serializamos y publicamos.
         """
-        raw = databatch_to_bytes(batch)
-        self._filters_pub.send(raw)
+        self._filters_pub.send(batch.to_bytes())
 
     def send_to_aggregator_partition(self, partition_id: int, batch: DataBatch) -> None:
         table = batch.metadata.table_name
         pub = self._get_agg_pub(table, int(partition_id))
-        raw = databatch_to_bytes(batch)
-        pub.send(raw)
+        pub.send(batch.to_bytes())
 
     def send_table_eof_to_aggregator_partition(
         self, table_name: str, partition_id: int
@@ -176,8 +179,7 @@ class BusProducer:
         pub.send(raw)
 
     def requeue_to_router(self, batch: DataBatch) -> None:
-        raw = databatch_to_bytes(batch)
-        self._router_pub.send(raw)
+        self._router_pub.send(batch.to_bytes())
 
     # --------- internos ---------
 
@@ -262,12 +264,12 @@ class FilterRouter:
         self._cfg = table_cfg
         self._log = logging.getLogger("filter-router")
         self._pending_batches: Dict[str, int] = defaultdict(int)
-        self._pending_eof: Dict[str, TableEOF] = {}
+        self._pending_eof: Dict[str, ] = {}
 
     def process_message(self, msg: Any) -> None:
         if isinstance(msg, DataBatch):
             self._handle_data(msg)
-        elif isinstance(msg, TableEOF):
+        elif isinstance(msg, EOFMessage):
             self._handle_table_eof(msg)
         else:
             self._log.warning("Unknown message type: %r", type(msg))
@@ -406,14 +408,12 @@ class QueueBusProducer(BusProducer):
         return pub
 
     def send_to_filters_pool(self, batch: DataBatch, step: int) -> None:
-        raw = databatch_to_bytes(batch)  # el step ya está reflejado en reserved_u16
-        self._filters_pub.send(raw)
+        self._filters_pub.send(batch.to_bytes())
 
     def send_to_aggregator_partition(self, partition_id: int, batch: DataBatch) -> None:
         table = batch.metadata.table_name
         pub = self._get_agg_pub(table, partition_id)
-        raw = databatch_to_bytes(batch)
-        pub.send(raw)
+        pub.send(batch.to_bytes())
 
     def send_table_eof_to_aggregator_partition(
         self, table_name: str, partition_id: int
@@ -423,8 +423,7 @@ class QueueBusProducer(BusProducer):
         pub.send(raw)
 
     def requeue_to_router(self, batch: DataBatch) -> None:
-        raw = databatch_to_bytes(batch)
-        self._router_pub.send(raw)
+        self._router_pub.send(batch.to_bytes())
 
 
 # ==========================
@@ -453,16 +452,30 @@ class RouterServer:
 
     def run(self) -> None:
         def _cb(body: bytes):
-            # 1) ¿Es TABLE_EOF?
-            tbl = table_eof_from_bytes(body)
-            if tbl is not None:
-                self._router.process_message(TableEOF(table_name=str(tbl)))
+            # Check the first byte (opcode) to determine message type
+            if len(body) < 1:
+                self._log.error("Received empty message")
                 return
-            # 2) Sino, DataBatch
-            db = databatch_from_bytes(body)
-            # Adaptación mínima: si usás tu DataBatch del protocolo, mapear a nuestro DTO
-            # Asumo que `db.metadata` y `db.payload.rows` tienen misma estructura semántica.
-            self._router.process_message(db)
+
+            opcode = body[0]
+            
+            # Process message based on opcode
+            if opcode == Opcodes.EOF:
+                # It's an EOF message
+                try:
+                    eof_msg = EOFMessage()
+                    eof_msg.read_from(body[5:])  # Skip opcode (1 byte) + length (4 bytes)
+                    self._router.process_message(eof_msg)
+                except Exception as e:
+                    self._log.error(f"Failed to parse EOF message: {e}")
+            elif opcode == Opcodes.DATA_BATCH:
+                try:
+                    db = DataBatch.deserialize_from_bytes(body)
+                    self._router.process_message(db)
+                except Exception as e:
+                    self._log.error(f"Failed to parse DataBatch message: {e}")
+            else:
+                self._log.warning(f"Unwanted message opcode: {opcode}")
 
         self._mw_in.start_consuming(_cb)
 

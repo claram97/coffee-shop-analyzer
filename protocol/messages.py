@@ -244,6 +244,20 @@ class EOFMessage(TableMessage):
             row_factory=lambda **kwargs: None  # Don't create row objects
         )
         self.table_type = ""  # Store table type directly
+
+    @staticmethod
+    def deserialize_from_bytes(body: bytes) -> 'EOFMessage':
+        """Deserialize an EOFMessage from bytes.
+        
+        Args:
+            body: The byte buffer containing the message body.
+            
+        Returns:
+            An instance of EOFMessage with parsed data.
+        """
+        eof_msg = EOFMessage()
+        eof_msg.read_from(body)
+        return eof_msg
     
     def create_eof_message(self, batch_number: int, table_type: str):
         """Create an EOF message for a specific table type.
