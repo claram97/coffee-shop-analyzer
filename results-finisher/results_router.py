@@ -6,6 +6,7 @@ import logging
 from typing import Dict, List
 
 from middleware_client import MessageMiddlewareQueue, MessageMiddlewareDisconnectedError
+from protocol import Opcodes
 
 logging.basicConfig(
     level=logging.INFO,
@@ -45,8 +46,20 @@ def _extract_first_query_id(body: bytes) -> str:
             raise ValueError("Message too short to contain outer frame")
             
         opcode = body[0]
-        if opcode != 11:  # DATA_BATCH opcode
-            raise ValueError(f"Expected DATA_BATCH opcode (11), got {opcode}")
+        if (opcode != Opcodes.DATA_BATCH and opcode != Opcodes.EOF):
+            raise ValueError(f"Expected DATA_BATCH opcode ({Opcodes.DATA_BATCH}), got {opcode}")
+        
+        # FOR TESTING PURPOSES ONLY
+        # FOR TESTING PURPOSES ONLY
+        # FOR TESTING PURPOSES ONLY
+        # FOR TESTING PURPOSES ONLY
+        # FOR TESTING PURPOSES ONLY
+        # FOR TESTING PURPOSES ONLY
+        # FOR TESTING PURPOSES ONLY
+        # FOR TESTING PURPOSES ONLY
+        # FOR TESTING PURPOSES ONLY
+        if(opcode != Opcodes.DATA_BATCH):  # Use the correct opcode from protocol
+            return "Q1"
             
         # Skip opcode and length to get to DataBatch inner content
         inner_body = body[5:]

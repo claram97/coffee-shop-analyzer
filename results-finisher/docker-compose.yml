@@ -18,7 +18,9 @@ services:
       retries: 5
 
   results_router:
-    build: .
+    build: 
+      context: ..  # Build from repository root
+      dockerfile: results-finisher/Dockerfile
     container_name: results_router
     command: python results_router.py
     depends_on:
@@ -32,7 +34,9 @@ services:
       - OUTPUT_QUEUES=results_finisher_queue_1,results_finisher_queue_2
 
   results_finisher_1:
-    build: .
+    build:
+      context: ..  # Build from repository root
+      dockerfile: results-finisher/Dockerfile
     container_name: results_finisher_1
     command: python results_finisher_runner.py
     depends_on:
@@ -49,7 +53,9 @@ services:
       - CHECKPOINT_DIR=/checkpoints
 
   results_finisher_2:
-    build: .
+    build:
+      context: ..  # Build from repository root
+      dockerfile: results-finisher/Dockerfile
     container_name: results_finisher_2
     command: python results_finisher_runner.py
     depends_on:
@@ -67,7 +73,9 @@ services:
 
   # Test versions of services with test queue configuration
   test_results_router:
-    build: .
+    build:
+      context: ..  # Build from repository root
+      dockerfile: results-finisher/Dockerfile
     container_name: test_results_router
     profiles: ["test"]
     command: python results_router.py
@@ -82,7 +90,9 @@ services:
       - OUTPUT_QUEUES=test_finisher_in_1,test_finisher_in_2
 
   test_results_finisher_1:
-    build: .
+    build:
+      context: ..  # Build from repository root
+      dockerfile: results-finisher/Dockerfile
     container_name: test_results_finisher_1
     profiles: ["test"]
     command: python results_finisher_runner.py
@@ -100,7 +110,9 @@ services:
       - CHECKPOINT_DIR=/checkpoints
 
   test_results_finisher_2:
-    build: .
+    build:
+      context: ..  # Build from repository root
+      dockerfile: results-finisher/Dockerfile
     container_name: test_results_finisher_2
     profiles: ["test"]
     command: python results_finisher_runner.py
@@ -118,7 +130,9 @@ services:
       - CHECKPOINT_DIR=/checkpoints
 
   test_runner:
-    build: .
+    build:
+      context: ..  # Build from repository root
+      dockerfile: results-finisher/Dockerfile
     profiles: ["test"]
     depends_on:
       rabbitmq: { condition: service_healthy }

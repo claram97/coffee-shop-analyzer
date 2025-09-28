@@ -4,12 +4,16 @@ import os
 import pickle
 import threading
 import time
+import io
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
 from typing import Dict, Any, List
 
 from middleware_client import MessageMiddlewareQueue
-from protocol import deserialize_message, Finished, DataBatch, ProtocolError
+from protocol import (
+    ProtocolError, Opcodes, BatchStatus, DataBatch
+)
+from protocol.messages import EOFMessage
 from query_strategy import get_strategy
 from constants import QueryType
 
@@ -29,9 +33,8 @@ class QueryState:
 
     def __post_init__(self):
         self.completion_tracker = {
-            "eof_signal_received": False,
-            "total_source_batches": -1,
             "received_batches": {},
+            "eof_signals": {},  # Track EOF signals per table type (table_name -> True)
         }
 
 class ResultsFinisher:
@@ -76,73 +79,88 @@ class ResultsFinisher:
         logging.info(f"DEBUG: Received message of {len(body)} bytes")
         
         try:
-            batch = deserialize_message(body)
-            logging.info(f"DEBUG: Successfully parsed message - query_ids: {batch.query_ids}, batch_number: {batch.batch_number}")
+            message = DataBatch.deserialize_from_bytes(body)
+            
+            if isinstance(message, DataBatch):
+                logging.info(f"DEBUG: Successfully parsed DataBatch - query_ids: {message.query_ids}, batch_number: {message.batch_number}")
+                
+                if not message.query_ids:
+                    logging.warning("DataBatch has no query_ids, skipping")
+                    return
+
+                logging.info(f"DEBUG: Processing DataBatch for queries: {message.query_ids}")
+                
+                for query_id_int in message.query_ids:
+                    query_id = str(query_id_int)
+                    logging.info(f"DEBUG: Processing query_id: {query_id}")
+                    
+                    with self.lock:
+                        if query_id not in self.active_queries:
+                            try:
+                                query_type = QueryType(f"Q{query_id}")
+                            except ValueError:
+                                query_type = QueryType.UNKNOWN
+                            self.active_queries[query_id] = QueryState(query_id, query_type)
+                            logging.info(f"New query started: {query_id} (Type: {query_type.value})")
+                        
+                        state = self.active_queries[query_id]
+                        self._process_data_batch(state, message)
+                        self._save_checkpoint(state)
+
+                        if self._is_query_complete(state) and state.status != "finalizing":
+                            state.status = "finalizing"
+                            logging.info(f"Query {query_id} is complete. Submitting for finalization.")
+                            self.executor.submit(self._finalize_query, state)
+            
+            elif isinstance(message, EOFMessage):
+                table_type = message.get_table_type()
+                logging.info(f"DEBUG: Successfully parsed EOFMessage for table '{table_type}'")
+                
+                # EOF messages affect all active queries - they signal end of a table type
+                with self.lock:
+                    for query_id, state in self.active_queries.items():
+                        self._process_eof_message(state, message)
+                        self._save_checkpoint(state)
+                        
+                        if self._is_query_complete(state) and state.status != "finalizing":
+                            state.status = "finalizing"
+                            logging.info(f"Query {query_id} is complete after EOF. Submitting for finalization.")
+                            self.executor.submit(self._finalize_query, state)
+            
+            else:
+                logging.error(f"Unexpected message type: {type(message)}")
+                return
+                
+            logging.info(f"DEBUG: Successfully processed message")
+        
         except ProtocolError as e:
             logging.error(f"Message is malformed, discarding. Error: {e}")
             logging.error(f"DEBUG: Message body prefix (first 100 bytes): {body[:100].hex()}")
             # Don't raise an exception - this allows the message to be ACK'd and discarded
             # since it's permanently malformed and shouldn't be reprocessed
             return
-
-        try:
-            if not batch.query_ids:
-                logging.warning("Message has no query_ids, skipping")
-                return
-
-            logging.info(f"DEBUG: Processing message for queries: {batch.query_ids}")
-            
-            for query_id_int in batch.query_ids:
-                query_id = str(query_id_int)
-                logging.info(f"DEBUG: Processing query_id: {query_id}")
-                
-                with self.lock:
-                    if query_id not in self.active_queries:
-                        try:
-                            query_type = QueryType(f"Q{query_id}")
-                        except ValueError:
-                            query_type = QueryType.UNKNOWN
-                        self.active_queries[query_id] = QueryState(query_id, query_type)
-                        logging.info(f"New query started: {query_id} (Type: {query_type.value})")
-                    
-                    state = self.active_queries[query_id]
-                    self._process_batch(state, batch)
-                    self._save_checkpoint(state)
-
-                    if self._is_query_complete(state) and state.status != "finalizing":
-                        state.status = "finalizing"
-                        logging.info(f"Query {query_id} is complete. Submitting for finalization.")
-                        self.executor.submit(self._finalize_query, state)
-            
-            logging.info(f"DEBUG: Successfully processed message")
         
         except Exception as e:
             logging.error(f"Error in message handler: {e}", exc_info=True)
-            logging.error(f"DEBUG: Exception occurred while processing message with query_ids: {getattr(batch, 'query_ids', 'unknown')}")
+            logging.error(f"DEBUG: Exception occurred while processing message")
             # Re-raise the exception so the message gets NACK'd and requeued
             raise
 
-    def _process_batch(self, state: QueryState, batch: DataBatch):
-        logging.info(f"Processing batch #{batch.batch_number} for query {state.query_id}, type: {type(batch.batch_msg).__name__}")
+    def _process_data_batch(self, state: QueryState, batch: DataBatch):
+        logging.info(f"Processing DataBatch #{batch.batch_number} for query {state.query_id}, embedded type: {type(batch.batch_msg).__name__}")
         
-        if isinstance(batch.batch_msg, Finished):
-            state.completion_tracker["eof_signal_received"] = True
-            state.completion_tracker["total_source_batches"] = batch.batch_number
-            logging.info(f"EOF signal received for query {state.query_id}. Total source batches: {batch.batch_number}")
-            # EOF signal should not be counted as a regular batch - return early
-            state.last_update_time = time.time()
-            return
-        
+        # Process the embedded message data if it has rows
         if hasattr(batch.batch_msg, 'rows') and batch.batch_msg.rows:
             strategy = get_strategy(state.query_type)
             strategy.consolidate(state.consolidated_data, batch.batch_msg.rows)
             logging.debug(f"Consolidated {len(batch.batch_msg.rows)} rows for query {state.query_id}")
 
-        # Only track non-EOF batches in received_batches
+        # Track regular data batches
         source_index = str(batch.batch_number)
         received = state.completion_tracker.setdefault("received_batches", {})
         batch_info = received.setdefault(source_index, {})
         
+        # Track copy and shard information from DataBatch metadata
         copy_info = batch.meta
         if copy_info:
             part, total = next(iter(copy_info.items()))
@@ -154,28 +172,79 @@ class ResultsFinisher:
             batch_info.setdefault("received_shards", set()).add(batch.shard_num)
 
         state.last_update_time = time.time()
-        logging.debug(f"Query {state.query_id} - Received batches: {len(received)}, Total expected: {state.completion_tracker.get('total_source_batches', -1)}")
+        logging.debug(f"Query {state.query_id} - Received batches: {len(received)}")
+
+    def _process_eof_message(self, state: QueryState, eof_msg: EOFMessage):
+        table_type = eof_msg.get_table_type()
+        logging.info(f"Processing EOF for table '{table_type}' in query {state.query_id}")
+        
+        # Track EOF signals per table type
+        if "eof_signals" not in state.completion_tracker:
+            state.completion_tracker["eof_signals"] = {}
+        state.completion_tracker["eof_signals"][table_type] = True
+        
+        state.last_update_time = time.time()
 
     def _is_query_complete(self, state: QueryState) -> bool:
         tracker = state.completion_tracker
-        logging.info(f"Checking completion for query {state.query_id}: EOF={tracker.get('eof_signal_received')}, "
-                    f"total_batches={tracker.get('total_source_batches', -1)}, "
-                    f"received_batches={len(tracker.get('received_batches', {}))}")
+        eof_signals = tracker.get("eof_signals", {})
+        received_batches = tracker.get("received_batches", {})
         
-        if not tracker.get("eof_signal_received") or tracker.get("total_source_batches", -1) == -1:
+        # A query is complete if we have received all expected EOFs.
+        # The additional checks for batches only apply if batches were received.
+        
+        logging.info(f"Checking completion for query {state.query_id}: "
+                     f"received_batches={len(received_batches)}, "
+                     f"eof_signals={list(eof_signals.keys())}")
+        
+        expected_tables = self._get_expected_tables_for_query(state.query_type)
+        
+        if not expected_tables:
+            logging.debug(f"Query {state.query_id}: No expected tables for type {state.query_type}, cannot determine completion.")
             return False
         
-        if len(tracker.get("received_batches", {})) != tracker["total_source_batches"]:
+        # 1. Check if all expected EOF signals have arrived. This is the main condition.
+        if not expected_tables.issubset(eof_signals.keys()):
+            missing_eof_signals = expected_tables - set(eof_signals.keys())
+            logging.debug(f"Query {state.query_id}: Still waiting for EOF signals from: {missing_eof_signals}")
             return False
 
-        for batch_info in tracker["received_batches"].values():
-            if "total_copies" in batch_info and len(batch_info.get("received_copies", set())) != batch_info["total_copies"]:
-                return False
-            if "total_shards" in batch_info and len(batch_info.get("received_shards", set())) != batch_info["total_shards"]:
-                return False
+        # 2. If data batches were received, ensure they are all complete.
+        for batch_num, batch_info in received_batches.items():
+            # Check for copy completeness
+            if "total_copies" in batch_info:
+                received_copies = batch_info.get("received_copies", set())
+                if len(received_copies) != batch_info["total_copies"]:
+                    logging.debug(f"Query {state.query_id}: Batch {batch_num} has incomplete copies. "
+                                  f"Got {len(received_copies)} of {batch_info['total_copies']}.")
+                    return False
+            
+            # Check for shard completeness
+            if "total_shards" in batch_info:
+                received_shards = batch_info.get("received_shards", set())
+                if len(received_shards) != batch_info["total_shards"]:
+                    logging.debug(f"Query {state.query_id}: Batch {batch_num} has incomplete shards. "
+                                  f"Got {len(received_shards)} of {batch_info['total_shards']}.")
+                    return False
         
-        logging.info(f"Query {state.query_id} is complete!")
+        logging.info(f"Query {state.query_id} is complete! All EOFs received and all batches are complete.")
         return True
+    
+    def _get_expected_tables_for_query(self, query_type: QueryType) -> set[str]:
+        """
+        Get the set of expected table types based on the query type.
+        This determines which EOF signals we need to wait for.
+        """
+        # Define which tables each query type expects
+        # This should be configured based on your specific query requirements
+        expected_tables_map = {
+            QueryType.Q1: {"menu_items", "transactions", "stores"},
+            QueryType.Q2: {"transactions", "transaction_items", "stores", "users"},
+            QueryType.Q3: {"transactions", "stores"},
+            QueryType.Q4: {"menu_items", "transaction_items"},
+        }
+        
+        return expected_tables_map.get(query_type, set())
 
     def _finalize_query(self, state: QueryState):
         try:

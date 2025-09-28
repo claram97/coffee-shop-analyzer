@@ -9,15 +9,16 @@ from queue import Queue, Empty
 
 # Add the project root to the Python path to allow imports from other folders
 import sys
-sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
+import os
+project_root = os.path.abspath(os.path.join(os.path.dirname(__file__), '..'))
+sys.path.insert(0, project_root)
 
 from middleware_client import MessageMiddlewareQueue
 from protocol import (
-    Opcodes,
-    write_i32,
-    write_string,
-    write_u8
+    ProtocolError, Opcodes, BatchStatus, DataBatch
 )
+from protocol.messages import NewTransactions, EOFMessage
+from protocol.parsing import write_i32, write_string, write_u8
 
 # --- Test Configuration ---
 RABBITMQ_HOST = os.getenv("RABBITMQ_HOST", "localhost")
@@ -55,50 +56,84 @@ def generate_test_data_csv(filename: str, num_records: int):
                 'created_at': '2024-01-15T10:00:00Z'
             })
 
-def create_raw_transaction_payload(rows: list[dict]) -> bytes:
-    """Serializes a list of transaction dicts into a TableMessage body."""
-    buffer = io.BytesIO()
-    write_i32(buffer, len(rows)) # Write number of rows
+def create_transaction_data_batch(query_id: int, batch_number: int, rows: list[dict]) -> bytes:
+    """Creates a proper DataBatch message containing transaction data."""
+    
+    # Create NewTransactions message
+    transactions_msg = NewTransactions()
+    transactions_msg.amount = len(rows)
+    transactions_msg.batch_number = batch_number
+    transactions_msg.batch_status = BatchStatus.CONTINUE
+    transactions_msg.rows = []
+    
+    # Convert dict rows to RawTransaction objects
+    from protocol.entities import RawTransaction
     for row in rows:
-        write_i32(buffer, len(row)) # Write number of key-value pairs
-        for key, value in row.items():
-            write_string(buffer, key)
-            write_string(buffer, str(value))
-    return buffer.getvalue()
+        transaction = RawTransaction(
+            transaction_id=row['transaction_id'],
+            store_id=row['store_id'],
+            payment_method_id=row['payment_method_id'],
+            user_id=row['user_id'],
+            original_amount=row['original_amount'],
+            discount_applied=row['discount_applied'],
+            final_amount=row['final_amount'],
+            created_at=row['created_at']
+        )
+        transactions_msg.rows.append(transaction)
+    
+    # Serialize the NewTransactions message to bytes
+    transactions_bytes = serialize_table_message(transactions_msg)
+    
+    # Create DataBatch with the embedded message
+    data_batch = DataBatch(
+        query_ids=[query_id],
+        table_ids=[5],  # NEW_TRANSACTION opcode
+        batch_bytes=DataBatch.make_embedded(Opcodes.NEW_TRANSACTION, transactions_bytes)
+    )
+    data_batch.batch_number = batch_number
+    data_batch.total_shards = 1
+    data_batch.shard_num = 0
+    
+    return data_batch.to_bytes()
 
-def create_data_batch_bytes(query_id: int, batch_number: int, inner_opcode: int, inner_body: bytes) -> bytes:
-    """Creates the full binary DataBatch message envelope."""
-    # First create the inner DataBatch body
-    inner_buffer = io.BytesIO()
-    # [u8 list: table_ids]
-    inner_buffer.write(b'\x01') # Count = 1
-    inner_buffer.write(bytes([Opcodes.NEW_TRANSACTION]))
-    # [u8 list: query_ids]
-    inner_buffer.write(b'\x01') # Count = 1
-    inner_buffer.write(bytes([query_id]))
-    # [u16 reserved]
-    inner_buffer.write(b'\x00\x00')
-    # [i64 batch_number]
-    inner_buffer.write(int(batch_number).to_bytes(8, 'little', signed=True))
-    # [dict<u8,u8> meta]
-    inner_buffer.write(b'\x00')
-    # [u16 total_shards], [u16 shard_num]
-    inner_buffer.write(b'\x01\x00')
-    inner_buffer.write(b'\x00\x00')
-    # [embedded message]
-    inner_buffer.write(bytes([inner_opcode]))
-    inner_buffer.write(len(inner_body).to_bytes(4, 'little', signed=True))
-    inner_buffer.write(inner_body)
+def serialize_table_message(msg) -> bytes:
+    """Helper to serialize a table message to bytes."""
+    import struct
     
-    inner_data = inner_buffer.getvalue()
+    body_parts = []
     
-    # Now create the outer DataBatch message frame
-    outer_buffer = io.BytesIO()
-    write_u8(outer_buffer, Opcodes.DATA_BATCH)  # Outer opcode
-    write_i32(outer_buffer, len(inner_data))    # Length of inner data
-    outer_buffer.write(inner_data)              # Inner data
+    # nRows (i32)
+    body_parts.append(struct.pack('<I', msg.amount))
     
-    return outer_buffer.getvalue()
+    # batchNumber (i64) 
+    body_parts.append(struct.pack('<Q', msg.batch_number))
+    
+    # status (u8)
+    body_parts.append(struct.pack('<B', msg.batch_status))
+    
+    # Serialize all rows
+    for row in msg.rows:
+        # Number of key-value pairs
+        row_dict = row.__dict__
+        body_parts.append(struct.pack('<I', len(row_dict)))
+        
+        # Write each key-value pair
+        for key, value in row_dict.items():
+            key_bytes = key.encode('utf-8')
+            body_parts.append(struct.pack('<I', len(key_bytes)))
+            body_parts.append(key_bytes)
+            
+            value_bytes = str(value).encode('utf-8')
+            body_parts.append(struct.pack('<I', len(value_bytes)))
+            body_parts.append(value_bytes)
+    
+    return b''.join(body_parts)
+
+def create_eof_message(table_type: str) -> bytes:
+    """Creates a proper EOFMessage for a specific table type."""
+    eof_msg = EOFMessage()
+    eof_msg.create_eof_message(batch_number=0, table_type=table_type)
+    return eof_msg.to_bytes()
 
 # --- Pytest Fixtures for Setup and Teardown ---
 
@@ -171,25 +206,18 @@ def test_full_pipeline_with_large_batch_count(test_infrastructure):
             if not batch_rows:
                 break
 
-            payload = create_raw_transaction_payload(batch_rows)
-            message_bytes = create_data_batch_bytes(QUERY_ID, batch_num, Opcodes.NEW_TRANSACTION, payload)
+            message_bytes = create_transaction_data_batch(QUERY_ID, batch_num, batch_rows)
             producer.send(message_bytes)
             print(f"Sent Batch #{batch_num} ({len(batch_rows)} records)")
             batch_num += 1
             time.sleep(0.01) # Simulate a small delay between batches
 
-    # 4. Send the final EOF Signal message
-    # The EOF signal should indicate the total number of batches sent
+    # 4. Send the final EOF Signal message for transactions table
     total_batches_sent = batch_num - 1  # batch_num is incremented after each batch
     
-    # Create proper Finished message body with agency_id (4 bytes)
-    finished_body = io.BytesIO()
-    write_i32(finished_body, 0)  # agency_id = 0 for this test
-    finished_payload = finished_body.getvalue()
-    
-    eof_signal = create_data_batch_bytes(QUERY_ID, total_batches_sent, Opcodes.FINISHED, finished_payload)
+    eof_signal = create_eof_message("transactions")
     producer.send(eof_signal)
-    print(f"Sent EOF Signal indicating {total_batches_sent} total batches were sent")
+    print(f"Sent EOF Signal for 'transactions' table after {total_batches_sent} batches")
     
     # 5. Wait for the result from the listener thread
     print("--- Waiting for final consolidated result ---")
