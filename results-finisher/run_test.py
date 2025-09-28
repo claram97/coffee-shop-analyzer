@@ -56,38 +56,67 @@ def generate_test_data_csv(filename: str, num_records: int):
                 'created_at': '2024-01-15T10:00:00Z'
             })
 
-def create_transaction_data_batch(query_id: int, batch_number: int, rows: list[dict]) -> bytes:
-    """Creates a proper DataBatch message containing transaction data."""
+def create_joined_data_batch(query_id: int, batch_number: int, rows: list[dict]) -> bytes:
+    """Creates a proper DataBatch message containing pre-joined transaction+store data."""
     
-    # Create NewTransactions message
+    # Create NewTransactions message (we'll use this message type but with enriched data)
     transactions_msg = NewTransactions()
     transactions_msg.amount = len(rows)
     transactions_msg.batch_number = batch_number
     transactions_msg.batch_status = BatchStatus.CONTINUE
     transactions_msg.rows = []
     
-    # Convert dict rows to RawTransaction objects
+    # Create a custom joined data class that extends RawTransaction with store data
     from protocol.entities import RawTransaction
-    for row in rows:
-        transaction = RawTransaction(
-            transaction_id=row['transaction_id'],
-            store_id=row['store_id'],
-            payment_method_id=row['payment_method_id'],
-            user_id=row['user_id'],
-            original_amount=row['original_amount'],
-            discount_applied=row['discount_applied'],
-            final_amount=row['final_amount'],
-            created_at=row['created_at']
-        )
-        transactions_msg.rows.append(transaction)
     
-    # Serialize the NewTransactions message to bytes
+    class JoinedTransactionStore(RawTransaction):
+        def __init__(self, transaction_data, store_data):
+            # Initialize the base RawTransaction with the 8 required transaction fields
+            super().__init__(
+                transaction_id=transaction_data['transaction_id'],
+                store_id=transaction_data['store_id'],
+                payment_method_id=transaction_data['payment_method_id'],
+                user_id=transaction_data['user_id'],
+                original_amount=transaction_data['original_amount'],
+                discount_applied=transaction_data['discount_applied'],
+                final_amount=transaction_data['final_amount'],
+                created_at=transaction_data['created_at']
+            )
+            
+            # Add the joined store fields (these will be available to query strategies)
+            self.store_name = store_data['store_name']
+            self.street = store_data['street']
+            self.city = store_data['city']
+            self.state = store_data['state']
+    
+    # Mock store data for joining (in real system this would come from upstream join)
+    store_lookup = {
+        's_1': {'store_name': 'Store 1', 'street': '100 Main St', 'city': 'Test City', 'state': 'Test State'},
+        's_2': {'store_name': 'Store 2', 'street': '200 Main St', 'city': 'Test City', 'state': 'Test State'},
+        's_3': {'store_name': 'Store 3', 'street': '300 Main St', 'city': 'Test City', 'state': 'Test State'},
+        's_4': {'store_name': 'Store 4', 'street': '400 Main St', 'city': 'Test City', 'state': 'Test State'},
+        's_5': {'store_name': 'Store 5', 'street': '500 Main St', 'city': 'Test City', 'state': 'Test State'},
+    }
+    
+    # Create joined records
+    for row in rows:
+        store_data = store_lookup.get(row['store_id'], {
+            'store_name': f"Store {row['store_id']}", 
+            'street': 'Unknown St', 
+            'city': 'Unknown City', 
+            'state': 'Unknown State'
+        })
+        
+        joined_record = JoinedTransactionStore(row, store_data)
+        transactions_msg.rows.append(joined_record)
+    
+    # Serialize the message to bytes
     transactions_bytes = serialize_table_message(transactions_msg)
     
     # Create DataBatch with the embedded message
     data_batch = DataBatch(
         query_ids=[query_id],
-        table_ids=[5],  # NEW_TRANSACTION opcode
+        table_ids=[Opcodes.NEW_TRANSACTION],  # Still use NEW_TRANSACTION opcode but with joined data
         batch_bytes=DataBatch.make_embedded(Opcodes.NEW_TRANSACTION, transactions_bytes)
     )
     data_batch.batch_number = batch_number
@@ -95,6 +124,7 @@ def create_transaction_data_batch(query_id: int, batch_number: int, rows: list[d
     data_batch.shard_num = 0
     
     return data_batch.to_bytes()
+
 
 def serialize_table_message(msg) -> bytes:
     """Helper to serialize a table message to bytes."""
@@ -113,8 +143,28 @@ def serialize_table_message(msg) -> bytes:
     
     # Serialize all rows
     for row in msg.rows:
-        # Number of key-value pairs
-        row_dict = row.__dict__
+        # For joined data, we only serialize the base transaction fields (8 fields)
+        # The additional store fields are available in the object but not serialized
+        if hasattr(row, '__dict__'):
+            # If it's a JoinedTransactionStore, only include the base transaction fields
+            if hasattr(row, 'store_name'):  # This indicates it's our joined class
+                row_dict = {
+                    'transaction_id': row.transaction_id,
+                    'store_id': row.store_id,
+                    'payment_method_id': row.payment_method_id,
+                    'user_id': row.user_id,
+                    'original_amount': row.original_amount,
+                    'discount_applied': row.discount_applied,
+                    'final_amount': row.final_amount,
+                    'created_at': row.created_at
+                }
+            else:
+                # For regular objects, use all attributes
+                row_dict = row.__dict__
+        else:
+            row_dict = row.__dict__
+        
+        # Number of key-value pairs (should be 8 for transactions)
         body_parts.append(struct.pack('<I', len(row_dict)))
         
         # Write each key-value pair
@@ -129,10 +179,13 @@ def serialize_table_message(msg) -> bytes:
     
     return b''.join(body_parts)
 
-def create_eof_message(table_type: str) -> bytes:
-    """Creates a proper EOFMessage for a specific table type."""
-    eof_msg = EOFMessage()
-    eof_msg.create_eof_message(batch_number=0, table_type=table_type)
+def create_eof_message(query_id: int, table_type: str) -> bytes:
+    """Creates a standalone EOFMessage for a specific table type."""
+    
+    # Create the EOFMessage directly (not embedded in DataBatch)
+    eof_msg = EOFMessage().create_eof_message(batch_number=0, table_type=table_type)
+    
+    # Return the EOFMessage bytes directly - it has its own opcode and framing
     return eof_msg.to_bytes()
 
 # --- Pytest Fixtures for Setup and Teardown ---
@@ -190,7 +243,7 @@ def test_full_pipeline_with_large_batch_count(test_infrastructure):
     
     print("\n--- Sending test messages ---")
     
-    # 3. Read the CSV and send data in batches
+    # 3. Read the CSV and send data in batches (pre-joined with store data)
     with open(MOCK_DATA_FILE, 'r') as f:
         reader = csv.DictReader(f)
         batch_num = 1
@@ -206,18 +259,22 @@ def test_full_pipeline_with_large_batch_count(test_infrastructure):
             if not batch_rows:
                 break
 
-            message_bytes = create_transaction_data_batch(QUERY_ID, batch_num, batch_rows)
+            # Send pre-joined transaction+store data
+            message_bytes = create_joined_data_batch(QUERY_ID, batch_num, batch_rows)
             producer.send(message_bytes)
-            print(f"Sent Batch #{batch_num} ({len(batch_rows)} records)")
+            print(f"Sent Joined Data Batch #{batch_num} ({len(batch_rows)} records)")
             batch_num += 1
             time.sleep(0.01) # Simulate a small delay between batches
 
-    # 4. Send the final EOF Signal message for transactions table
-    total_batches_sent = batch_num - 1  # batch_num is incremented after each batch
+    # 4. Send the final EOF Signal messages 
+    total_batches_sent = batch_num - 1
     
-    eof_signal = create_eof_message("transactions")
+    # For Q1 with pre-joined data, we only need one EOF signal since all data comes in unified batches
+    eof_signal = create_eof_message(QUERY_ID, "transactions")
     producer.send(eof_signal)
-    print(f"Sent EOF Signal for 'transactions' table after {total_batches_sent} batches")
+    print(f"Sent EOF Signal for joined transaction data")
+
+    print(f"Sent all EOF signals after {total_batches_sent} data batches.")
     
     # 5. Wait for the result from the listener thread
     print("--- Waiting for final consolidated result ---")

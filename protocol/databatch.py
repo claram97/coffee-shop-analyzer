@@ -307,17 +307,16 @@ class DataBatch:
     @staticmethod
     def deserialize_from_bytes(body: bytes):
         """
-        Deserialize a message from raw bytes.
-        Messages will be either DataBatch or EOFMessage.
+        Deserialize a DataBatch message from raw bytes.
 
         Args:
             body: The complete message bytes including opcode and length header
 
         Returns:
-            A fully parsed message object (DataBatch or EOFMessage)
+            A fully parsed DataBatch message object
 
         Raises:
-            ProtocolError: If the message format is invalid
+            ProtocolError: If the message format is invalid or not a DataBatch
         """
         if len(body) < 5:  # Minimum: 1 byte opcode + 4 bytes length
             raise ProtocolError("Message too short for valid protocol frame")
@@ -332,18 +331,13 @@ class DataBatch:
         if len(body) != 5 + length:
             raise ProtocolError(f"Expected {5 + length} bytes, got {len(body)} bytes")
 
+        if opcode != Opcodes.DATA_BATCH:
+            raise ProtocolError(f"Expected DATA_BATCH opcode ({Opcodes.DATA_BATCH}), got {opcode}")
+
         message_body = body[5:]
 
-        # Instantiate appropriate message based on opcode
-        if opcode == Opcodes.DATA_BATCH:
-            # We need to create a new instance to avoid modifying the class's own methods
-            msg = DataBatch()
-            msg.read_from(message_body)
-        elif opcode == Opcodes.EOF:
-            from .messages import EOFMessage
-            msg = EOFMessage()
-            msg.read_from(message_body)
-        else:
-            raise ProtocolError(f"Unexpected opcode for results-finisher: {opcode}")
-
+        # Create and parse DataBatch
+        msg = DataBatch()
+        msg.read_from(message_body)
+        
         return msg

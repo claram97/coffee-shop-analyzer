@@ -46,31 +46,22 @@ def _extract_first_query_id(body: bytes) -> str:
             raise ValueError("Message too short to contain outer frame")
             
         opcode = body[0]
-        if (opcode != Opcodes.DATA_BATCH and opcode != Opcodes.EOF):
+        if opcode != Opcodes.DATA_BATCH:
             raise ValueError(f"Expected DATA_BATCH opcode ({Opcodes.DATA_BATCH}), got {opcode}")
-        
-        # FOR TESTING PURPOSES ONLY
-        # FOR TESTING PURPOSES ONLY
-        # FOR TESTING PURPOSES ONLY
-        # FOR TESTING PURPOSES ONLY
-        # FOR TESTING PURPOSES ONLY
-        # FOR TESTING PURPOSES ONLY
-        # FOR TESTING PURPOSES ONLY
-        # FOR TESTING PURPOSES ONLY
-        # FOR TESTING PURPOSES ONLY
-        if(opcode != Opcodes.DATA_BATCH):  # Use the correct opcode from protocol
-            return "Q1"
-            
+
         # Skip opcode and length to get to DataBatch inner content
         inner_body = body[5:]
         
         offset = 0
-        table_ids, offset = _read_u8_list_from_body(inner_body, offset)
+        # The first list in a DataBatch is table_ids, which we can skip for routing.
+        _, offset = _read_u8_list_from_body(inner_body, offset)
+        # The second list is query_ids.
         query_ids, _ = _read_u8_list_from_body(inner_body, offset)
 
         if not query_ids:
             raise ValueError("Message contains no query_ids for routing.")
         
+        # Route based on the first query_id
         return str(query_ids[0])
 
     except IndexError:
@@ -108,11 +99,30 @@ class ResultsRouter:
     def _message_handler(self, body: bytes):
         """Callback for incoming messages."""
         try:
-            query_id = _extract_first_query_id(body)
-            target_queue_name = self._get_target_queue(query_id)
-            target_client = self.output_clients[target_queue_name]
-            target_client.send(body)
-            logging.debug(f"Routed message for query '{query_id}' to queue '{target_queue_name}'")
+            if not body:
+                logging.warning("Received empty message body, discarding.")
+                return
+
+            opcode = body[0]
+
+            if opcode == Opcodes.DATA_BATCH:
+                # Route based on query_id for data batches
+                query_id = _extract_first_query_id(body)
+                target_queue_name = self._get_target_queue(query_id)
+                target_client = self.output_clients[target_queue_name]
+                target_client.send(body)
+                logging.debug(f"Routed DATA_BATCH for query '{query_id}' to queue '{target_queue_name}'")
+
+            elif opcode == Opcodes.EOF:
+                # Broadcast EOF messages to all finishers
+                logging.info(f"Broadcasting EOF message to all {self.finisher_count} finishers.")
+                for queue_name in self.output_queue_names:
+                    self.output_clients[queue_name].send(body)
+                logging.debug(f"Broadcast of EOF complete.")
+            
+            else:
+                logging.warning(f"Received message with unknown opcode {opcode}, discarding.")
+
         except (ValueError, UnicodeDecodeError) as e:
             logging.error(f"Failed to parse message, discarding. Error: {e}. Body prefix: {body[:50]}")
         except Exception as e:

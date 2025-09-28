@@ -20,15 +20,21 @@ class BaseQueryStrategy:
 
 class Q1Strategy(BaseQueryStrategy):
     def consolidate(self, state_data: Dict[str, Any], new_rows: List[Any]):
+        # All rows are pre-joined transaction+store data, so just accumulate them
         state_data.setdefault('transactions', []).extend(new_rows)
 
     def finalize(self, consolidated_data: Dict[str, Any]) -> Dict[str, Any]:
+        # Process all pre-joined transaction records (now with store data available)
         return {
             "transactions": [
                 {
                     "transaction_id": tx.transaction_id,
                     "final_amount": float(tx.final_amount),
-                    "store_id": tx.store_id
+                    "store_id": tx.store_id,
+                    # Include store data if available (from joined data)
+                    "store_name": getattr(tx, 'store_name', 'Unknown'),
+                    "store_city": getattr(tx, 'city', 'Unknown'),
+                    "store_state": getattr(tx, 'state', 'Unknown')
                 }
                 for tx in consolidated_data.get('transactions', [])
             ]
