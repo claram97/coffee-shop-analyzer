@@ -29,7 +29,7 @@ La implementación del protocolo se encuentra en el directorio `orchestrator/com
 
 # Clases de mensaje
 'TableMessage', 'NewMenuItems', 'NewStores', 'NewTransactionItems', 
-'NewTransactions', 'NewUsers', 'Finished', 'BatchRecvSuccess', 'BatchRecvFail',
+'NewTransactions', 'NewUsers', 'EOFMessage', 'Finished', 'BatchRecvSuccess', 'BatchRecvFail',
 
 # Mensajes complejos
 'DataBatch',
@@ -77,6 +77,7 @@ Define los códigos de operación del protocolo para identificar el tipo de cada
 | `NEW_TRANSACTION_ITEMS` | 6 | Cliente→Servidor | Lote de nuevos elementos de transacciones |
 | `NEW_TRANSACTION` | 7 | Cliente→Servidor | Lote de nuevas transacciones |
 | `NEW_USERS` | 8 | Cliente→Servidor | Lote de nuevos usuarios |
+| `EOF` | 9 | Cliente→Servidor | **Fin de tabla específica** - Indica que terminó un tipo de datos completo |
 
 #### Estados de Lote (BatchStatus)
 
@@ -86,8 +87,12 @@ Define códigos de estado incluidos en mensajes de lote de datos para indicar el
 | Estado | Valor | Descripción |
 |--------|-------|-------------|
 | `CONTINUE` | 0 | Más lotes de datos seguirán a este |
-| `EOF` | 1 | Este es el lote final en el stream (End of File) |
+| `EOF` | 1 | **Lote final en el stream** - Usado en dos contextos: (1) Último batch de archivo CSV, (2) Estado en mensaje `EOFMessage` |
 | `CANCEL` | 2 | Este lote fue enviado como parte de un proceso de cancelación |
+
+**Nota importante sobre EOF:** El estado `EOF` (1) tiene **doble significado**:
+1. **A nivel archivo**: Último batch de un archivo CSV individual
+2. **A nivel tabla**: Estado del mensaje `EOFMessage` indicando fin de tabla completa (ej: todos los archivos de "menu_items/")
 
 ### 2. Entidades de Datos (entities.py)
 
@@ -227,6 +232,36 @@ def __init__(self, opcode: int, required_keys: Tuple[str, ...], row_factory):
 **Claves requeridas:** `("user_id", "gender", "birthdate", "registered_at")`
 **Row factory:** `RawUser`
 
+##### `EOFMessage(TableMessage)` **NUEVO**
+**Propósito:** Mensaje de fin de tabla específica que indica que el cliente terminó de enviar todos los archivos de un tipo de datos.
+
+**Claves requeridas:** `("table_type",)`
+**Row factory:** `lambda **kwargs: None` - No crea objetos row, solo extrae metadatos
+
+**Características especiales:**
+- **nRows:** Siempre 1 (una fila virtual con metadatos)
+- **batch_status:** Siempre `BatchStatus.EOF` (1)
+- **table_type:** String que especifica qué tabla terminó (ej: "menu_items", "stores", "transactions")
+
+**Ejemplo de uso:**
+```python
+# El cliente envía automáticamente después de procesar:
+# menu_items/file1.csv → batches 1-5
+# menu_items/file2.csv → batches 6-8  
+# menu_items/file3.csv → batches 9-12
+# → EOF automático con table_type="menu_items"
+
+# Procesamiento en el servidor:
+eof_msg = recv_msg(socket)  # EOFMessage
+table_type = eof_msg.get_table_type()  # "menu_items"
+logging.info(f"EOF received for table: {table_type}")
+```
+
+**Métodos específicos:**
+- `create_eof_message(batch_number, table_type)` - Crea mensaje EOF
+- `get_table_type() -> str` - Obtiene el tipo de tabla
+- `to_bytes() -> bytes` - Serializa para reenvío a colas
+
 #### Mensajes de Control
 
 ##### `Finished`
@@ -329,6 +364,7 @@ elif opcode == Opcodes.NEW_STORES: return NewStores()
 elif opcode == Opcodes.NEW_TRANSACTION_ITEMS: return NewTransactionItems()
 elif opcode == Opcodes.NEW_TRANSACTION: return NewTransactions()
 elif opcode == Opcodes.NEW_USERS: return NewUsers()
+elif opcode == Opcodes.EOF: return EOFMessage()
 elif opcode == Opcodes.DATA_BATCH: return DataBatch()
 ```
 
@@ -424,6 +460,8 @@ while True:
         process_menu_items(msg)
     elif isinstance(msg, DataBatch):
         process_data_batch(msg)
+    elif isinstance(msg, EOFMessage):
+        process_eof_message(msg)
 ```
 
 ### 2. Creación de DataBatch
@@ -464,7 +502,40 @@ for item in menu_msg.rows:  # Lista de objetos RawMenuItems
     print(f"Producto: {item.name}, Precio: {item.price}")
 ```
 
-### 4. Envío de Respuestas
+### 4. **NUEVO:** Procesamiento de Mensaje EOF
+```python
+# Recibir mensaje EOF (automático por recv_msg)
+eof_msg = recv_msg(socket)  # Retorna EOFMessage()
+
+# Acceder a metadatos
+table_type = eof_msg.get_table_type()
+print(f"EOF recibido para tabla: {table_type}")
+print(f"Número de lote final: {eof_msg.batch_number}")
+print(f"Estado: {eof_msg.batch_status}")  # Siempre BatchStatus.EOF (1)
+
+# Procesamiento típico de EOF
+def process_eof_message(eof_msg, client_sock):
+    table_type = eof_msg.get_table_type()
+    
+    # Logging del evento
+    logging.info(f"action: eof_received | table_type: {table_type}")
+    
+    # Reenvío a cola downstream (opción A: directo)
+    message_bytes = eof_msg.to_bytes()
+    filter_router_queue.send(message_bytes)
+    
+    # O reenvío como DataBatch (opción B: con metadata)
+    # databatch = create_eof_databatch(eof_msg, table_type)
+    # filter_router_queue.send(databatch)
+    
+    # Responder al cliente
+    BatchRecvSuccess().write_to(client_sock)
+    
+    logging.info(f"action: eof_processed | table_type: {table_type}")
+    return True
+```
+
+### 5. Envío de Respuestas
 ```python
 from orchestrator.common.protocol import BatchRecvSuccess, BatchRecvFail
 
@@ -543,10 +614,16 @@ u8_u8_dict: [count:1][key1:1][value1:1][key2:1][value2:1]...
 
 ### Validaciones de Entrada
 - Longitudes de mensaje >= 0
-- Opcodes reconocidos (0-8)
+- Opcodes reconocidos (0-9) - **Actualizado** para incluir EOF
 - Conteos de pares coinciden con claves requeridas
 - Todas las claves requeridas presentes
 - Datos UTF-8 válidos
+
+### **Nuevas** Validaciones de EOF
+- `table_type`: String válido que especifica tipo de tabla
+- `amount`: Siempre 1 para mensajes EOF
+- `batch_status`: Siempre `BatchStatus.EOF` (1)
+- `rows`: Lista vacía (EOF no transporta datos reales)
 
 ### Validaciones de DataBatch
 - `table_ids` y `query_ids`: máximo 255 elementos, valores 0-255
@@ -591,34 +668,48 @@ El protocolo está implementado usando solo la biblioteca estándar de Python pa
 4. **Agregar a Dispatcher** en `recv_msg()`
 5. **Agregar a DataBatch factory** si es embebible
 
-### Ejemplo: Agregar NewProducts
+### Ejemplo Implementado: EOFMessage
+El mensaje EOF ya está completamente implementado siguiendo este patrón:
+
 ```python
 # En constants.py
 class Opcodes:
-    NEW_PRODUCTS = 9
-
-# En entities.py  
-class RawProduct:
-    def __init__(self, product_id: str, name: str, price: str):
-        self.product_id = product_id
-        self.name = name
-        self.price = price
+    EOF = 9
 
 # En messages.py
-class NewProducts(TableMessage):
+class EOFMessage(TableMessage):
     def __init__(self):
-        required = ("product_id", "name", "price")
         super().__init__(
-            opcode=Opcodes.NEW_PRODUCTS,
-            required_keys=required,
-            row_factory=RawProduct,
+            opcode=Opcodes.EOF,
+            required_keys=("table_type",),
+            row_factory=lambda **kwargs: None  # No crear objetos row
         )
+        self.table_type = ""
+    
+    def create_eof_message(self, batch_number: int, table_type: str):
+        """Crea mensaje EOF para un tipo específico de tabla."""
+        self.amount = 1
+        self.batch_number = batch_number
+        self.batch_status = BatchStatus.EOF
+        self.table_type = table_type
+        self.rows = []
+        return self
+    
+    def get_table_type(self) -> str:
+        """Obtiene el tipo de tabla del mensaje EOF."""
+        return self.table_type
+    
+    def to_bytes(self) -> bytes:
+        """Serializa el mensaje EOF a bytes."""
+        import struct
+        # Implementación de serialización con struct.pack()
+        # usando little-endian para compatibilidad
 
 # En dispatcher.py
 def recv_msg(sock):
     # ... 
-    elif opcode == Opcodes.NEW_PRODUCTS:
-        msg = NewProducts()
+    elif opcode == Opcodes.EOF:
+        msg = EOFMessage()
     # ...
 ```
 

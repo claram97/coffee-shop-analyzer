@@ -209,13 +209,26 @@ Determina si un mensaje dado transporta datos.
 
 **Criterio:** El opcode no es señal de control (FINISHED) ni mensaje de respuesta.
 
+**Implementación actual:**
+```python
+return (msg.opcode != Opcodes.FINISHED and
+        msg.opcode != Opcodes.BATCH_RECV_SUCCESS and
+        msg.opcode != Opcodes.BATCH_RECV_FAIL)
+```
+
+**Nota:** Los mensajes `EOF` (OpCode 9) son considerados mensajes de datos y por tanto se procesan con el manejo estándar de datos, aunque representen señales de finalización de tabla.
+
 ##### `get_status_text(batch_status: int) -> str`
 Convierte código numérico de estado de lote en string legible.
 
 **Mapeo:**
 - `0`: "Continue" - Hay más lotes en el archivo
-- `1`: "EOF" - Último lote del archivo
+- `1`: "EOF" - Último lote del archivo **O** mensaje EOF de tabla completa
 - `2`: "Cancel" - Lote enviado por cancelación
+
+**Nota:** El estado "EOF" tiene doble significado:
+1. **A nivel archivo**: Último batch de un archivo CSV individual
+2. **A nivel tabla**: Estado del mensaje `OpCodeEOF` indicando fin de tabla completa (ej: todos los archivos de "menu_items/")
 
 ##### `log_batch_preview(msg: Any, status_text: str)`
 Registra vista previa resumida de un lote de datos para debugging.
@@ -386,6 +399,12 @@ elif opcode == FINISHED:
 "action: message_processing | result: fail | batch_number: {num} | amount: {amount} | error: {error}"
 ```
 
+### Eventos Específicos de EOF (si se registra procesador)
+```python
+"action: eof_received | table_type: menu_items | batch_number: {num}"
+"action: eof_forwarded | table_type: stores | result: success"
+```
+
 ### Vista Previa de Datos (Debug)
 ```python
 "action: batch_preview | batch_number: {num} | status: {status} | opcode: {opcode} | keys: {keys} | sample_count: {count} | sample: {data}"
@@ -439,6 +458,27 @@ elif opcode == FINISHED:
    ```python
    message_handler.register_processor(Opcodes.NEW_TYPE, process_new_message_type)
    ```
+
+### Ejemplo: Manejo Específico del EOF
+
+El sistema ya incluye soporte para el nuevo `OpCodeEOF` (9). Si se requiere manejo especial:
+
+```python
+def process_eof_message(msg, client_sock) -> bool:
+    """Procesador específico para mensajes EOF de tabla."""
+    table_type = msg.get_table_type()  # ej: "menu_items"
+    
+    logging.info(f"EOF received for table: {table_type}")
+    
+    # Reenviar a cola o sistema downstream
+    forward_to_queue(msg)
+    
+    ResponseHandler.send_success(client_sock)
+    return True
+
+# Registro del procesador EOF
+message_handler.register_processor(Opcodes.EOF, process_eof_message)
+```
 
 ### Personalizar Manejo de Conexiones
 

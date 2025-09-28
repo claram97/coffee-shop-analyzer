@@ -526,15 +526,76 @@ El sistema está **listo para producción** y puede evolucionar para satisfacer 
 
 El sistema implementa un **mecanismo de señalización EOF (End of File) automático** que permite al orquestador saber cuándo un cliente ha terminado de enviar todos los archivos de un tipo específico de datos (table type). Este mecanismo es crucial para el procesamiento downstream y la sincronización de datos.
 
+### Formatos Generales de Mensajes del Protocolo
+
+Antes de abordar el EOF específicamente, es importante entender los **dos tipos principales de mensajes** que maneja el sistema:
+
+#### 1. TableMessage - Formato Base para Datos Tabulares
+
+**Propósito**: Transportar datos estructurados en filas y columnas (menu_items, stores, transactions, etc.)
+
+**Formato de Red (Cliente → Orquestador)**:
+```
+[OpCode:u8][MessageLength:i32][TableMessageBody]
+
+donde TableMessageBody =
+[nRows:i32][batchNumber:i64][status:u8][rows...]
+
+donde cada row =
+[n_pairs:i32]([key:string][value:string])+
+```
+
+**Características**:
+- **OpCodes**: 1-8 para diferentes tipos de datos (NEW_MENU_ITEMS=1, NEW_STORES=2, etc.)
+- **nRows**: Cantidad de registros en este mensaje
+- **batchNumber**: Número secuencial del batch del cliente
+- **status**: Estado del batch (0=Continue, 1=EOF, 2=Cancel)
+- **Strings**: Codificados como bytes UTF-8 terminados en null (`\x00`)
+
+**Ejemplo**: Mensaje NEW_MENU_ITEMS con 2 productos:
+```
+[0x01][0x0000012C][0x00000002][0x0000000000000001][0x00][0x00000007]
+["product_id\x00"]["PROD001\x00"]["name\x00"]["Cappuccino\x00"]...
+```
+
+#### 2. DataBatch - Formato Contenedor con Metadata
+
+**Propósito**: Encapsular cualquier mensaje con metadata de routing, sharding y distribución
+
+**Formato Completo**:
+```
+[OpCode=0:u8][MessageLength:i32][DataBatchBody]
+
+donde DataBatchBody =
+[table_ids:u8_list][query_ids:u8_list][reserved:u16][batch_number:i64]
+[meta:dict<u8,u8>][total_shards:u16][shard_num:u16][embedded_message]
+
+donde embedded_message =  
+[inner_opcode:u8][inner_length:i32][inner_body]
+```
+
+**Características**:
+- **OpCode**: Siempre 0 (DATA_BATCH)
+- **table_ids**: Lista de IDs de tablas afectadas por este mensaje
+- **query_ids**: Lista de IDs de queries que deben procesar este dato
+- **meta**: Diccionario de metadatos arbitrarios para extensibilidad
+- **sharding**: total_shards y shard_num para distribución horizontal
+- **embedded_message**: Cualquier otro mensaje del protocolo (TableMessage, Finished, etc.)
+
+**Flujo de Uso**:
+1. **Cliente envía**: TableMessage directamente al orquestador
+2. **Orquestador procesa**: Filtra, enriquece y encapsula en DataBatch
+3. **Orquestador reenvía**: DataBatch a colas downstream para procesamiento distribuido
+
 ### Protocolo de Mensajes EOF
 
 #### Formato del Mensaje EOF
 
-El mensaje EOF involucra dos formatos distintos: el mensaje que envía el cliente y el mensaje que el orquestador reenvía a la cola.
+El mensaje EOF involucra ambos formatos: como TableMessage del cliente y como DataBatch hacia las colas.
 
-##### 1. Mensaje Cliente → Orquestador (Formato Binario de Red)
+##### 1. EOF como TableMessage (Cliente → Orquestador)
 
-El cliente Go construye y envía un mensaje binario siguiendo el protocolo de red:
+El cliente Go construye y envía un mensaje EOF siguiendo el formato TableMessage estándar:
 
 ```
 [OpCode=9:u8][MessageLength:i32][TableMessageBody]
@@ -589,29 +650,55 @@ func (fp *FileProcessor) buildEOFMessageBody(tableType string) []byte {
 - **n_pairs**: 1 (un solo par clave-valor)
 - **Contenido**: Par `{"table_type": "nombre_tabla"}` con strings null-terminated
 
-##### 2. Mensaje Orquestador → Cola (Formato Serializado para Queue)
+##### 2. EOF como DataBatch (Orquestador → Cola)
 
-El orquestador Python recibe, procesa y reenvía el mensaje a la cola usando `struct.pack()`:
+El orquestador puede procesar el EOF de dos maneras según el caso de uso:
+
+**Opción A: Reenvío Directo (Preservando TableMessage)**
+```python
+def _process_eof_message(self, msg, client_sock) -> bool:
+    # Reenvío directo del TableMessage serializado
+    message_bytes = msg.to_bytes()  # Solo TableMessageBody
+    self._filter_router_queue.send(message_bytes)
+```
+
+**Opción B: Encapsulación en DataBatch (Para Procesamiento Distribuido)**
 
 ```python
+# Crear DataBatch wrapper para EOF
+def create_eof_databatch(eof_msg, table_type):
+    # 1. Serializar EOF como TableMessage
+    eof_body = eof_msg.to_bytes()  # TableMessageBody sin OpCode/Length
+    
+    # 2. Crear mensaje embebido con framing
+    embedded_eof = DataBatch.make_embedded(Opcodes.EOF, eof_body)
+    
+    # 3. Crear DataBatch con metadata apropiada
+    databatch = DataBatch(
+        table_ids=[get_table_id(table_type)],  # ID numérico de la tabla
+        query_ids=[],  # EOF no requiere queries específicas
+        meta={1: 1},  # Metadata: {EOF_SIGNAL: TRUE}
+        total_shards=1,  # EOF no se fragmenta
+        shard_num=0,
+        batch_bytes=embedded_eof
+    )
+    
+    return databatch.to_bytes()  # Formato completo DataBatch
+
 def to_bytes(self) -> bytes:
-    """Serializa EOF para envío a cola downstream."""
+    """Serializa EOF como TableMessage (para reenvío directo)."""
     
     # Preparar datos
     table_type_bytes = self.table_type.encode('utf-8')
     key_bytes = b"table_type"
     
-    # Calcular tamaños
-    pairs_size = 4 + len(key_bytes) + 1 + len(table_type_bytes) + 1
-    total_size = 4 + 8 + 1 + 4 + pairs_size  # nRows + batchNum + status + n_pairs + pairs
-    
-    # Construir mensaje usando struct.pack (little-endian)
+    # Construir TableMessageBody (sin OpCode/Length de red)
     message = struct.pack('<I', 1)  # nRows = 1
     message += struct.pack('<Q', 0)  # batchNumber = 0 (EOF especial)  
     message += struct.pack('<B', 1)  # status = BatchEOF
     message += struct.pack('<I', 1)  # n_pairs = 1
     
-    # Agregar par clave-valor como bytes
+    # Agregar par clave-valor
     message += key_bytes + b'\x00'  # "table_type" + null
     message += table_type_bytes + b'\x00'  # valor + null
     
@@ -626,15 +713,31 @@ def to_bytes(self) -> bytes:
 - **Contenido**: Mismo par `{"table_type": "valor"}` preservado
 - **Codificación**: UTF-8 para strings, null-terminated para compatibilidad
 
-##### Diferencias Clave entre Formatos
+##### Comparación de Formatos EOF
 
-| Aspecto | Cliente → Orquestador | Orquestador → Cola |
-|---------|----------------------|-------------------|
-| **Encabezado** | `[OpCode][Length][Body]` | Solo `[Body]` |
-| **Construcción** | `binary.LittleEndian.PutUint*()` | `struct.pack('<format')` |
-| **BatchNumber** | Último batch real procesado | 0 (valor especial) |
-| **Propósito** | Comunicación de red TCP | Serialización para queue |
-| **Parsing** | Protocolo de mensajes de red | Deserialización directa |
+| Aspecto | TableMessage (Cliente→Orquestador) | DataBatch (Orquestador→Cola) |
+|---------|-----------------------------------|----------------------------|
+| **Encabezado Red** | `[OpCode=9][Length][Body]` | `[OpCode=0][Length][Body]` |
+| **Contenido** | `TableMessageBody` directo | `DataBatchBody` + embedded EOF |
+| **Metadata** | Solo datos de tabla EOF | + routing, sharding, queries |
+| **BatchNumber** | Último batch real procesado | Preservado del original |
+| **Propósito** | Comunicación cliente-servidor | Distribución y procesamiento |
+| **Sharding** | No aplicable | Soporte completo para fragments |
+| **Routing** | Basado en OpCode | Basado en table_ids/query_ids |
+
+##### Casos de Uso por Formato
+
+**TableMessage EOF (Reenvío Directo)**:
+- ✅ **Logging y auditoría** simple
+- ✅ **Notificaciones** síncronas 
+- ✅ **Checkpointing** básico de completitud
+- ⚠️ **Limitado** para arquitecturas distribuidas
+
+**DataBatch EOF (Procesamiento Distribuido)**:
+- ✅ **Microservicios** con routing inteligente
+- ✅ **Análisis cross-table** coordinado
+- ✅ **Triggers** de procesamiento por query específica
+- ✅ **Escalabilidad** horizontal con sharding
 
 #### Tipos de Tabla Soportados
 
