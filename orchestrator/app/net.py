@@ -5,8 +5,7 @@ Refactored orchestrator using modular architecture.
 import logging
 from common.network import ServerManager, MessageHandler, ResponseHandler
 from common.processing import create_filtered_data_batch, message_logger
-from common.protocol import Opcodes
-
+from protocol import Opcodes
 
 class Orchestrator:
     """Orchestrator using modular network and processing components."""

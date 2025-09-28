@@ -4,13 +4,13 @@ table-specific data messages along with essential metadata for routing and proce
 """
 
 import logging
-import socket
 from typing import List, Dict, Optional
 
 from .constants import ProtocolError, Opcodes
 from .parsing import (
+    BytesReader,
     read_u16, read_i32, read_i64, read_u8_with_remaining,
-    read_u8_list, read_u8_u8_dict, recv_exactly
+    read_u8_list, read_u8_u8_dict
 )
 from .messages import (
     Finished, NewMenuItems, NewStores, NewTransactionItems,
@@ -178,24 +178,32 @@ class DataBatch:
         framed.extend(inner_body)
         return bytes(framed)
 
-    def _read_data_batch_header(self, sock: socket.socket, remaining: int) -> int:
-        """Reads the DataBatch-specific header fields from the socket."""
-        self.table_ids, remaining = read_u8_list(sock, remaining, self.opcode)
-        self.query_ids, remaining = read_u8_list(sock, remaining, self.opcode)
-        self.reserved_u16, remaining = read_u16(sock, remaining, self.opcode)
-        self.batch_number, remaining = read_i64(sock, remaining, self.opcode)
-        self.meta, remaining = read_u8_u8_dict(sock, remaining, self.opcode)
-        self.total_shards, remaining = read_u16(sock, remaining, self.opcode)
-        self.shard_num, remaining = read_u16(sock, remaining, self.opcode)
+    def _read_data_batch_header(self, reader: BytesReader, remaining: int) -> int:
+        """Reads the DataBatch-specific header fields from the buffer."""
+        self.table_ids, remaining = read_u8_list(reader, remaining, self.opcode)
+        self.query_ids, remaining = read_u8_list(reader, remaining, self.opcode)
+        self.reserved_u16, remaining = read_u16(reader, remaining, self.opcode)
+        self.batch_number, remaining = read_i64(reader, remaining, self.opcode)
+        self.meta, remaining = read_u8_u8_dict(reader, remaining, self.opcode)
+        self.total_shards, remaining = read_u16(reader, remaining, self.opcode)
+        self.shard_num, remaining = read_u16(reader, remaining, self.opcode)
         return remaining
 
-    def _read_embedded_message(self, sock: socket.socket, remaining: int) -> int:
-        """Reads and deserializes the embedded message from the socket."""
-        inner_opcode, remaining = read_u8_with_remaining(sock, remaining, self.opcode)
-        inner_len, remaining = read_i32(sock, remaining, self.opcode)
+    def _read_embedded_message(self, reader: BytesReader, remaining: int) -> int:
+        """Reads and deserializes the embedded message from the buffer."""
+        inner_opcode, remaining = read_u8_with_remaining(reader, remaining, self.opcode)
+        inner_len, remaining = read_i32(reader, remaining, self.opcode)
+
+        if remaining < inner_len:
+            raise ProtocolError("indicated length doesn't match body length", self.opcode)
+
+        # Read the embedded message body into a separate bytes object
+        embedded_body_bytes = reader.read(inner_len)
 
         inner_msg = instantiate_message_for_opcode(inner_opcode)
-        inner_msg.read_from(sock, inner_len)
+        
+        # Pass the raw bytes of the body to the message's read_from method
+        inner_msg.read_from(embedded_body_bytes)
         self.batch_msg = inner_msg
 
         remaining -= inner_len
@@ -206,35 +214,27 @@ class DataBatch:
         if remaining != 0:
             raise ProtocolError("Indicated length doesn't match body length", self.opcode)
 
-    def _handle_protocol_error(self, sock: socket.socket, remaining: int):
-        """In case of a protocol error, consumes any leftover bytes to clear the socket buffer."""
-        if remaining > 0:
-            _ = recv_exactly(sock, remaining)
-
-    def read_from(self, sock: socket.socket, length: int):
+    def read_from(self, body_bytes: bytes):
         """
-        Deserializes a DataBatch message from a socket, populating the instance's fields.
+        Deserializes a DataBatch message from a byte buffer, populating the instance's fields.
 
         Args:
-            sock: The socket to read from.
-            length: The total length of the message body to be read.
+            body_bytes: The byte buffer containing the message body to be read.
         """
-        remaining = length
-        try:
-            remaining = self._read_data_batch_header(sock, remaining)
-            remaining = self._read_embedded_message(sock, remaining)
-            self._validate_remaining_bytes(remaining)
-        except ProtocolError:
-            self._handle_protocol_error(sock, remaining)
-            raise
+        reader = BytesReader(body_bytes)
+        remaining = len(body_bytes)
 
-    def write_to(self, sock: socket.socket):
+        remaining = self._read_data_batch_header(reader, remaining)
+        remaining = self._read_embedded_message(reader, remaining)
+        self._validate_remaining_bytes(remaining)
+
+    def write_to(self, buf: bytearray):
         """
-        Serializes the DataBatch instance into bytes and writes it to the socket.
+        Serializes the DataBatch instance into bytes and writes it to the given buffer.
         Requires `self.batch_bytes` to be set with the pre-framed embedded message.
         """
         message_bytes = self.to_bytes()
-        sock.sendall(message_bytes)
+        buf.extend(message_bytes)
 
     def _validate_batch_bytes(self):
         """Internal helper to validate the embedded message bytes before serialization."""
@@ -266,7 +266,7 @@ class DataBatch:
         body.extend(self._serialize_u8_list(self.table_ids))
         body.extend(self._serialize_u8_list(self.query_ids))
         body.extend(int(self.reserved_u16).to_bytes(2, "little", signed=False))
-        body.extend(int(self.batch_number).to_bytes(8, "little", signed=True))
+        body.extend(int(getattr(self, 'batch_number', 0)).to_bytes(8, "little", signed=True))
         body.extend(self._serialize_u8_dict(self.meta))
         body.extend(int(self.total_shards).to_bytes(2, "little", signed=False))
         body.extend(int(self.shard_num).to_bytes(2, "little", signed=False))
@@ -303,3 +303,41 @@ class DataBatch:
         result_bytes = self._create_final_message(body)
         self._log_serialization_details(body, result_bytes)
         return result_bytes
+
+    @staticmethod
+    def deserialize_from_bytes(body: bytes):
+        """
+        Deserialize a DataBatch message from raw bytes.
+
+        Args:
+            body: The complete message bytes including opcode and length header
+
+        Returns:
+            A fully parsed DataBatch message object
+
+        Raises:
+            ProtocolError: If the message format is invalid or not a DataBatch
+        """
+        if len(body) < 5:  # Minimum: 1 byte opcode + 4 bytes length
+            raise ProtocolError("Message too short for valid protocol frame")
+
+        # Read opcode and length from the beginning of the message
+        opcode = int.from_bytes(body[0:1], 'little')
+        length = int.from_bytes(body[1:5], 'little', signed=True)
+
+        if length < 0:
+            raise ProtocolError("Invalid message length")
+
+        if len(body) != 5 + length:
+            raise ProtocolError(f"Expected {5 + length} bytes, got {len(body)} bytes")
+
+        if opcode != Opcodes.DATA_BATCH:
+            raise ProtocolError(f"Expected DATA_BATCH opcode ({Opcodes.DATA_BATCH}), got {opcode}")
+
+        message_body = body[5:]
+
+        # Create and parse DataBatch
+        msg = DataBatch()
+        msg.read_from(message_body)
+        
+        return msg

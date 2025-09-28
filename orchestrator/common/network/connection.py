@@ -8,7 +8,7 @@ import socket
 import threading
 from typing import List, Callable, Optional
 
-from ..protocol import recv_msg, ProtocolError
+from protocol import recv_msg, ProtocolError
 
 
 class ConnectionManager:

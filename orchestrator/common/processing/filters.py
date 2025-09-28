@@ -5,7 +5,7 @@ size and complexity by creating leaner data representations.
 """
 
 from typing import List, Dict, Any
-from ..protocol.entities import RawMenuItems, RawStore, RawTransactionItem, RawTransaction, RawUser
+from protocol.entities import RawMenuItems, RawStore, RawTransactionItem, RawTransaction, RawUser
 
 
 def filter_menu_items_columns(rows: List[RawMenuItems]) -> List[Dict]:

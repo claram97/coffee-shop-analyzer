@@ -6,7 +6,7 @@ into filtered, serialized, and wrapped DataBatch messages for downstream process
 import logging
 from typing import Dict, List, Callable
 
-from ..protocol import Opcodes, DataBatch
+from protocol import Opcodes, DataBatch
 from .filters import (
     filter_menu_items_columns, filter_stores_columns, filter_transaction_items_columns,
     filter_transactions_columns, filter_users_columns

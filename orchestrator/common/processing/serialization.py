@@ -7,7 +7,6 @@ according to a custom protocol.
 import logging
 from typing import List, Dict
 
-
 def serialize_header(n_rows: int, batch_number: int, batch_status: int) -> bytearray:
     """
     Serializes a common header for filtered data messages.

@@ -7,7 +7,7 @@ from typing import Tuple
 
 from .constants import ProtocolError, Opcodes
 from .entities import RawMenuItems, RawStore, RawTransactionItem, RawTransaction, RawUser
-from .parsing import read_i32, read_i64, read_u8_with_remaining, read_string, recv_exactly
+from .parsing import BytesReader, read_i32, read_i64, read_u8_with_remaining, read_string
 
 
 class TableMessage:
@@ -40,12 +40,12 @@ class TableMessage:
                 f"Expected {len(self.required_keys)} pairs, got {n_pairs}", self.opcode
             )
 
-    def _read_key_value_pairs(self, sock: socket.socket, remaining: int, n_pairs: int) -> Tuple[dict[str, str], int]:
+    def _read_key_value_pairs(self, reader: BytesReader, remaining: int, n_pairs: int) -> Tuple[dict[str, str], int]:
         """Read all key-value pairs for a row."""
         current_row_data: dict[str, str] = {}
         for _ in range(n_pairs):
-            (key, remaining) = read_string(sock, remaining, self.opcode)
-            (value, remaining) = read_string(sock, remaining, self.opcode)
+            (key, remaining) = read_string(reader, remaining, self.opcode)
+            (value, remaining) = read_string(reader, remaining, self.opcode)
             current_row_data[key] = value
         return current_row_data, remaining
 
@@ -67,16 +67,16 @@ class TableMessage:
         kwargs = {key.lower(): value for key, value in current_row_data.items()}
         self.rows.append(self._row_factory(**kwargs))
 
-    def _read_row(self, sock: socket.socket, remaining: int) -> int:
+    def _read_row(self, reader: BytesReader, remaining: int) -> int:
         """Read a single record (row) from the table."""
         # Read number of pairs
-        (n_pairs, remaining) = read_i32(sock, remaining, self.opcode)
+        (n_pairs, remaining) = read_i32(reader, remaining, self.opcode)
         
         # Validate number of pairs
         self._validate_pair_count(n_pairs)
         
         # Read all key-value pairs
-        current_row_data, remaining = self._read_key_value_pairs(sock, remaining, n_pairs)
+        current_row_data, remaining = self._read_key_value_pairs(reader, remaining, n_pairs)
         
         # Validate that all required keys are present
         self._validate_required_keys(current_row_data)
@@ -86,26 +86,26 @@ class TableMessage:
         
         return remaining
 
-    def _read_table_header(self, sock: socket.socket, remaining: int) -> int:
+    def _read_table_header(self, reader: BytesReader, remaining: int) -> int:
         """Read table header: number of rows, batch number and status."""
         # Read number of rows
-        (n_rows, remaining) = read_i32(sock, remaining, self.opcode)
+        (n_rows, remaining) = read_i32(reader, remaining, self.opcode)
         self.amount = n_rows
         
         # Read batch number
-        (batch_number, remaining) = read_i64(sock, remaining, self.opcode)
+        (batch_number, remaining) = read_i64(reader, remaining, self.opcode)
         self.batch_number = batch_number
         
         # Read batch status
-        (batch_status, remaining) = read_u8_with_remaining(sock, remaining, self.opcode)
+        (batch_status, remaining) = read_u8_with_remaining(reader, remaining, self.opcode)
         self.batch_status = batch_status
         
         return remaining
 
-    def _read_all_rows(self, sock: socket.socket, remaining: int, n_rows: int) -> int:
+    def _read_all_rows(self, reader: BytesReader, remaining: int, n_rows: int) -> int:
         """Read all rows from the table."""
         for _ in range(n_rows):
-            remaining = self._read_row(sock, remaining)
+            remaining = self._read_row(reader, remaining)
         return remaining
 
     def _validate_message_length(self, remaining: int):
@@ -115,30 +115,28 @@ class TableMessage:
                 "Indicated length doesn't match body length", self.opcode
             )
 
-    def _handle_protocol_error(self, sock: socket.socket, remaining: int):
-        """Handle protocol errors by consuming remaining bytes."""
-        if remaining > 0:
-            _ = recv_exactly(sock, remaining)
-
-    def read_from(self, sock: socket.socket, length: int):
-        """Parse the complete table message body.
-        
-        Client message format:
-        [length:i32][nRows:i32][batchNumber:i64][status:u8][rows...]
+    def read_from(self, body_bytes: bytes):
         """
-        remaining = length
+        Parse the complete table message body from a byte buffer.
+        
+        Args:
+            body_bytes: The byte buffer containing the message body.
+        """
+        reader = BytesReader(body_bytes)
+        remaining = len(body_bytes)
+        
         try:
             # Read table header
-            remaining = self._read_table_header(sock, remaining)
+            remaining = self._read_table_header(reader, remaining)
             
             # Read all rows
-            remaining = self._read_all_rows(sock, remaining, self.amount)
+            remaining = self._read_all_rows(reader, remaining, self.amount)
 
             # Validate no bytes remain unprocessed
             self._validate_message_length(remaining)
             
         except ProtocolError:
-            self._handle_protocol_error(sock, remaining)
+            # The BytesReader will handle partially read data, so we just re-raise
             raise
 
 
