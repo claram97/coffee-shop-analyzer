@@ -1,8 +1,27 @@
-name: tp0
+version: '3.8'
 services:
+  rabbitmq:
+    container_name: rabbitmq
+    image: rabbitmq:3-management
+    ports:
+      - "5672:5672"
+      - "15672:15672"
+    environment:
+      - RABBITMQ_DEFAULT_USER=guest
+      - RABBITMQ_DEFAULT_PASS=guest
+    networks:
+      - testing_net
+    healthcheck:
+      test: ["CMD", "rabbitmq-diagnostics", "-q", "ping"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+
   orchestrator:
     container_name: orchestrator
-    image: orchestrator:latest
+    build:
+      context: .
+      dockerfile: orchestrator/Dockerfile
     entrypoint: python3 /main.py
     environment:
       - PYTHONUNBUFFERED=1
@@ -11,7 +30,10 @@ services:
     networks:
       - testing_net
     volumes:
-      - ./orchestrator/config.ini:/config.ini:ro
+      - ./orchestrator/config.ini:/app/config.ini:ro
+    depends_on:
+      rabbitmq:
+        condition: service_healthy
 
   client1:
     container_name: client1

@@ -6,6 +6,7 @@ import logging
 from common.network import ServerManager, MessageHandler, ResponseHandler
 from common.processing import create_filtered_data_batch, message_logger
 from protocol import Opcodes
+from middleware import MessageMiddlewareQueue
 
 class Orchestrator:
     """Orchestrator using modular network and processing components."""
@@ -18,9 +19,8 @@ class Orchestrator:
             listen_backlog: Maximum pending connections
         """
         self.message_handler = MessageHandler()
+        self._filter_router_queue = MessageMiddlewareQueue("rabbitmq", "filter_router_queue")
         self.server_manager = ServerManager(port, listen_backlog, self._handle_message)
-        # TODO: Initialize actual message queue instead of simulation
-        self._filter_router_queue = MockFilterRouterQueue()
         self._setup_message_processors()
         
     def _setup_message_processors(self):
@@ -88,8 +88,7 @@ class Orchestrator:
             # Generate bytes and log information
             batch_bytes = filtered_batch.to_bytes()
            
-            # Future: Send to message queue
-            # self._filter_router_queue.send(batch_bytes)
+            self._filter_router_queue.send(batch_bytes)
             
             # Write filtered message to file
             # Useful for debugging large batches, but not performant at all
@@ -127,7 +126,7 @@ class Orchestrator:
             message_bytes = msg.to_bytes()
             
             # Send to filter router queue
-            # self._filter_router_queue.send(message_bytes)
+            self._filter_router_queue.send(message_bytes)
             
             # Log successful forwarding
             logging.info(
