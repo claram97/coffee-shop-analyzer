@@ -2,6 +2,7 @@ package common
 
 import (
 	"context"
+	"encoding/binary"
 	"encoding/csv"
 	"errors"
 	"fmt"
@@ -153,6 +154,14 @@ func (fp *FileProcessor) ProcessTableType(ctx context.Context, dataDir, tableTyp
 			time.Sleep(1 * time.Second) // delay between files
 		}
 	}
+	
+	// Send EOF message after processing all files of this table type
+	if err := fp.sendEOFMessage(processor, tableType); err != nil {
+		fp.log.Errorf("action: send_eof | result: fail | table_type: %s | error: %v", tableType, err)
+		return err
+	}
+	
+	fp.log.Infof("action: sent_eof | result: success | table_type: %s", tableType)
 	return nil
 }
 
@@ -177,4 +186,78 @@ func (fp *FileProcessor) ProcessAllTables(ctx context.Context, processorFactory 
 		}
 	}
 	return lastErr
+}
+
+// sendEOFMessage sends an EOF message for the specified table type
+func (fp *FileProcessor) sendEOFMessage(processor *BatchProcessor, tableType string) error {
+	conn := processor.GetConnection() // Assuming BatchProcessor has a method to get connection
+	
+	// Build EOF message body
+	body := fp.buildEOFMessageBody(tableType)
+	messageLength := int32(len(body))
+	
+	// Send opcode (u8)
+	if err := binary.Write(conn, binary.LittleEndian, protocol.OpCodeEOF); err != nil {
+		return fmt.Errorf("failed to send EOF opcode: %w", err)
+	}
+	
+	// Send length (i32)
+	if err := binary.Write(conn, binary.LittleEndian, messageLength); err != nil {
+		return fmt.Errorf("failed to send EOF length: %w", err)
+	}
+	
+	// Send body
+	if _, err := conn.Write(body); err != nil {
+		return fmt.Errorf("failed to send EOF body: %w", err)
+	}
+	
+	fp.log.Infof("action: send_eof_message | result: success | table_type: %s | message_length: %d", tableType, messageLength)
+	return nil
+}
+
+// buildEOFMessageBody builds the body of an EOF message following TableMessage format
+func (fp *FileProcessor) buildEOFMessageBody(tableType string) []byte {
+	var body []byte
+	
+	// TableMessage format: [nRows:i32][batchNumber:i64][status:u8][rows...]
+	
+	// nRows = 1 (one virtual row with table_type info)
+	nRowsBytes := make([]byte, 4)
+	binary.LittleEndian.PutUint32(nRowsBytes, 1)
+	body = append(body, nRowsBytes...)
+	
+	// batchNumber = 0 (EOF doesn't have a specific batch number)
+	batchNumberBytes := make([]byte, 8)
+	binary.LittleEndian.PutUint64(batchNumberBytes, 0)
+	body = append(body, batchNumberBytes...)
+	
+	// status = EOF (1)
+	body = append(body, protocol.BatchEOF)
+	
+	// Row data: one pair ["table_type", tableType]
+	// n_pairs (i32) = 1
+	nPairsBytes := make([]byte, 4)
+	binary.LittleEndian.PutUint32(nPairsBytes, 1)
+	body = append(body, nPairsBytes...)
+	
+	// Key: "table_type"
+	key := "table_type"
+	keyBytes := []byte(key)
+	keyLength := int32(len(keyBytes))
+	
+	keyLengthBytes := make([]byte, 4)
+	binary.LittleEndian.PutUint32(keyLengthBytes, uint32(keyLength))
+	body = append(body, keyLengthBytes...)
+	body = append(body, keyBytes...)
+	
+	// Value: tableType (e.g., "menu_items")
+	valueBytes := []byte(tableType)
+	valueLength := int32(len(valueBytes))
+	
+	valueLengthBytes := make([]byte, 4)
+	binary.LittleEndian.PutUint32(valueLengthBytes, uint32(valueLength))
+	body = append(body, valueLengthBytes...)
+	body = append(body, valueBytes...)
+	
+	return body
 }

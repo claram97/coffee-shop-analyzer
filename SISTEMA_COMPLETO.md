@@ -61,6 +61,7 @@ El sistema analizador de cafeterías es una arquitectura distribuida cliente-ser
 | 6 | `NEW_TRANSACTION_ITEMS` | Cliente→Servidor | Items de transacciones |
 | 7 | `NEW_TRANSACTION` | Cliente→Servidor | Transacciones completas |
 | 8 | `NEW_USERS` | Cliente→Servidor | Información de usuarios |
+| 9 | `EOF` | Cliente→Servidor | Fin de tabla específica |
 
 ### Formato de Mensaje
 
@@ -518,3 +519,299 @@ El sistema analizador de cafeterías representa una **arquitectura distribuida r
 5. **Preparación para escalabilidad** con message queues y sharding
 
 El sistema está **listo para producción** y puede evolucionar para satisfacer requisitos futuros de análisis de datos más complejos en el dominio de cafeterías y retail.
+
+## Sistema de Señalización EOF
+
+### Descripción General
+
+El sistema implementa un **mecanismo de señalización EOF (End of File) automático** que permite al orquestador saber cuándo un cliente ha terminado de enviar todos los archivos de un tipo específico de datos (table type). Este mecanismo es crucial para el procesamiento downstream y la sincronización de datos.
+
+### Protocolo de Mensajes EOF
+
+#### Formato del Mensaje EOF
+
+El mensaje EOF involucra dos formatos distintos: el mensaje que envía el cliente y el mensaje que el orquestador reenvía a la cola.
+
+##### 1. Mensaje Cliente → Orquestador (Formato Binario de Red)
+
+El cliente Go construye y envía un mensaje binario siguiendo el protocolo de red:
+
+```
+[OpCode=9:u8][MessageLength:i32][TableMessageBody]
+
+donde TableMessageBody =
+[nRows=1:i32][batchNumber:i64][status=1:u8][n_pairs=1:i32]["table_type":string][table_type_value:string]
+```
+
+**Ejemplo de construcción en Go:**
+```go
+func (fp *FileProcessor) buildEOFMessageBody(tableType string) []byte {
+    var buffer []byte
+    
+    // nRows = 1 (una fila con metadatos)
+    nRowsBytes := make([]byte, 4)
+    binary.LittleEndian.PutUint32(nRowsBytes, 1)
+    buffer = append(buffer, nRowsBytes...)
+    
+    // batchNumber = último batch procesado
+    batchBytes := make([]byte, 8) 
+    binary.LittleEndian.PutUint64(batchBytes, uint64(fp.lastBatchNumber))
+    buffer = append(buffer, batchBytes...)
+    
+    // status = BatchEOF (1)
+    buffer = append(buffer, byte(1))
+    
+    // n_pairs = 1 (solo el par table_type)
+    pairsBytes := make([]byte, 4)
+    binary.LittleEndian.PutUint32(pairsBytes, 1)
+    buffer = append(buffer, pairsBytes...)
+    
+    // "table_type" key
+    keyBytes := []byte("table_type")
+    buffer = append(buffer, keyBytes...)
+    buffer = append(buffer, 0) // null terminator
+    
+    // table type value
+    valueBytes := []byte(tableType)
+    buffer = append(buffer, valueBytes...)
+    buffer = append(buffer, 0) // null terminator
+    
+    return buffer
+}
+```
+
+**Características del mensaje de red:**
+- **OpCode**: 9 (`EOF`) - Identificador del tipo de mensaje
+- **MessageLength**: Tamaño total del `TableMessageBody` en bytes
+- **nRows**: 1 (una fila virtual con información de metadatos)
+- **batchNumber**: Número del último batch enviado para esa tabla
+- **status**: `BatchStatus.EOF` (1) - Indica fin de datos
+- **n_pairs**: 1 (un solo par clave-valor)
+- **Contenido**: Par `{"table_type": "nombre_tabla"}` con strings null-terminated
+
+##### 2. Mensaje Orquestador → Cola (Formato Serializado para Queue)
+
+El orquestador Python recibe, procesa y reenvía el mensaje a la cola usando `struct.pack()`:
+
+```python
+def to_bytes(self) -> bytes:
+    """Serializa EOF para envío a cola downstream."""
+    
+    # Preparar datos
+    table_type_bytes = self.table_type.encode('utf-8')
+    key_bytes = b"table_type"
+    
+    # Calcular tamaños
+    pairs_size = 4 + len(key_bytes) + 1 + len(table_type_bytes) + 1
+    total_size = 4 + 8 + 1 + 4 + pairs_size  # nRows + batchNum + status + n_pairs + pairs
+    
+    # Construir mensaje usando struct.pack (little-endian)
+    message = struct.pack('<I', 1)  # nRows = 1
+    message += struct.pack('<Q', 0)  # batchNumber = 0 (EOF especial)  
+    message += struct.pack('<B', 1)  # status = BatchEOF
+    message += struct.pack('<I', 1)  # n_pairs = 1
+    
+    # Agregar par clave-valor como bytes
+    message += key_bytes + b'\x00'  # "table_type" + null
+    message += table_type_bytes + b'\x00'  # valor + null
+    
+    return message
+```
+
+**Características del mensaje de cola:**
+- **Formato**: Bytes serializados con `struct.pack()` usando little-endian (`<`)
+- **nRows**: 1 (fijo para EOF)
+- **batchNumber**: 0 (valor especial para EOF, no representa batch real)
+- **status**: 1 (`BatchStatus.EOF`)
+- **Contenido**: Mismo par `{"table_type": "valor"}` preservado
+- **Codificación**: UTF-8 para strings, null-terminated para compatibilidad
+
+##### Diferencias Clave entre Formatos
+
+| Aspecto | Cliente → Orquestador | Orquestador → Cola |
+|---------|----------------------|-------------------|
+| **Encabezado** | `[OpCode][Length][Body]` | Solo `[Body]` |
+| **Construcción** | `binary.LittleEndian.PutUint*()` | `struct.pack('<format')` |
+| **BatchNumber** | Último batch real procesado | 0 (valor especial) |
+| **Propósito** | Comunicación de red TCP | Serialización para queue |
+| **Parsing** | Protocolo de mensajes de red | Deserialización directa |
+
+#### Tipos de Tabla Soportados
+
+| Table Type | Descripción | Archivos Típicos |
+|------------|-------------|------------------|
+| `"menu_items"` | Elementos del menú | `menu_items/*.csv` |
+| `"stores"` | Información de tiendas | `stores/*.csv` |
+| `"transactions"` | Transacciones completas | `transactions/*.csv` |
+| `"transaction_items"` | Items de transacciones | `transaction_items/*.csv` |
+| `"users"` | Información de usuarios | `users/*.csv` |
+
+### Implementación en el Cliente (Go)
+
+#### Flujo Automático de EOF
+
+```go
+// En FileProcessor.ProcessTableType()
+func (fp *FileProcessor) ProcessTableType(ctx context.Context, dataDir, tableType string, ...) error {
+    // 1. Procesar todos los archivos CSV de la tabla
+    for _, fileEntry := range files {
+        if !fileEntry.IsDir() && filepath.Ext(fileEntry.Name()) == ".csv" {
+            if err := fp.ProcessFile(ctx, subDirPath, fileEntry.Name(), processor); err != nil {
+                return err
+            }
+        }
+    }
+    
+    // 2. Enviar EOF automáticamente después de procesar todos los archivos
+    if err := fp.sendEOFMessage(processor, tableType); err != nil {
+        return err
+    }
+    
+    return nil
+}
+```
+
+#### Construcción del Mensaje EOF
+
+```go
+func (fp *FileProcessor) buildEOFMessageBody(tableType string) []byte {
+    // TableMessage format: [nRows:i32][batchNumber:i64][status:u8][rows...]
+    
+    // nRows = 1 (una fila virtual con información de tabla)
+    // batchNumber = 0 (EOF no tiene batch específico) 
+    // status = BatchEOF (1)
+    // Row: n_pairs=1, ["table_type", tableType]
+    
+    // Usar encoding/binary con LittleEndian para compatibilidad
+}
+```
+
+### Implementación en el Orquestador (Python)
+
+#### Clase EOFMessage
+
+```python
+class EOFMessage(TableMessage):
+    """EOF message que hereda de TableMessage y especifica el tipo de tabla."""
+    
+    def __init__(self):
+        super().__init__(
+            opcode=Opcodes.EOF,
+            required_keys=("table_type",),
+            row_factory=lambda **kwargs: None
+        )
+        self.table_type = ""
+    
+    def get_table_type(self) -> str:
+        """Obtiene el tipo de tabla del mensaje EOF."""
+        return self.table_type
+    
+    def to_bytes(self) -> bytes:
+        """Serializa el mensaje EOF a bytes usando struct.pack()."""
+        # Implementación usando struct.pack() para generar bytes directamente
+        # sin depender de funciones de socket
+```
+
+#### Procesamiento del EOF
+
+```python
+def _process_eof_message(self, msg, client_sock) -> bool:
+    """Procesa mensajes EOF enviándolos a la cola de filtro y routing."""
+    
+    table_type = msg.get_table_type()
+    
+    # Log recepción del EOF
+    logging.info(f"EOF received for table: {table_type}")
+    
+    # Serializar mensaje a bytes (preservando formato original)
+    message_bytes = msg.to_bytes()
+    
+    # Enviar a cola de downstream processing
+    self._filter_router_queue.send(message_bytes)
+    
+    # Responder éxito al cliente
+    ResponseHandler.send_success(client_sock)
+    return True
+```
+
+### Flujo Completo del Sistema EOF
+
+```
+Cliente Go                                Orquestador Python
+    │                                            │
+    │ ┌─ Procesar menu_items/ ────────┐         │
+    │ │   file1.csv → Batches 1-5     │         │
+    │ │   file2.csv → Batches 6-8     │         │
+    │ │   file3.csv → Batches 9-12    │         │
+    │ └───────────────────────────────┘         │
+    │                                            │
+    │──── EOF {"table_type": "menu_items"} ────►│
+    │                                            │ _process_eof_message()
+    │                                            │ → filter_router_queue
+    │◄───── BATCH_RECV_SUCCESS ─────────────────│
+    │                                            │
+    │ ┌─ Procesar stores/ ─────────────┐         │
+    │ │   stores.csv → Batches 13-15   │         │
+    │ └───────────────────────────────┘         │
+    │                                            │
+    │──── EOF {"table_type": "stores"} ────────►│
+    │◄───── BATCH_RECV_SUCCESS ─────────────────│
+    │                                            │
+    │ (Continúa con transactions, users, etc.)   │
+    │                                            │
+    │──────── FINISHED [AgencyID] ─────────────►│
+```
+
+### Beneficios del Sistema EOF
+
+#### 1. **Sincronización Precisa**
+- **Demarcación clara** del final de cada tipo de datos
+- **Correlación automática** entre batches y tablas
+- **Preparación para procesamiento** downstream por tabla
+
+#### 2. **Monitoreo y Debugging**
+```python
+# Logs automáticos del sistema
+"action: eof_received | result: success | table_type: menu_items | batch_number: 12"
+"action: eof_forwarded | result: success | table_type: menu_items | bytes_length: 45"
+```
+
+#### 3. **Integración con Message Queues**
+- **Envío automático** a colas de procesamiento
+- **Preservación del formato** original del mensaje
+- **Routing inteligente** basado en table_type
+
+#### 4. **Escalabilidad y Extensión**
+- **Fácil adición** de nuevos tipos de tabla
+- **Compatible** con arquitecturas de microservicios
+- **Preparado para sharding** por tipo de datos
+
+### Casos de Uso Downstream
+
+#### 1. **Triggers de Procesamiento**
+```python
+# El sistema downstream puede activar procesamiento específico:
+if message.table_type == "transactions":
+    trigger_revenue_analysis()
+elif message.table_type == "menu_items":
+    trigger_menu_optimization()
+```
+
+#### 2. **Checkpointing y Recovery**
+```python
+# Marcar completitud por cliente y tabla:
+checkpoint_manager.mark_complete(
+    client_id=msg.agency_id,
+    table_type=msg.table_type,
+    timestamp=datetime.now()
+)
+```
+
+#### 3. **Análisis Cross-Table**
+```python
+# Esperar que todas las tablas estén completas antes de análisis:
+if all_tables_complete(client_id):
+    start_comprehensive_analysis(client_id)
+```
+
+El sistema EOF proporciona **granularidad perfecta** para el control de flujo y sincronización en arquitecturas distribuidas de análisis de datos masivos.

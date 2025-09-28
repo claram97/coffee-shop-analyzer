@@ -6,7 +6,7 @@ protocol messages based on their opcode.
 import socket
 from .constants import ProtocolError, Opcodes
 from .parsing import read_u8, read_i32
-from .messages import Finished, NewMenuItems, NewStores, NewTransactionItems, NewTransactions, NewUsers
+from .messages import Finished, NewMenuItems, NewStores, NewTransactionItems, NewTransactions, NewUsers, EOFMessage
 from .databatch import DataBatch
 
 
@@ -55,6 +55,8 @@ def recv_msg(sock: socket.socket):
         msg = NewTransactions()
     elif opcode == Opcodes.NEW_USERS:
         msg = NewUsers()
+    elif opcode == Opcodes.EOF:
+        msg = EOFMessage()
     elif opcode == Opcodes.DATA_BATCH:
         msg = DataBatch()
     else:

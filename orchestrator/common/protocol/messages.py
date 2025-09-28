@@ -235,6 +235,109 @@ class NewStores(TableMessage):
         )
 
 
+class EOFMessage(TableMessage):
+    """EOF message that inherits from TableMessage and specifies table type."""
+
+    def __init__(self):
+        # Require table_type to specify which table is ending
+        super().__init__(
+            opcode=Opcodes.EOF,
+            required_keys=("table_type",),
+            row_factory=lambda **kwargs: None  # Don't create row objects
+        )
+        self.table_type = ""  # Store table type directly
+    
+    def create_eof_message(self, batch_number: int, table_type: str):
+        """Create an EOF message for a specific table type.
+        
+        Args:
+            batch_number: The batch number to associate with this EOF
+            table_type: The type of table ending (e.g., "menu_items", "stores", "transactions", etc.)
+            
+        Returns:
+            self: Returns self for method chaining
+        """
+        from .constants import BatchStatus
+        
+        self.amount = 1  # One "virtual" row with table information
+        self.batch_number = batch_number
+        self.batch_status = BatchStatus.EOF
+        self.table_type = table_type
+        
+        # No actual rows - rows list stays empty
+        self.rows = []
+        return self
+    
+    def _create_row_object(self, current_row_data: dict[str, str]):
+        """Override to capture table_type but not create row objects."""
+        # Extract table_type from the data but don't add to rows
+        if "table_type" in current_row_data:
+            self.table_type = current_row_data["table_type"]
+        # Don't append to self.rows - EOF messages have no actual data rows
+    
+    def get_table_type(self) -> str:
+        """Get the table type from the EOF message.
+        
+        Returns:
+            The table type string
+        """
+        return self.table_type
+    
+    def to_bytes(self) -> bytes:
+        """Serialize the EOF message to bytes following TableMessage protocol.
+        
+        Format: [opcode:u8][length:i32][nRows:i32][batchNumber:i64][status:u8][n_pairs:i32]["table_type"][table_type_value]
+        
+        Returns:
+            The serialized message as bytes
+        """
+        import struct
+        
+        # Build the body first to calculate length
+        body_parts = []
+        
+        # nRows (i32) - should be 1 for EOF with table_type info
+        body_parts.append(struct.pack('<I', 1))  # Little endian uint32
+        
+        # batchNumber (i64) 
+        body_parts.append(struct.pack('<Q', self.batch_number))  # Little endian uint64
+        
+        # status (u8)
+        from .constants import BatchStatus
+        body_parts.append(struct.pack('<B', BatchStatus.EOF))  # uint8
+        
+        # Row data: ["table_type", table_type_value]
+        # n_pairs (i32) = 1
+        body_parts.append(struct.pack('<I', 1))
+        
+        # Key: "table_type"
+        key = "table_type"
+        key_bytes = key.encode('utf-8')
+        body_parts.append(struct.pack('<I', len(key_bytes)))  # key length
+        body_parts.append(key_bytes)  # key data
+        
+        # Value: self.table_type
+        if hasattr(self, 'table_type') and self.table_type:
+            value_bytes = self.table_type.encode('utf-8')
+        else:
+            # Fallback if table_type not set
+            value_bytes = b"unknown"
+        
+        body_parts.append(struct.pack('<I', len(value_bytes)))  # value length
+        body_parts.append(value_bytes)  # value data
+        
+        # Join all body parts
+        body = b''.join(body_parts)
+        
+        # Create complete message: [opcode:u8][length:i32][body]
+        message_parts = []
+        message_parts.append(struct.pack('<B', self.opcode))  # opcode (u8)
+        message_parts.append(struct.pack('<I', len(body)))    # length (i32)
+        message_parts.append(body)                            # body
+        
+        return b''.join(message_parts)
+
+
 class Finished:
     """Inbound FINISHED message. Body is a single agency_id (i32 LE)."""
 

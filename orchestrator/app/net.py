@@ -20,6 +20,8 @@ class Orchestrator:
         """
         self.message_handler = MessageHandler()
         self.server_manager = ServerManager(port, listen_backlog, self._handle_message)
+        # TODO: Initialize actual message queue instead of simulation
+        self._filter_router_queue = MockFilterRouterQueue()
         self._setup_message_processors()
         
     def _setup_message_processors(self):
@@ -29,6 +31,9 @@ class Orchestrator:
                       Opcodes.NEW_TRANSACTION_ITEMS, Opcodes.NEW_TRANSACTION, 
                       Opcodes.NEW_USERS]:
             self.message_handler.register_processor(opcode, self._process_data_message)
+            
+        # Register processor for EOF messages
+        self.message_handler.register_processor(Opcodes.EOF, self._process_eof_message)
             
         # FINISHED message is handled by default (returns False to close connection)
         
@@ -99,7 +104,65 @@ class Orchestrator:
                 "action: batch_filter | result: fail | batch_number: %d | opcode: %d | error: %s",
                 getattr(msg, 'batch_number', 0), msg.opcode, str(filter_error)
             )
+    
+    def _process_eof_message(self, msg, client_sock) -> bool:
+        """Process EOF messages by sending them to the filter router queue.
+        
+        Args:
+            msg: EOF message to process
+            client_sock: Client socket for responses
+            
+        Returns:
+            True to continue connection
+        """
+        try:
+            table_type = msg.get_table_type()
+            
+            # Log EOF reception
+            logging.info(
+                "action: eof_received | result: success | table_type: %s | batch_number: %d",
+                table_type, getattr(msg, 'batch_number', 0)
+            )
+            
+            # Serialize EOF message to bytes
+            message_bytes = msg.to_bytes()
+            
+            # Send to filter router queue
+            # self._filter_router_queue.send(message_bytes)
+            
+            # Log successful forwarding
+            logging.info(
+                "action: eof_forwarded | result: success | table_type: %s | bytes_length: %d",
+                table_type, len(message_bytes)
+            )
+            
+            ResponseHandler.send_success(client_sock)
+            return True
+            
+        except Exception as e:
+            logging.error(
+                "action: eof_processing | result: fail | table_type: %s | batch_number: %d | error: %s",
+                getattr(msg, 'table_type', 'unknown'), getattr(msg, 'batch_number', 0), str(e)
+            )
+            return ResponseHandler.handle_processing_error(msg, client_sock, e)
             
     def run(self):
         """Start the orchestrator server."""
         self.server_manager.run()
+
+
+class MockFilterRouterQueue:
+    """Mock implementation of filter router queue for development/testing."""
+    
+    def send(self, message_bytes: bytes):
+        """Simulate sending message to queue.
+        
+        Args:
+            message_bytes: Serialized message bytes to send
+        """
+        logging.info(
+            "action: mock_queue_send | result: success | message_size: %d bytes",
+            len(message_bytes)
+        )
+        # In real implementation, this would send to RabbitMQ, Kafka, etc.
+        # For now, just log that we received the message

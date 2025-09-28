@@ -114,3 +114,8 @@ func (bp *BatchProcessor) BuildAndSendBatches(ctx context.Context, reader *csv.R
 
 	return bp.processCSVLoop(ctx, reader, &batchBuff, &counter, &currentBatchNumber)
 }
+
+// GetConnection returns the network connection used by this processor
+func (bp *BatchProcessor) GetConnection() net.Conn {
+	return bp.conn
+}
