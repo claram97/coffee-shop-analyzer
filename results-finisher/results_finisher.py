@@ -1,15 +1,17 @@
 import json
 import logging
 import os
+import pickle
 import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
 from typing import Dict, Any, List
 
-from middleware import MessageMiddlewareQueue
-from protocol import deserialize_message, Finished, DataBatch
+from middleware_client import MessageMiddlewareQueue
+from protocol import deserialize_message, Finished, DataBatch, ProtocolError
 from query_strategy import get_strategy
+from constants import QueryType
 
 logging.basicConfig(
     level=logging.INFO,
@@ -19,7 +21,7 @@ logging.basicConfig(
 @dataclass
 class QueryState:
     query_id: str
-    query_type: str
+    query_type: QueryType
     status: str = "processing"
     consolidated_data: Dict[str, Any] = field(default_factory=dict)
     completion_tracker: Dict[str, Any] = field(default_factory=dict)
@@ -32,43 +34,14 @@ class QueryState:
             "received_batches": {},
         }
 
-    def to_dict(self) -> Dict[str, Any]:
-        """Serializes the state for checkpointing."""
-        serializable_tracker = self.completion_tracker.copy()
-        for batch_info in serializable_tracker.get("received_batches", {}).values():
-            for key, value in batch_info.items():
-                if isinstance(value, set):
-                    batch_info[key] = list(value)
-        return {
-            "query_id": self.query_id, "query_type": self.query_type, "status": self.status,
-            "consolidated_data": self.consolidated_data, "completion_tracker": serializable_tracker,
-            "last_update_time": self.last_update_time,
-        }
-
-    @classmethod
-    def from_dict(cls, data: Dict[str, Any]) -> 'QueryState':
-        """Deserializes the state from a checkpoint."""
-        state = cls(query_id=data["query_id"], query_type=data["query_type"])
-        state.status = data["status"]
-        state.consolidated_data = data["consolidated_data"]
-        state.completion_tracker = data["completion_tracker"]
-        for batch_info in state.completion_tracker.get("received_batches", {}).values():
-            for key, value in batch_info.items():
-                if isinstance(value, list):
-                    batch_info[key] = set(value)
-        state.last_update_time = data["last_update_time"]
-        return state
-
 class ResultsFinisher:
     def __init__(self,
                  input_client: MessageMiddlewareQueue,
                  output_client: MessageMiddlewareQueue,
-                 checkpoint_dir: str,
-                 dimensional_data: Dict[str, Any]):
+                 checkpoint_dir: str):
         
         self.input_client = input_client
         self.output_client = output_client
-        self.dimensional_data = dimensional_data
         self.checkpoint_dir = checkpoint_dir
         
         self.active_queries: Dict[str, QueryState] = {}
@@ -84,9 +57,8 @@ class ResultsFinisher:
             if filename.endswith(".state"):
                 filepath = os.path.join(self.checkpoint_dir, filename)
                 try:
-                    with open(filepath, 'r') as f:
-                        data = json.load(f)
-                        state = QueryState.from_dict(data)
+                    with open(filepath, 'rb') as f:
+                        state = pickle.load(f)
                         self.active_queries[state.query_id] = state
                         logging.info(f"Recovered state for query: {state.query_id}")
                 except Exception as e:
@@ -95,24 +67,43 @@ class ResultsFinisher:
     def _save_checkpoint(self, query_state: QueryState):
         filepath = os.path.join(self.checkpoint_dir, f"{query_state.query_id}.state")
         try:
-            with open(filepath, 'w') as f:
-                json.dump(query_state.to_dict(), f, indent=2)
+            with open(filepath, 'wb') as f:
+                pickle.dump(query_state, f)
         except IOError as e:
             logging.error(f"Failed to save checkpoint for query {query_state.query_id}: {e}")
 
     def _message_handler(self, body: bytes):
+        logging.info(f"DEBUG: Received message of {len(body)} bytes")
+        
         try:
             batch = deserialize_message(body)
+            logging.info(f"DEBUG: Successfully parsed message - query_ids: {batch.query_ids}, batch_number: {batch.batch_number}")
+        except ProtocolError as e:
+            logging.error(f"Message is malformed, discarding. Error: {e}")
+            logging.error(f"DEBUG: Message body prefix (first 100 bytes): {body[:100].hex()}")
+            # Don't raise an exception - this allows the message to be ACK'd and discarded
+            # since it's permanently malformed and shouldn't be reprocessed
+            return
+
+        try:
             if not batch.query_ids:
+                logging.warning("Message has no query_ids, skipping")
                 return
 
+            logging.info(f"DEBUG: Processing message for queries: {batch.query_ids}")
+            
             for query_id_int in batch.query_ids:
                 query_id = str(query_id_int)
+                logging.info(f"DEBUG: Processing query_id: {query_id}")
+                
                 with self.lock:
                     if query_id not in self.active_queries:
-                        query_type = f"Q{query_id}"
+                        try:
+                            query_type = QueryType(f"Q{query_id}")
+                        except ValueError:
+                            query_type = QueryType.UNKNOWN
                         self.active_queries[query_id] = QueryState(query_id, query_type)
-                        logging.info(f"New query started: {query_id} (Type: {query_type})")
+                        logging.info(f"New query started: {query_id} (Type: {query_type.value})")
                     
                     state = self.active_queries[query_id]
                     self._process_batch(state, batch)
@@ -122,22 +113,35 @@ class ResultsFinisher:
                         state.status = "finalizing"
                         logging.info(f"Query {query_id} is complete. Submitting for finalization.")
                         self.executor.submit(self._finalize_query, state)
+            
+            logging.info(f"DEBUG: Successfully processed message")
         
         except Exception as e:
             logging.error(f"Error in message handler: {e}", exc_info=True)
+            logging.error(f"DEBUG: Exception occurred while processing message with query_ids: {getattr(batch, 'query_ids', 'unknown')}")
+            # Re-raise the exception so the message gets NACK'd and requeued
+            raise
 
     def _process_batch(self, state: QueryState, batch: DataBatch):
+        logging.info(f"Processing batch #{batch.batch_number} for query {state.query_id}, type: {type(batch.batch_msg).__name__}")
+        
         if isinstance(batch.batch_msg, Finished):
             state.completion_tracker["eof_signal_received"] = True
             state.completion_tracker["total_source_batches"] = batch.batch_number
+            logging.info(f"EOF signal received for query {state.query_id}. Total source batches: {batch.batch_number}")
+            # EOF signal should not be counted as a regular batch - return early
+            state.last_update_time = time.time()
+            return
         
         if hasattr(batch.batch_msg, 'rows') and batch.batch_msg.rows:
             strategy = get_strategy(state.query_type)
             strategy.consolidate(state.consolidated_data, batch.batch_msg.rows)
+            logging.debug(f"Consolidated {len(batch.batch_msg.rows)} rows for query {state.query_id}")
 
-        source_index = batch.batch_number
+        # Only track non-EOF batches in received_batches
+        source_index = str(batch.batch_number)
         received = state.completion_tracker.setdefault("received_batches", {})
-        batch_info = received.setdefault(str(source_index), {})
+        batch_info = received.setdefault(source_index, {})
         
         copy_info = batch.meta
         if copy_info:
@@ -150,9 +154,14 @@ class ResultsFinisher:
             batch_info.setdefault("received_shards", set()).add(batch.shard_num)
 
         state.last_update_time = time.time()
+        logging.debug(f"Query {state.query_id} - Received batches: {len(received)}, Total expected: {state.completion_tracker.get('total_source_batches', -1)}")
 
     def _is_query_complete(self, state: QueryState) -> bool:
         tracker = state.completion_tracker
+        logging.info(f"Checking completion for query {state.query_id}: EOF={tracker.get('eof_signal_received')}, "
+                    f"total_batches={tracker.get('total_source_batches', -1)}, "
+                    f"received_batches={len(tracker.get('received_batches', {}))}")
+        
         if not tracker.get("eof_signal_received") or tracker.get("total_source_batches", -1) == -1:
             return False
         
@@ -164,14 +173,16 @@ class ResultsFinisher:
                 return False
             if "total_shards" in batch_info and len(batch_info.get("received_shards", set())) != batch_info["total_shards"]:
                 return False
+        
+        logging.info(f"Query {state.query_id} is complete!")
         return True
 
     def _finalize_query(self, state: QueryState):
         try:
-            logging.info(f"Finalizing query {state.query_id} (Type: {state.query_type})...")
+            logging.info(f"Finalizing query {state.query_id} (Type: {state.query_type.value})...")
             
             strategy = get_strategy(state.query_type)
-            final_result = strategy.finalize(state.consolidated_data, self.dimensional_data)
+            final_result = strategy.finalize(state.consolidated_data)
             
             self._send_final_result(state.query_id, final_result)
         

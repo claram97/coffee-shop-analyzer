@@ -5,12 +5,13 @@ import time
 import logging
 from typing import Dict, List
 
-from middleware import MessageMiddlewareQueue, MessageMiddlewareDisconnectedError
+from middleware_client import MessageMiddlewareQueue, MessageMiddlewareDisconnectedError
 
 logging.basicConfig(
     level=logging.INFO,
     format='%(asctime)s - %(levelname)s - [ResultsRouter] - %(message)s'
 )
+logger = logging.getLogger(__name__)
 
 def _simple_hash(data: str) -> int:
     """A conceptually simple hash function that sums the ordinal values of characters."""
@@ -39,9 +40,20 @@ def _extract_first_query_id(body: bytes) -> str:
     This is compatible with the full protocol.py definition.
     """
     try:
+        # Skip the outer frame: opcode (1 byte) + length (4 bytes) = 5 bytes
+        if len(body) < 5:
+            raise ValueError("Message too short to contain outer frame")
+            
+        opcode = body[0]
+        if opcode != 11:  # DATA_BATCH opcode
+            raise ValueError(f"Expected DATA_BATCH opcode (11), got {opcode}")
+            
+        # Skip opcode and length to get to DataBatch inner content
+        inner_body = body[5:]
+        
         offset = 0
-        _, offset = _read_u8_list_from_body(body, offset)
-        query_ids, _ = _read_u8_list_from_body(body, offset)
+        table_ids, offset = _read_u8_list_from_body(inner_body, offset)
+        query_ids, _ = _read_u8_list_from_body(inner_body, offset)
 
         if not query_ids:
             raise ValueError("Message contains no query_ids for routing.")

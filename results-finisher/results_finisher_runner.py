@@ -2,16 +2,15 @@ import os
 import signal
 import threading
 import time
+import logging
 from results_finisher import ResultsFinisher
-from middleware import MessageMiddlewareQueue, MessageMiddlewareDisconnectedError
+from middleware_client import MessageMiddlewareQueue, MessageMiddlewareDisconnectedError
+
+logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - [Main] - %(message)s')
 
 def main():
-    """
-    Main entry point for the ResultsFinisher service.
-    Configures and injects the middleware clients.
-    """
     rabbitmq_host = os.getenv("RABBITMQ_HOST", "localhost")
-    input_queue_name = os.getenv("INPUT_QUEUE", "results_finisher_queue_1") 
+    input_queue_name = os.getenv("INPUT_QUEUE", "results_finisher_queue_1")
     output_queue_name = os.getenv("OUTPUT_QUEUE", "orchestrator_results_queue")
     checkpoint_dir = os.getenv("CHECKPOINT_DIR", "/checkpoints/finisher")
 
@@ -32,7 +31,6 @@ def main():
             checkpoint_dir=checkpoint_dir
         )
         
-        # --- Set up graceful shutdown ---
         shutdown_event = threading.Event()
         def shutdown_handler(signum, frame):
             print("\nShutdown signal received. Stopping finisher...")
