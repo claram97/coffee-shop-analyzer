@@ -106,19 +106,12 @@ class ResultsRouter:
             opcode = body[0]
 
             if opcode == Opcodes.DATA_BATCH:
-                # Route based on query_id for data batches
+                # Route based on query_id for data batches (includes EOF via BatchStatus)
                 query_id = _extract_first_query_id(body)
                 target_queue_name = self._get_target_queue(query_id)
                 target_client = self.output_clients[target_queue_name]
                 target_client.send(body)
                 logging.debug(f"Routed DATA_BATCH for query '{query_id}' to queue '{target_queue_name}'")
-
-            elif opcode == Opcodes.EOF:
-                # Broadcast EOF messages to all finishers
-                logging.info(f"Broadcasting EOF message to all {self.finisher_count} finishers.")
-                for queue_name in self.output_queue_names:
-                    self.output_clients[queue_name].send(body)
-                logging.debug(f"Broadcast of EOF complete.")
             
             else:
                 logging.warning(f"Received message with unknown opcode {opcode}, discarding.")

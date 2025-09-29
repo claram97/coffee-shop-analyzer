@@ -12,7 +12,6 @@ from middleware_client import MessageMiddlewareQueue
 from protocol import (
     ProtocolError, Opcodes, BatchStatus, DataBatch
 )
-from protocol.messages import EOFMessage
 from query_strategy import get_strategy
 from constants import QueryType
 
@@ -29,6 +28,7 @@ class QueryState:
     status: str = "processing"
     consolidated_data: Dict[str, Any] = field(default_factory=dict)
     completion_tracker: Dict[str, Any] = field(default_factory=dict)
+    batch_counters: Dict[str, Dict[str, int]] = field(default_factory=dict)  # table_type -> {received: N, expected: M}
     last_update_time: float = field(default_factory=time.time)
 
 class ResultsFinisher:
@@ -82,7 +82,7 @@ class ResultsFinisher:
             logging.error(f"Failed to save checkpoint for query {query_state.query_id}: {e}")
 
     def _message_handler(self, body: bytes):
-        """Main message handler that processes incoming DataBatch and EOFMessage."""
+        """Main message handler that processes incoming DataBatch messages."""
         logging.info(f"DEBUG: Received message of {len(body)} bytes")
         
         try:
@@ -97,17 +97,6 @@ class ResultsFinisher:
                 # Use DataBatch deserialization
                 message = DataBatch.deserialize_from_bytes(body)
                 self._handle_data_batch(message)
-                
-            elif opcode == Opcodes.EOF:
-                # Parse EOFMessage directly
-                length = int.from_bytes(body[1:5], 'little', signed=True)
-                if len(body) != 5 + length:
-                    logging.error(f"EOF message length mismatch: expected {5 + length}, got {len(body)}")
-                    return
-                
-                eof_message = EOFMessage()
-                eof_message.read_from(body[5:])  # Skip opcode and length
-                self._handle_eof_message(eof_message)
                 
             else:
                 logging.error(f"Unexpected message opcode: {opcode}")
@@ -125,10 +114,16 @@ class ResultsFinisher:
 
     def _handle_data_batch(self, batch: DataBatch):
         """Process DataBatch message containing query data."""
-        logging.info(f"DEBUG: Processing DataBatch for queries: {batch.query_ids}")
+        logging.info(f"DEBUG: Processing DataBatch #{getattr(batch, 'batch_number', 0)} for queries: {batch.query_ids}")
         
         if not batch.query_ids:
             logging.warning("DataBatch has no query_ids, skipping")
+            return
+
+        # Get table type from embedded message
+        table_type = self._get_table_type_from_batch(batch)
+        if not table_type:
+            logging.warning("Could not determine table type from DataBatch, skipping")
             return
 
         # Process data for each query ID mentioned in the batch
@@ -147,34 +142,72 @@ class ResultsFinisher:
                     logging.info(f"New query started: {query_id} (Type: {query_type.value})")
                 
                 state = self.active_queries[query_id]
-                self._process_data_batch_rows(state, batch)
+                
+                # Process batch data (if not EOF-only batch)
+                if hasattr(batch.batch_msg, 'rows') and batch.batch_msg.rows:
+                    self._process_data_batch_rows(state, batch)
+                
+                # Handle batch counting and EOF detection
+                self._process_batch_completion(state, batch, table_type)
+                
                 self._save_checkpoint(state)
 
-    def _handle_eof_message(self, eof_msg: EOFMessage):
-        """Process EOFMessage indicating a query group is complete."""
-        table_type = eof_msg.get_table_type()
-        logging.info(f"DEBUG: Processing EOF for table '{table_type}'")
+    def _get_table_type_from_batch(self, batch: DataBatch) -> str:
+        """Extract table type from DataBatch embedded message."""
+        if not hasattr(batch, 'batch_msg') or not batch.batch_msg:
+            return ""
+        
+        # Map message opcodes to table types
+        table_type_map = {
+            Opcodes.NEW_TRANSACTION: "transactions",
+            Opcodes.NEW_STORES: "stores", 
+            Opcodes.NEW_MENU_ITEMS: "menu_items",
+            Opcodes.NEW_TRANSACTION_ITEMS: "transaction_items",
+            Opcodes.NEW_USERS: "users"
+        }
+        
+        return table_type_map.get(batch.batch_msg.opcode, "")
 
-        with self.lock:
-            # Find all queries that are waiting for this table type
-            queries_to_finalize = []
+    def _process_batch_completion(self, state: QueryState, batch: DataBatch, table_type: str):
+        """Handle batch counting and check for table completion."""
+        batch_number = getattr(batch, 'batch_number', 0)
+        batch_status = getattr(batch.batch_msg, 'batch_status', BatchStatus.CONTINUE)
+        
+        # Initialize batch counter for this table if needed
+        if table_type not in state.batch_counters:
+            state.batch_counters[table_type] = {"received": 0, "expected": None}
+        
+        # Increment received batch count
+        state.batch_counters[table_type]["received"] += 1
+        
+        logging.debug(f"Query {state.query_id}: Received batch #{batch_number} for table '{table_type}' (status: {batch_status})")
+        
+        # Check if this is the final batch (EOF status)
+        if batch_status == BatchStatus.EOF:
+            # Set expected total based on batch number
+            state.batch_counters[table_type]["expected"] = batch_number
+            logging.info(f"Query {state.query_id}: Table '{table_type}' marked complete at batch #{batch_number}")
             
-            for query_id, state in list(self.active_queries.items()):
-                if state.status == "processing":
-                    expected_tables = self._get_expected_tables_for_query(state.query_type)
-                    
-                    if table_type in expected_tables:
-                        self._process_eof_for_query(state, table_type)
-                        self._save_checkpoint(state)
+            # Check if all batches for this table have been received
+            if self._is_table_complete(state, table_type):
+                logging.info(f"Query {state.query_id}: All batches received for table '{table_type}'")
+                state.completion_tracker.setdefault("completed_tables", set()).add(table_type)
+                
+                # Check if query is fully complete
+                if self._is_query_complete(state):
+                    state.status = "finalizing"
+                    self.executor.submit(self._finalize_query, state)
 
-                        if self._is_query_complete(state):
-                            state.status = "finalizing"
-                            queries_to_finalize.append(state)
-                            logging.info(f"Query {query_id} is complete after EOF for '{table_type}'")
+    def _is_table_complete(self, state: QueryState, table_type: str) -> bool:
+        """Check if all expected batches have been received for a table."""
+        counter = state.batch_counters.get(table_type, {})
+        expected = counter.get("expected")
+        received = counter.get("received", 0)
+        
+        if expected is None:
+            return False  # Haven't received EOF batch yet
             
-            # Submit complete queries for finalization
-            for state in queries_to_finalize:
-                self.executor.submit(self._finalize_query, state)
+        return received >= expected
 
     def _process_data_batch_rows(self, state: QueryState, batch: DataBatch):
         """Consolidate data from batch into query state using query-specific strategy."""
@@ -187,52 +220,37 @@ class ResultsFinisher:
 
         state.last_update_time = time.time()
 
-    def _process_eof_for_query(self, state: QueryState, table_type: str):
-        """Mark EOF signal as received for a specific table in query."""
-        logging.info(f"Processing EOF for table '{table_type}' in query {state.query_id}")
-        
-        state.completion_tracker.setdefault("eof_signals", {})[table_type] = True
-        state.last_update_time = time.time()
-
     def _is_query_complete(self, state: QueryState) -> bool:
-        """Check if query has received all expected EOF signals."""
-        eof_signals = state.completion_tracker.get("eof_signals", {})
+        """Check if query has received all expected tables completely."""
         expected_tables = self._get_expected_tables_for_query(state.query_type)
+        completed_tables = state.completion_tracker.get("completed_tables", set())
         
         if not expected_tables:
             logging.debug(f"Query {state.query_id}: No expected tables for type {state.query_type}")
             return False
         
-        # Query is complete when all expected EOF signals have arrived
-        missing_eof_signals = expected_tables - set(eof_signals.keys())
-        if missing_eof_signals:
-            logging.debug(f"Query {state.query_id}: Still waiting for EOF signals from: {missing_eof_signals}")
+        # Query is complete when all expected tables are completed
+        missing_tables = expected_tables - completed_tables
+        if missing_tables:
+            logging.debug(f"Query {state.query_id}: Still waiting for tables: {missing_tables}")
             return False
 
-        logging.info(f"Query {state.query_id} is complete! All EOFs received.")
+        logging.info(f"Query {state.query_id} is complete! All tables received: {completed_tables}")
         return True
     
-    def _get_expected_tables_for_query(self, query_type: QueryType) -> set[str]:
-        """
-        Get the set of expected table types based on the query type.
-        This determines which EOF signals we need to wait for.
-        
-        Table names should match the message types:
-        - NewMenuItems -> "menu_items" 
-        - NewStores -> "stores"
-        - NewTransactions -> "transactions"
-        - NewTransactionItems -> "transaction_items"
-        - NewUsers -> "users"
-        """
-        # Define which tables each query type expects based on query requirements
-        expected_tables_map = {
-            QueryType.Q1: {"transactions"},  # Q1 gets pre-joined transaction+store data in one stream
-            QueryType.Q2: {"transaction_items"},  # Q2 gets pre-joined transaction_items+users data  
-            QueryType.Q3: {"transactions"},  # Q3 gets pre-joined transaction+store data
-            QueryType.Q4: {"transaction_items"},  # Q4 gets pre-joined transaction_items+users data
-        }
-        
-        return expected_tables_map.get(query_type, set())
+    def _get_expected_tables_for_query(self, query_type: int) -> set:
+        """Get the set of expected table types for a specific query type."""
+        if query_type == 1:  # Q1
+            return {"NewTransactions"}
+        elif query_type == 2:  # Q2  
+            return {"NewStores"}
+        elif query_type == 3:  # Q3
+            return {"NewTransactions", "NewStores"}
+        elif query_type == 4:  # Q4
+            return {"NewTransactions", "NewStores"}
+        else:
+            logging.warning(f"Unknown query type: {query_type}")
+            return set()
 
     def _finalize_query(self, state: QueryState):
         """Finalize query using query-specific strategy and send result."""
