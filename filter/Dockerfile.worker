@@ -1,0 +1,23 @@
+FROM python:3.9.7-slim
+
+# Copy filter requirements first for better caching
+COPY filter/requirements.txt /tmp/requirements.txt
+
+# Install required dependencies
+RUN pip install -r /tmp/requirements.txt && rm /tmp/requirements.txt
+
+# Copy all code to root for easier imports
+COPY filter /filter
+COPY middleware /middleware
+COPY protocol /protocol
+
+# Set Python path to include root directory
+ENV PYTHONPATH=/
+
+# Set working directory
+WORKDIR /filter
+
+# Make the entry point executable
+RUN chmod +x worker_main.py
+
+ENTRYPOINT ["python3", "worker_main.py"]

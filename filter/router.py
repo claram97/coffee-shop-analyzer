@@ -37,7 +37,7 @@ class Metadata:
 
 
 @dataclass
-class DataBatch:
+class FilterDataBatch:
     payload: Any
     metadata: Metadata
 
