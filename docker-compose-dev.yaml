@@ -51,6 +51,24 @@ services:
     volumes:
       - ./client/config.yaml:/config.yaml:ro
       - ./.data:/data:ro
+  
+  aggregator1:
+    container_name: aggregator1
+    build:
+      context: .
+      dockerfile: aggregator/Dockerfile
+    entrypoint: python3 /main.py
+    environment:
+      - PYTHONUNBUFFERED=1
+      - AGGREGATOR_ID=1
+      # - LOGGING_LEVEL=DEBUG
+    networks:
+      - testing_net
+    depends_on:
+      rabbitmq:
+        condition: service_healthy
+    volumes:
+      - ./aggregator/config.ini:/app/config.ini:ro
 
 networks:
   testing_net:
