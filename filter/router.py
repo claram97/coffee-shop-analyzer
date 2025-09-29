@@ -7,16 +7,14 @@ from collections import defaultdict
 from dataclasses import dataclass, field
 from typing import Any, Dict, List, NamedTuple, Optional
 
-from protocol.databatch import DataBatch
-from protocol.messages import EOFMessage
-from protocol.constants import Opcodes
-
 # ==== Middleware ====
 from middleware.middleware_client import (
-    MessageMiddleware,
-    MessageMiddlewareMessageError,
+    MessageMiddlewareExchange,
     MessageMiddlewareQueue,
 )
+from protocol.constants import Opcodes
+from protocol.databatch import DataBatch
+from protocol.messages import EOFMessage
 
 
 # ==========================
@@ -36,23 +34,11 @@ class Metadata:
     copy_info: List[CopyInfo] = field(default_factory=list)
 
 
-@dataclass
-class FilterDataBatch:
-    payload: Any
-    metadata: Metadata
-
-
-@dataclass
-class TableEOF:
-    table_name: str
-
-
 # ==========================
 # Protocol utilities
 # ==========================
-def partition_eof_to_bytes(table_name: str, partition_id: int) -> bytes:
+def table_eof_to_bytes(table_name: str) -> bytes:
     """Create EOF message bytes for a specific table and partition."""
-    from protocol.messages import EOFMessage
     eof_msg = EOFMessage()
     eof_msg.create_eof_message(batch_number=0, table_type=table_name)
     return eof_msg.to_bytes()
@@ -102,9 +88,7 @@ def _group_rows_by_partition(
     rows: List[Dict[str, Any]],
     num_parts: int,
 ) -> Dict[int, List[Dict[str, Any]]]:
-    from collections import defaultdict as _dd
-
-    parts: Dict[int, List[Dict[str, Any]]] = _dd(list)
+    parts: Dict[int, List[Dict[str, Any]]] = defaultdict(list)
     if num_parts <= 1:
         parts[0] = list(rows)
         return parts
@@ -122,96 +106,21 @@ def _group_rows_by_partition(
     return parts
 
 
-# ==========================
-# Abstracciones de salida
-# ==========================
-class BusProducer:
-    """
-    Implementación de BusProducer sobre RabbitMQ (MessageMiddlewareQueue).
-    - Envía batches al pool de filtros (cola única).
-    - Envía batches a Aggregators shardeados (una cola por partición).
-    - Reencola al router (para fan-out/recirculación).
-    """
-
-    def __init__(
-        self,
-        *,
-        host: str,
-        filters_pool_queue: str,
-        router_input_queue: str,
-        agg_queue_fmt: str = "agg.{table}.p{pid}",  # ej: agg.transactions.p3
-    ):
-        self._host = host
-        self._filters_pool_q = filters_pool_queue
-        self._router_in_q = router_input_queue
-        self._agg_fmt = agg_queue_fmt
-
-        # Publishers fijos
-        self._filters_pub: MessageMiddleware = MessageMiddlewareQueue(
-            host, filters_pool_queue
-        )
-        self._router_pub: MessageMiddleware = MessageMiddlewareQueue(
-            host, router_input_queue
-        )
-
-        # Cache por cola de aggregator
-        self._agg_publishers: Dict[str, MessageMiddleware] = {}
-
-    # --------- API usada por el FilterRouter ---------
-
-    def send_to_filters_pool(self, batch: DataBatch, step: int) -> None:
-        """
-        El 'step' ya viene reflejado en batch.metadata.reserved_u16 por el router;
-        solo serializamos y publicamos.
-        """
-        self._filters_pub.send(batch.to_bytes())
-
-    def send_to_aggregator_partition(self, partition_id: int, batch: DataBatch) -> None:
-        table = batch.metadata.table_name
-        pub = self._get_agg_pub(table, int(partition_id))
-        pub.send(batch.to_bytes())
-
-    def send_table_eof_to_aggregator_partition(
-        self, table_name: str, partition_id: int
-    ) -> None:
-        pub = self._get_agg_pub(table_name, int(partition_id))
-        raw = partition_eof_to_bytes(table_name, int(partition_id))
-        pub.send(raw)
-
-    def requeue_to_router(self, batch: DataBatch) -> None:
-        self._router_pub.send(batch.to_bytes())
-
-    # --------- internos ---------
-
-    def _get_agg_pub(self, table: str, pid: int) -> MessageMiddleware:
-        qname = self._agg_fmt.format(table=table, pid=pid)
-        pub = self._agg_publishers.get(qname)
-        if pub is None:
-            pub = MessageMiddlewareQueue(self._host, qname)
-            self._agg_publishers[qname] = pub
-        return pub
-
-    # (opcional) liberar recursos ordenadamente
-    def close(self) -> None:
-        try:
-            self._filters_pub.close()
-        except Exception:
-            pass
-        try:
-            self._router_pub.close()
-        except Exception:
-            pass
-        for pub in self._agg_publishers.values():
-            try:
-                pub.close()
-            except Exception:
-                pass
-        self._agg_publishers.clear()
-
-
 class TableConfig:
+    """
+    Configuración de cantidad de particiones por tabla.
+    """
+
+    def __init__(self, table_parts: Dict[str, int]):
+        # normalizamos claves a str por si vienen ints
+        self._parts = {str(k): int(v) for k, v in table_parts.items()}
+
     def num_aggregator_partitions(self, table_name: str) -> int:
-        return 3  # esto deberia leerse de env
+        """
+        Devuelve la cantidad de particiones configurada para la tabla.
+        Si no está definida, devuelve 1.
+        """
+        return self._parts.get(str(table_name), 1)
 
 
 # ==========================
@@ -257,14 +166,17 @@ class QueryPolicyResolver:
 # ==========================
 class FilterRouter:
     def __init__(
-        self, producer: BusProducer, policy: QueryPolicyResolver, table_cfg: TableConfig
+        self,
+        producer: ExchangeBusProducer,
+        policy: QueryPolicyResolver,
+        table_cfg: TableConfig,
     ):
         self._p = producer
         self._pol = policy
         self._cfg = table_cfg
         self._log = logging.getLogger("filter-router")
         self._pending_batches: Dict[str, int] = defaultdict(int)
-        self._pending_eof: Dict[str, ] = {}
+        self._pending_eof: Dict[str, EOFMessage] = {}
 
     def process_message(self, msg: Any) -> None:
         if isinstance(msg, DataBatch):
@@ -286,7 +198,7 @@ class FilterRouter:
             table, m.queries, steps_done=next_step
         ):
             m.reserved_u16 = set_bit(m.reserved_u16, next_step)
-            self._p.send_to_filters_pool(batch, step=next_step)
+            self._p.send_to_filters_pool(batch)
             return
 
         dup_count = int(self._pol.get_duplication_count(m.queries) or 1)
@@ -340,8 +252,8 @@ class FilterRouter:
         ).digest()
         return int.from_bytes(seed, "little") % n
 
-    def _handle_table_eof(self, eof: TableEOF) -> None:
-        table = eof.table_name
+    def _handle_table_eof(self, eof: EOFMessage) -> None:
+        table = eof.table_type
         self._pending_eof[table] = eof
         self._maybe_flush_pending_eof(table)
 
@@ -357,70 +269,44 @@ class FilterRouter:
         self._pending_batches.pop(table, None)
 
 
-# ==========================
-# Integración con middleware
-# ==========================
-class QueueTableConfig(TableConfig):
-    """
-    Define particiones por tabla.
-    """
-
-    def __init__(self, table_parts: Dict[str, int]):
-        self._parts = {str(k): int(v) for k, v in table_parts.items()}
-
-    def num_aggregator_partitions(self, table_name: str) -> int:
-        return int(self._parts.get(str(table_name), 1))
-
-
-class QueueBusProducer(BusProducer):
-    """
-    Publica a:
-      - pool de filtros (cola única)
-      - agregators shardeados: una cola por partición (agg_fmt)
-      - requeue al router: cola de entrada del router
-    """
-
+class ExchangeBusProducer:
     def __init__(
         self,
         host: str,
         filters_pool_queue: str,
         router_input_queue: str,
-        agg_queue_fmt: str = "agg.{table}.p{pid}",  # ejemplo
+        exchange_fmt: str = "ex.{table}",
+        rk_fmt: str = "agg.{table}.{pid:02d}",
     ):
         self._host = host
-        self._filters_pool_q = filters_pool_queue
-        self._router_in_q = router_input_queue
-        self._agg_fmt = agg_queue_fmt
-
         self._filters_pub = MessageMiddlewareQueue(host, filters_pool_queue)
         self._router_pub = MessageMiddlewareQueue(host, router_input_queue)
-        self._agg_publishers: Dict[str, MessageMiddleware] = {}
+        self._exchange_fmt = exchange_fmt
+        self._rk_fmt = rk_fmt
+        self._pub_cache: dict[tuple[str, str], MessageMiddlewareExchange] = {}
 
-    def _agg_queue_name(self, table: str, pid: int) -> str:
-        return self._agg_fmt.format(table=table, pid=int(pid))
-
-    def _get_agg_pub(self, table: str, pid: int) -> MessageMiddleware:
-        qname = self._agg_queue_name(table, pid)
-        pub = self._agg_publishers.get(qname)
+    def _get_pub(self, table: str, pid: int) -> MessageMiddlewareExchange:
+        ex = self._exchange_fmt.format(table=table)
+        rk = self._rk_fmt.format(table=table, pid=pid)
+        key = (ex, rk)
+        pub = self._pub_cache.get(key)
         if pub is None:
-            pub = MessageMiddlewareQueue(self._host, qname)
-            self._agg_publishers[qname] = pub
+            pub = MessageMiddlewareExchange(self._host, ex, [rk])
+            self._pub_cache[key] = pub
         return pub
 
-    def send_to_filters_pool(self, batch: DataBatch, step: int) -> None:
+    def send_to_filters_pool(self, batch: DataBatch) -> None:
         self._filters_pub.send(batch.to_bytes())
 
     def send_to_aggregator_partition(self, partition_id: int, batch: DataBatch) -> None:
         table = batch.metadata.table_name
-        pub = self._get_agg_pub(table, partition_id)
-        pub.send(batch.to_bytes())
+        self._get_pub(table, partition_id).send(batch.to_bytes())
 
     def send_table_eof_to_aggregator_partition(
         self, table_name: str, partition_id: int
     ) -> None:
-        raw = partition_eof_to_bytes(table_name, int(partition_id))
-        pub = self._get_agg_pub(table_name, partition_id)
-        pub.send(raw)
+        raw = table_eof_to_bytes(table_name)
+        self._get_pub(table_name, partition_id).send(raw)
 
     def requeue_to_router(self, batch: DataBatch) -> None:
         self._router_pub.send(batch.to_bytes())
@@ -438,9 +324,9 @@ class RouterServer:
         self,
         host: str,
         router_input_queue: str,
-        producer: QueueBusProducer,
+        producer: ExchangeBusProducer,
         policy: QueryPolicyResolver,
-        table_cfg: QueueTableConfig,
+        table_cfg: TableConfig,
     ):
         self._host = host
         self._in_q = router_input_queue
@@ -458,13 +344,15 @@ class RouterServer:
                 return
 
             opcode = body[0]
-            
+
             # Process message based on opcode
             if opcode == Opcodes.EOF:
                 # It's an EOF message
                 try:
                     eof_msg = EOFMessage()
-                    eof_msg.read_from(body[5:])  # Skip opcode (1 byte) + length (4 bytes)
+                    eof_msg.read_from(
+                        body[5:]
+                    )  # Skip opcode (1 byte) + length (4 bytes)
                     self._router.process_message(eof_msg)
                 except Exception as e:
                     self._log.error(f"Failed to parse EOF message: {e}")
