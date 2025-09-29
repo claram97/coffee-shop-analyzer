@@ -26,6 +26,9 @@ def initialize_config():
         config_params["logging_level"] = os.getenv(
             "LOGGING_LEVEL", config["DEFAULT"]["LOGGING_LEVEL"]
         )
+        config_params["aggregator_id"] = os.getenv(
+            "AGGREGATOR_ID", config.get("DEFAULT", "AGGREGATOR_ID", fallback="1")
+        )
         
     except KeyError as e:
         raise KeyError("Key was not found. Error: {} .Aborting server".format(e))
@@ -40,19 +43,17 @@ def initialize_config():
 def main():
     config_params = initialize_config()
     logging_level = config_params["logging_level"]
+    aggregator_id = int(config_params["aggregator_id"])
 
     initialize_log(logging_level)
 
-    # Log config parameters at the beginning of the program to verify the configuration
-    # of the component
     logging.debug(
         f"action: config | result: success | "
-        f"logging_level: {logging_level}"
+        f"logging_level: {logging_level} | "
+        f"aggregator_id: {aggregator_id}"
     )
 
-    # Initialize server
-    logging.debug("action: server_init | architecture: modular")
-    server = Aggregator(1)
+    server = Aggregator(aggregator_id)
     server.run()
 
 
