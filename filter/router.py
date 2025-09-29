@@ -7,7 +7,6 @@ from collections import defaultdict
 from dataclasses import dataclass, field
 from typing import Any, Dict, List, NamedTuple, Optional
 
-# ==== Middleware ====
 from middleware.middleware_client import (
     MessageMiddlewareExchange,
     MessageMiddlewareQueue,
@@ -17,9 +16,6 @@ from protocol.databatch import DataBatch
 from protocol.messages import EOFMessage
 
 
-# ==========================
-# Tipos internos (los tuyos)
-# ==========================
 class CopyInfo(NamedTuple):
     index: int
     total: int
@@ -34,9 +30,6 @@ class Metadata:
     copy_info: List[CopyInfo] = field(default_factory=list)
 
 
-# ==========================
-# Protocol utilities
-# ==========================
 def table_eof_to_bytes(table_name: str) -> bytes:
     """Create EOF message bytes for a specific table and partition."""
     eof_msg = EOFMessage()
@@ -44,9 +37,6 @@ def table_eof_to_bytes(table_name: str) -> bytes:
     return eof_msg.to_bytes()
 
 
-# ==========================
-# Utilidades
-# ==========================
 def is_bit_set(mask: int, idx: int) -> bool:
     return ((mask >> idx) & 1) == 1
 
@@ -123,9 +113,6 @@ class TableConfig:
         return self._parts.get(str(table_name), 1)
 
 
-# ==========================
-# Policy (tu versión)
-# ==========================
 class QueryPolicyResolver:
     def steps_remaining(
         self, batch_table_name: str, batch_queries: list[int], steps_done: int
@@ -161,9 +148,6 @@ class QueryPolicyResolver:
         return list(batch_queries)
 
 
-# ==========================
-# Router de filtros (core)
-# ==========================
 class FilterRouter:
     def __init__(
         self,
@@ -312,9 +296,6 @@ class ExchangeBusProducer:
         self._router_pub.send(batch.to_bytes())
 
 
-# ==========================
-# Servidor del router (consumo)
-# ==========================
 class RouterServer:
     """
     Levanta el consumidor del router y despacha al FilterRouter.
@@ -338,21 +319,16 @@ class RouterServer:
 
     def run(self) -> None:
         def _cb(body: bytes):
-            # Check the first byte (opcode) to determine message type
             if len(body) < 1:
                 self._log.error("Received empty message")
                 return
 
             opcode = body[0]
 
-            # Process message based on opcode
             if opcode == Opcodes.EOF:
-                # It's an EOF message
                 try:
                     eof_msg = EOFMessage()
-                    eof_msg.read_from(
-                        body[5:]
-                    )  # Skip opcode (1 byte) + length (4 bytes)
+                    eof_msg.read_from(body[5:])
                     self._router.process_message(eof_msg)
                 except Exception as e:
                     self._log.error(f"Failed to parse EOF message: {e}")
