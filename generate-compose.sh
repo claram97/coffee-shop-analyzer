@@ -130,79 +130,79 @@ YAML
 done
 
 # --- aggregators (shardeados) ---
-for i in $(seq 1 "$AGGS"); do
-cat >> "$OUT_PATH" <<YAML
-
-  aggregator-${i}:
-    container_name: aggregator-${i}
-    build:
-      context: .
-      dockerfile: aggregator/Dockerfile.worker
-    environment:
-      - PYTHONUNBUFFERED=1
-      - RABBITMQ_HOST=rabbitmq
-      - LOG_LEVEL=INFO
-      - AGG_WORKER_INDEX=${i}
-    networks:
-      - testing_net
-    volumes:
-      - ./aggregator/config.ini:/app/config.ini:ro
-    depends_on:
-      rabbitmq:
-        condition: service_healthy
-      filter-router:
-        condition: service_started
-YAML
-done
-
-# --- joiner-router (único) ---
-cat >> "$OUT_PATH" <<YAML
-
-  joiner-router:
-    container_name: joiner-router
-    build:
-      context: .
-      dockerfile: joiner/Dockerfile.router
-    environment:
-      - PYTHONUNBUFFERED=1
-      - RABBITMQ_HOST=rabbitmq
-      - LOG_LEVEL=INFO
-    networks:
-      - testing_net
-    volumes:
-      - ./joiner/config.ini:/app/config.ini:ro
-    depends_on:
-      rabbitmq:
-        condition: service_healthy
-      aggregator-1:
-        condition: service_started
-YAML
-
-# --- joiner workers (shardeados) ---
-for i in $(seq 1 "$JOINERS"); do
-cat >> "$OUT_PATH" <<YAML
-
-  joiner-worker-${i}:
-    container_name: joiner-worker-${i}
-    build:
-      context: .
-      dockerfile: joiner/Dockerfile.worker
-    environment:
-      - PYTHONUNBUFFERED=1
-      - RABBITMQ_HOST=rabbitmq
-      - LOG_LEVEL=INFO
-      - JOINER_WORKER_INDEX=${i}
-    networks:
-      - testing_net
-    volumes:
-      - ./joiner/config.ini:/app/config.ini:ro
-    depends_on:
-      rabbitmq:
-        condition: service_healthy
-      joiner-router:
-        condition: service_started
-YAML
-done
+# for i in $(seq 1 "$AGGS"); do
+# cat >> "$OUT_PATH" <<YAML
+#
+#   aggregator-${i}:
+#     container_name: aggregator-${i}
+#     build:
+#       context: .
+#       dockerfile: aggregator/Dockerfile.worker
+#     environment:
+#       - PYTHONUNBUFFERED=1
+#       - RABBITMQ_HOST=rabbitmq
+#       - LOG_LEVEL=INFO
+#       - AGG_WORKER_INDEX=${i}
+#     networks:
+#       - testing_net
+#     volumes:
+#       - ./aggregator/config.ini:/app/config.ini:ro
+#     depends_on:
+#       rabbitmq:
+#         condition: service_healthy
+#       filter-router:
+#         condition: service_started
+# YAML
+# done
+#
+# # --- joiner-router (único) ---
+# cat >> "$OUT_PATH" <<YAML
+#
+#   joiner-router:
+#     container_name: joiner-router
+#     build:
+#       context: .
+#       dockerfile: joiner/Dockerfile.router
+#     environment:
+#       - PYTHONUNBUFFERED=1
+#       - RABBITMQ_HOST=rabbitmq
+#       - LOG_LEVEL=INFO
+#     networks:
+#       - testing_net
+#     volumes:
+#       - ./joiner/config.ini:/app/config.ini:ro
+#     depends_on:
+#       rabbitmq:
+#         condition: service_healthy
+#       aggregator-1:
+#         condition: service_started
+# YAML
+#
+# # --- joiner workers (shardeados) ---
+# for i in $(seq 1 "$JOINERS"); do
+# cat >> "$OUT_PATH" <<YAML
+#
+#   joiner-worker-${i}:
+#     container_name: joiner-worker-${i}
+#     build:
+#       context: .
+#       dockerfile: joiner/Dockerfile.worker
+#     environment:
+#       - PYTHONUNBUFFERED=1
+#       - RABBITMQ_HOST=rabbitmq
+#       - LOG_LEVEL=INFO
+#       - JOINER_WORKER_INDEX=${i}
+#     networks:
+#       - testing_net
+#     volumes:
+#       - ./joiner/config.ini:/app/config.ini:ro
+#     depends_on:
+#       rabbitmq:
+#         condition: service_healthy
+#       joiner-router:
+#         condition: service_started
+# YAML
+# done
 
 # --- networks ---
 cat >> "$OUT_PATH" <<'YAML'
