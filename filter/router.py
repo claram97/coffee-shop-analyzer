@@ -1,3 +1,4 @@
+# filter_router.py
 from __future__ import annotations
 
 import copy
@@ -5,7 +6,7 @@ import hashlib
 import logging
 from collections import defaultdict
 from dataclasses import dataclass, field
-from typing import Any, Dict, List, NamedTuple, Optional
+from typing import Any, Dict, List, NamedTuple, Optional, Tuple, Union
 
 from middleware.middleware_client import (
     MessageMiddlewareExchange,
@@ -15,6 +16,38 @@ from protocol.constants import Opcodes
 from protocol.databatch import DataBatch
 from protocol.messages import EOFMessage
 
+TID_TO_NAME = {
+    Opcodes.NEW_TRANSACTION: "transactions",
+    Opcodes.NEW_USERS: "users",
+    Opcodes.NEW_TRANSACTION_ITEMS: "transaction_items",
+    Opcodes.NEW_MENU_ITEMS: "menu_items",
+    Opcodes.NEW_STORES: "stores",
+}
+LIGHT_TABLES = {"menu_items", "stores"}
+
+
+def table_name_of(db: DataBatch) -> str:
+    if not getattr(db, "batch_msg", None):
+        return ""
+    return TID_TO_NAME.get(int(db.batch_msg.opcode))
+
+
+def queries_of(db: DataBatch) -> List[int]:
+    return list(getattr(db, "query_ids", []) or [])
+
+
+def rows_of(db: DataBatch) -> List[Union[dict, object]]:
+    inner = getattr(db, "batch_msg", None)
+    if inner is None or not hasattr(inner, "rows"):
+        return []
+    return inner.rows or []
+
+
+def get_field(row: Union[dict, object], key: str):
+    if isinstance(row, dict):
+        return row.get(key)
+    return getattr(row, key, None)
+
 
 class CopyInfo(NamedTuple):
     index: int
@@ -22,7 +55,7 @@ class CopyInfo(NamedTuple):
 
 
 @dataclass
-class Metadata:
+class MetadataCompat:
     table_name: str
     queries: List[int]
     total_filter_steps: int
@@ -31,7 +64,6 @@ class Metadata:
 
 
 def table_eof_to_bytes(table_name: str) -> bytes:
-    """Create EOF message bytes for a specific table and partition."""
     eof_msg = EOFMessage()
     eof_msg.create_eof_message(batch_number=0, table_type=table_name)
     return eof_msg.to_bytes()
@@ -60,8 +92,8 @@ def _hash_u64(s: str) -> int:
     )
 
 
-def _pick_key_field(table: str, queries: List[int]) -> Optional[str]:
-    t = table.lower()
+def _pick_key_field(table_name: str, queries: List[int]) -> Optional[str]:
+    t = table_name
     qs = set(queries or [])
     if t == "transactions":
         return "user_id" if 4 in qs else "transaction_id"
@@ -73,21 +105,21 @@ def _pick_key_field(table: str, queries: List[int]) -> Optional[str]:
 
 
 def _group_rows_by_partition(
-    table: str,
+    table_name: str,
     queries: List[int],
-    rows: List[Dict[str, Any]],
+    rows: List[Union[dict, object]],
     num_parts: int,
-) -> Dict[int, List[Dict[str, Any]]]:
-    parts: Dict[int, List[Dict[str, Any]]] = defaultdict(list)
+) -> Dict[int, List[Union[dict, object]]]:
+    parts: Dict[int, List[Union[dict, object]]] = defaultdict(list)
     if num_parts <= 1:
         parts[0] = list(rows)
         return parts
-    key = _pick_key_field(table, queries)
+    key = _pick_key_field(table_name, queries)
     if not key:
         parts[0] = list(rows)
         return parts
     for r in rows:
-        val = r.get(key)
+        val = get_field(r, key)
         if val is None:
             parts[0].append(r)
             continue
@@ -97,19 +129,10 @@ def _group_rows_by_partition(
 
 
 class TableConfig:
-    """
-    Configuración de cantidad de particiones por tabla.
-    """
-
     def __init__(self, table_parts: Dict[str, int]):
-        # normalizamos claves a str por si vienen ints
         self._parts = {str(k): int(v) for k, v in table_parts.items()}
 
     def num_aggregator_partitions(self, table_name: str) -> int:
-        """
-        Devuelve la cantidad de particiones configurada para la tabla.
-        Si no está definida, devuelve 1.
-        """
         return self._parts.get(str(table_name), 1)
 
 
@@ -147,11 +170,23 @@ class QueryPolicyResolver:
                 return [3] if copy_number == 1 else [1]
         return list(batch_queries)
 
+    def total_steps(self, batch_table_name: str, batch_queries: list[int]) -> int:
+        if batch_table_name == "transactions":
+            if len(batch_queries) == 3:
+                return 3
+            if len(batch_queries) == 2:
+                return 2
+            if batch_queries == [1] or batch_queries == [3] or batch_queries == [4]:
+                return 1
+        if batch_table_name in ("users", "transaction_items"):
+            return 1
+        return 1
+
 
 class FilterRouter:
     def __init__(
         self,
-        producer: ExchangeBusProducer,
+        producer: "ExchangeBusProducer",
         policy: QueryPolicyResolver,
         table_cfg: TableConfig,
     ):
@@ -163,81 +198,142 @@ class FilterRouter:
         self._pending_eof: Dict[str, EOFMessage] = {}
 
     def process_message(self, msg: Any) -> None:
-        if isinstance(msg, DataBatch):
-            self._handle_data(msg)
-        elif isinstance(msg, EOFMessage):
-            self._handle_table_eof(msg)
-        else:
-            self._log.warning("Unknown message type: %r", type(msg))
+        try:
+            if isinstance(msg, DataBatch):
+                self._handle_data(msg)
+            elif isinstance(msg, EOFMessage):
+                self._handle_table_eof(msg)
+            else:
+                self._log.warning("Unknown message type: %r", type(msg))
+        except Exception as e:
+            # catch-all para que un batch malo no mate al proceso
+            self._log.exception("Unhandled error in process_message: %s", e)
 
     def _handle_data(self, batch: DataBatch) -> None:
-        m = batch.metadata
-        table = m.table_name
+        table = table_name_of(batch)
+        queries = queries_of(batch)
+        rows = rows_of(batch)
+        mask = int(getattr(batch, "reserved_u16", 0))
+        bn = int(getattr(batch, "batch_number", 0))
 
-        if int(m.reserved_u16) == 0:
+        if not table:
+            self._log.warning("Batch sin table_id válido. bn=%s", bn)
+            return
+
+        self._log.debug(
+            "recv DataBatch table=%s queries=%s rows=%d mask=%s shard=%s/%s bn=%s",
+            table,
+            queries,
+            len(rows),
+            bin(mask),
+            getattr(batch, "shard_num", 0),
+            getattr(batch, "total_shards", 0),
+            bn,
+        )
+        if self._log.isEnabledFor(logging.DEBUG) and rows:
+            sample = rows[0]
+            if isinstance(sample, dict):
+                sk = list(sample.keys())[:8]
+            else:
+                sk = [k for k in dir(sample) if not k.startswith("_")][:8]
+            self._log.debug("sample_row_keys=%s", sk)
+
+        # contador de pendientes (sólo cuando viene con mask==0)
+        if mask == 0:
             self._pending_batches[table] += 1
+            self._log.debug("pending++ %s -> %d", table, self._pending_batches[table])
 
-        next_step = first_zero_bit(m.reserved_u16, m.total_filter_steps)
+        # decidir próximo paso de filtros
+        total_steps = self._pol.total_steps(table, queries)
+        next_step = first_zero_bit(mask, total_steps)
         if next_step is not None and self._pol.steps_remaining(
-            table, m.queries, steps_done=next_step
+            table, queries, steps_done=next_step
         ):
-            m.reserved_u16 = set_bit(m.reserved_u16, next_step)
-            self._p.send_to_filters_pool(batch)
+            batch.reserved_u16 = set_bit(mask, next_step)
+            self._log.debug(
+                "→ filters step=%d table=%s new_mask=%s",
+                next_step,
+                table,
+                bin(batch.reserved_u16),
+            )
+            try:
+                self._p.send_to_filters_pool(batch)
+            except Exception as e:
+                self._log.error("send_to_filters_pool failed: %s", e)
             return
 
-        dup_count = int(self._pol.get_duplication_count(m.queries) or 1)
+        # fan-out por queries (si corresponde)
+        dup_count = int(self._pol.get_duplication_count(queries) or 1)
         if dup_count > 1:
+            self._log.debug(
+                "Fan-out x%d table=%s queries=%s", dup_count, table, queries
+            )
             for i in range(dup_count):
-                new_queries = self._pol.get_new_batch_queries(
-                    table, m.queries, copy_number=i
-                ) or list(m.queries)
-                b = copy.deepcopy(batch)
-                b.metadata.copy_info = m.copy_info + [
-                    CopyInfo(index=i, total=dup_count)
-                ]
-                b.metadata.queries = new_queries
-                self._p.requeue_to_router(b)
+                try:
+                    new_queries = self._pol.get_new_batch_queries(
+                        table, queries, copy_number=i
+                    ) or list(queries)
+                    b = copy.deepcopy(batch)
+                    b.query_ids = list(new_queries)
+                    self._p.requeue_to_router(b)
+                except Exception as e:
+                    self._log.error("requeue_to_router failed (copy=%d): %s", i, e)
             return
 
-        self._send_sharded_to_aggregators(batch)
+        # Sharding hacia aggregators
+        try:
+            self._send_sharded_to_aggregators(batch, table, queries)
+        except Exception as e:
+            self._log.error("send_sharded failed: %s", e)
+
+        # decrementa pendientes y tal vez flush EOF
         self._pending_batches[table] = max(0, self._pending_batches[table] - 1)
+        self._log.debug("pending-- %s -> %d", table, self._pending_batches[table])
         self._maybe_flush_pending_eof(table)
 
-    def _send_sharded_to_aggregators(self, batch: DataBatch) -> None:
-        m = batch.metadata
-        table = m.table_name
-        rows = getattr(batch.payload, "rows", None)
+    def _send_sharded_to_aggregators(
+        self, batch: DataBatch, table: str, queries: List[int]
+    ) -> None:
+        rows = rows_of(batch)
         num_parts = max(1, int(self._cfg.num_aggregator_partitions(table)))
+        self._log.debug(
+            "shard plan table=%s parts=%d rows=%d", table, num_parts, len(rows)
+        )
 
-        if not isinstance(rows, list):
-            pid = self._pick_part_for_empty_payload(table, m)
+        if not isinstance(rows, list) or len(rows) == 0:
+            pid = self._pick_part_for_empty_payload(
+                table, queries, int(getattr(batch, "reserved_u16", 0))
+            )
+            self._log.debug("→ aggregator (no-rows) part=%d table=%s", pid, table)
             self._p.send_to_aggregator_partition(pid, batch)
             return
 
-        by_part = _group_rows_by_partition(table, m.queries, rows, num_parts)
+        by_part = _group_rows_by_partition(table, queries, rows, num_parts)
         for pid, subrows in by_part.items():
             if not subrows:
                 continue
             b = copy.deepcopy(batch)
-            if hasattr(b.payload, "rows"):
-                b.payload.rows = subrows
-            elif isinstance(b.payload, dict):
-                b.payload = dict(b.payload)
-                b.payload["rows"] = subrows
-            else:
-                b.payload = type("RowsPayload", (), {"rows": subrows})()
+            inner = getattr(b, "batch_msg", None)
+            if inner is not None and hasattr(inner, "rows"):
+                inner.rows = subrows
+            self._log.debug(
+                "→ aggregator part=%d table=%s rows=%d", int(pid), table, len(subrows)
+            )
             self._p.send_to_aggregator_partition(int(pid), b)
 
-    def _pick_part_for_empty_payload(self, table: str, m: Metadata) -> int:
+    def _pick_part_for_empty_payload(
+        self, table: str, queries: List[int], reserved_u16: int
+    ) -> int:
         n = max(1, int(self._cfg.num_aggregator_partitions(table)))
         seed = hashlib.blake2b(
-            f"{table}|{tuple(sorted(m.queries))}|{m.reserved_u16}".encode(),
+            f"{table}|{tuple(sorted(queries))}|{reserved_u16}".encode(),
             digest_size=8,
         ).digest()
         return int.from_bytes(seed, "little") % n
 
     def _handle_table_eof(self, eof: EOFMessage) -> None:
         table = eof.table_type
+        self._log.info("TABLE_EOF received: table=%s", table)
         self._pending_eof[table] = eof
         self._maybe_flush_pending_eof(table)
 
@@ -245,10 +341,25 @@ class FilterRouter:
         pending = self._pending_batches.get(table, 0)
         eof = self._pending_eof.get(table)
         if eof is None or pending > 0:
+            if eof is not None:
+                self._log.debug(
+                    "TABLE_EOF deferred: table=%s pending=%d", table, pending
+                )
             return
         total_parts = max(1, int(self._cfg.num_aggregator_partitions(table)))
+        self._log.info(
+            "TABLE_EOF -> aggregators: table=%s parts=%d", table, total_parts
+        )
         for part in range(total_parts):
-            self._p.send_table_eof_to_aggregator_partition(table, part)
+            try:
+                self._p.send_table_eof_to_aggregator_partition(table, part)
+            except Exception as e:
+                self._log.error(
+                    "send_table_eof_to_aggregator_partition failed part=%d table=%s: %s",
+                    part,
+                    table,
+                    e,
+                )
         self._pending_eof.pop(table, None)
         self._pending_batches.pop(table, None)
 
@@ -262,6 +373,7 @@ class ExchangeBusProducer:
         exchange_fmt: str = "ex.{table}",
         rk_fmt: str = "agg.{table}.{pid:02d}",
     ):
+        self._log = logging.getLogger("filter-router.bus")
         self._host = host
         self._filters_pub = MessageMiddlewareQueue(host, filters_pool_queue)
         self._router_pub = MessageMiddlewareQueue(host, router_input_queue)
@@ -275,32 +387,65 @@ class ExchangeBusProducer:
         key = (ex, rk)
         pub = self._pub_cache.get(key)
         if pub is None:
+            self._log.debug(
+                "create publisher exchange=%s rk=%s host=%s", ex, rk, self._host
+            )
             pub = MessageMiddlewareExchange(self._host, ex, [rk])
             self._pub_cache[key] = pub
         return pub
 
     def send_to_filters_pool(self, batch: DataBatch) -> None:
-        self._filters_pub.send(batch.to_bytes())
+        try:
+            self._log.debug("publish → filters_pool")
+            batch.batch_bytes = batch.batch_msg.to_bytes()
+            self._filters_pub.send(batch.to_bytes())
+        except Exception as e:
+            self._log.error("filters_pool send failed: %s", e)
 
     def send_to_aggregator_partition(self, partition_id: int, batch: DataBatch) -> None:
-        table = batch.metadata.table_name
-        self._get_pub(table, partition_id).send(batch.to_bytes())
+        table = table_name_of(batch)
+        try:
+            self._log.debug(
+                "publish → aggregator table=%s part=%d", table, int(partition_id)
+            )
+            batch.batch_bytes = batch.batch_msg.to_bytes()
+            self._get_pub(table, partition_id).send(batch.to_bytes())
+        except Exception as e:
+            self._log.error(
+                "aggregator send failed table=%s part=%d: %s",
+                table,
+                int(partition_id),
+                e,
+            )
 
     def send_table_eof_to_aggregator_partition(
         self, table_name: str, partition_id: int
     ) -> None:
-        raw = table_eof_to_bytes(table_name)
-        self._get_pub(table_name, partition_id).send(raw)
+        try:
+            raw = table_eof_to_bytes(table_name)
+            self._log.debug(
+                "publish TABLE_EOF → aggregator table=%s part=%d",
+                table_name,
+                int(partition_id),
+            )
+            self._get_pub(table_name, partition_id).send(raw)
+        except Exception as e:
+            self._log.error(
+                "aggregator TABLE_EOF send failed table=%s part=%d: %s",
+                table_name,
+                int(partition_id),
+                e,
+            )
 
     def requeue_to_router(self, batch: DataBatch) -> None:
-        self._router_pub.send(batch.to_bytes())
+        try:
+            self._log.debug("requeue → router_input")
+            self._router_pub.send(batch.to_bytes())
+        except Exception as e:
+            self._log.error("router_input send failed: %s", e)
 
 
 class RouterServer:
-    """
-    Levanta el consumidor del router y despacha al FilterRouter.
-    """
-
     def __init__(
         self,
         host: str,
@@ -309,8 +454,6 @@ class RouterServer:
         policy: QueryPolicyResolver,
         table_cfg: TableConfig,
     ):
-        self._host = host
-        self._in_q = router_input_queue
         self._mw_in = MessageMiddlewareQueue(host, router_input_queue)
         self._router = FilterRouter(
             producer=producer, policy=policy, table_cfg=table_cfg
@@ -318,30 +461,34 @@ class RouterServer:
         self._log = logging.getLogger("filter-router-server")
 
     def run(self) -> None:
+        self._log.info("RouterServer starting consume")
+
         def _cb(body: bytes):
-            if len(body) < 1:
-                self._log.error("Received empty message")
-                return
+            try:
+                if len(body) < 1:
+                    self._log.error("Received empty message")
+                    return
 
-            opcode = body[0]
-
-            if opcode == Opcodes.EOF:
-                try:
+                opcode = body[0]
+                if opcode == Opcodes.EOF:
                     eof_msg = EOFMessage()
                     eof_msg.read_from(body[5:])
+                    self._log.debug("recv EOF table=%s", eof_msg.table_type)
                     self._router.process_message(eof_msg)
-                except Exception as e:
-                    self._log.error(f"Failed to parse EOF message: {e}")
-            elif opcode == Opcodes.DATA_BATCH:
-                try:
+                elif opcode == Opcodes.DATA_BATCH:
                     db = DataBatch.deserialize_from_bytes(body)
                     self._router.process_message(db)
-                except Exception as e:
-                    self._log.error(f"Failed to parse DataBatch message: {e}")
-            else:
-                self._log.warning(f"Unwanted message opcode: {opcode}")
+                else:
+                    self._log.warning(f"Unwanted message opcode: {opcode}")
+            except Exception as e:
+                # no romper el hilo de consumo
+                self._log.exception("Error in router callback: %s", e)
 
-        self._mw_in.start_consuming(_cb)
+        try:
+            self._mw_in.start_consuming(_cb)
+            self._log.info("RouterServer consuming (thread started)")
+        except Exception as e:
+            self._log.exception("start_consuming failed: %s", e)
 
     def stop(self) -> None:
         try:
