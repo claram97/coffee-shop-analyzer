@@ -4,7 +4,7 @@ import logging
 import os
 from configparser import ConfigParser
 
-from app.net import Server
+from app.net import Orchestrator
 
 
 def initialize_config():
@@ -36,6 +36,7 @@ def initialize_config():
             "LOGGING_LEVEL", config["DEFAULT"]["LOGGING_LEVEL"]
         )
         config_params["clients_amount"] = os.getenv("CLIENTS_AMOUNT")
+        
     except KeyError as e:
         raise KeyError("Key was not found. Error: {} .Aborting server".format(e))
     except ValueError as e:
@@ -62,8 +63,9 @@ def main():
         f"listen_backlog: {listen_backlog} | logging_level: {logging_level}"
     )
 
-    # Initialize server and start server loop
-    server = Server(port, listen_backlog)
+    # Initialize server
+    logging.info("action: server_init | architecture: modular")
+    server = Orchestrator(port, listen_backlog)
     server.run()
 
 
