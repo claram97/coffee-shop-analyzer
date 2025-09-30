@@ -2,8 +2,10 @@ from __future__ import annotations
 
 import copy
 import hashlib
+import logging
 from typing import Any, Callable, Dict, List, Optional, Set, Tuple
 
+from app_config.config_loader import Config
 from middleware.middleware_client import (
     MessageMiddleware,
     MessageMiddlewareExchange,
@@ -20,6 +22,10 @@ NAME_TO_ID = {
     "menu_items": Opcodes.NEW_MENU_ITEMS,
     "stores": Opcodes.NEW_STORES,
 }
+ID_TO_NAME = {v: k for (k, v) in NAME_TO_ID.items()}
+LIGHT_TABLES = {"menu_items", "stores"}
+
+log = logging.getLogger("joiner-router")
 
 
 class TableRouteCfg:
@@ -36,60 +42,24 @@ class TableRouteCfg:
         self.key_pattern = key_pattern
 
 
-ROUTE_CFG: Dict[int, TableRouteCfg] = {
-    Opcodes.NEW_TRANSACTION_ITEMS: TableRouteCfg(
-        "jx.transaction_items",
-        agg_shards=16,
-        joiner_shards=32,
-        key_pattern="ti.shard.{shard:02d}",
-    ),
-    Opcodes.NEW_TRANSACTION: TableRouteCfg(
-        "jx.transactions",
-        agg_shards=16,
-        joiner_shards=32,
-        key_pattern="tx.shard.{shard:02d}",
-    ),
-    Opcodes.NEW_USERS: TableRouteCfg(
-        "jx.users",
-        agg_shards=16,
-        joiner_shards=32,
-        key_pattern="users.shard.{shard:02d}",
-    ),
-    Opcodes.NEW_MENU_ITEMS: TableRouteCfg(
-        "jx.menu_items",
-        agg_shards=1,
-        joiner_shards=32,
-        key_pattern="mi.broadcast.{shard:02d}",
-    ),
-    Opcodes.NEW_STORES: TableRouteCfg(
-        "jx.stores",
-        agg_shards=1,
-        joiner_shards=32,
-        key_pattern="stores.broadcast.{shard:02d}",
-    ),
-}
-
-
 def _hash_to_shard(s: str, num_shards: int) -> int:
     h = hashlib.blake2b(s.encode("utf-8"), digest_size=4).digest()
     return int.from_bytes(h, "little") % num_shards
 
 
-def _shard_key_for_row(
-    table_id: int, row: Dict[str, Any], queries: List[int]
-) -> Optional[str]:
+def _shard_key_for_row(table_id: int, row, queries: List[int]) -> Optional[str]:
     q = set(queries)
 
     if 4 in q:
-        key = row.get("user_id")
+        key = getattr(row, "user_id", None)
         return str(key) if key is not None else None
 
     if 2 in q and table_id == Opcodes.NEW_TRANSACTION_ITEMS:
-        key = row.get("transaction_id")
+        key = getattr(row, "transaction_id", None)
         return str(key) if key is not None else None
 
     if 3 in q and table_id == Opcodes.NEW_TRANSACTION:
-        key = row.get("transaction_id")
+        key = getattr(row, "transaction_id", None)
         return str(key) if key is not None else None
 
     return None
@@ -120,23 +90,22 @@ class ExchangePublisherPool:
 
 class JoinerRouter:
     """
-    - Recibe DataBatch y TABLE_EOF desde Aggregators (cola).
+    - Recibe DataBatch y TABLE_EOF (desde Aggregators por cola).
     - DataBatch: broadcast (livianas) o sharding por clave (Q2/Q3/Q4) y publish por shard.
-    - TABLE_EOF: cuenta por tabla (equivale a EOF de una partición de aggregator).
-      Cuando recibió 'agg_shards' EOFs para la tabla -> re-emite TABLE_EOF a todos los shards de joiners.
+    - TABLE_EOF: cuenta por tabla como si vinieran de particiones de aggregator; al completar `agg_shards`
+      re-emite TABLE_EOF a TODOS los `joiner_shards`.
     """
 
     def __init__(
         self,
         in_mw: "MessageMiddleware",
         publisher_pool: ExchangePublisherPool,
-        route_cfg: Dict[int, TableRouteCfg] = ROUTE_CFG,
+        route_cfg: Dict[int, TableRouteCfg],
     ):
         self._in = in_mw
         self._pool = publisher_pool
         self._cfg = route_cfg
         self._pending_eofs: Dict[int, Set[int]] = {}
-
         self._part_counter: Dict[int, int] = {}
 
     def run(self):
@@ -160,14 +129,10 @@ class JoinerRouter:
 
     @staticmethod
     def _eof_table_id(eof: EOFMessage) -> Optional[int]:
-        """
-        Convierte el campo del EOF a table_id numérico para indexar ROUTE_CFG.
-        Acepta nombres ("transactions") o ids en string ("0").
-        """
-        val = getattr(eof, "table_id", None)
+        val = getattr(eof, "table_type", None)
         if val is None:
             return None
-        return NAME_TO_ID.get(val.lower())
+        return NAME_TO_ID.get(str(val).lower())
 
     def _on_raw(self, raw: bytes):
         eof = self._try_parse_eof(raw)
@@ -176,12 +141,10 @@ class JoinerRouter:
             return
 
         db = self._try_parse_databatch(raw)
-        if db is None:
+        if db is None or not db.table_ids:
             return
 
-        if not db.table_ids:
-            return
-        table_id = int(db.table_ids[0])
+        table_id = int(getattr(db.batch_msg, "opcode", db.table_ids[0]))
         queries: List[int] = list(getattr(db, "query_ids", []) or [])
         cfg = self._cfg.get(table_id)
         if cfg is None:
@@ -196,12 +159,12 @@ class JoinerRouter:
             self._publish(cfg, shard=0, raw=raw)
             return
 
-        rows: List[Dict[str, Any]] = inner.rows or []
+        rows = inner.rows or []
         if not rows:
             self._publish(cfg, shard=0, raw=raw)
             return
 
-        buckets: Dict[int, List[Dict[str, Any]]] = {}
+        buckets: Dict[int, List[Any]] = {}
         for r in rows:
             k = _shard_key_for_row(table_id, r, queries)
             shard = 0 if k is None else _hash_to_shard(k, cfg.joiner_shards)
@@ -213,6 +176,7 @@ class JoinerRouter:
             db_sh = copy.deepcopy(db)
             if getattr(db_sh, "batch_msg", None) and hasattr(db_sh.batch_msg, "rows"):
                 db_sh.batch_msg.rows = shard_rows
+            db_sh.batch_bytes = db_sh.batch_msg.to_bytes()
             raw_sh = db_sh.serialize_to_bytes()
             self._publish(cfg, shard, raw_sh)
 
@@ -220,7 +184,6 @@ class JoinerRouter:
         table_id = self._eof_table_id(eof)
         if table_id is None:
             return
-
         cfg = self._cfg.get(table_id)
         if cfg is None:
             return
@@ -252,12 +215,59 @@ class JoinerRouter:
             pub.send(raw)
 
 
-def rabbit_exchange_factory(
-    exchange_name: str, routing_key: str
-) -> "MessageMiddleware":
-    return MessageMiddlewareExchange(
-        host="localhost", exchange_name=exchange_name, route_keys=[routing_key]
-    )
+def build_route_cfg_from_config(cfg: "Config") -> Dict[int, TableRouteCfg]:
+    """
+    Construye el mapa {table_id: TableRouteCfg} usando:
+      - names.joiner_router_exchange_fmt (ej: "jx.{table}")
+      - names.joiner_router_rk_fmt      (ej: "join.{table}.shard.{shard:02d}")
+      - agg_shards[table]               (particiones de salida del aggregator)
+      - joiner_shards[table]            (shards de joiners por tabla)
+      - workers.joiners como default para livianas si no hay entrada en joiner_shards
+    """
+    ex_fmt = cfg.names.joiner_router_exchange_fmt
+    rk_fmt = cfg.names.joiner_router_rk_fmt
+
+    def _ex(table: str) -> str:
+        return ex_fmt.format(table=table)
+
+    def _rk_pattern(table: str) -> str:
+        return rk_fmt.format(table=table, shard="{shard:02d}")
+
+    route: Dict[int, TableRouteCfg] = {}
+
+    for tname, tid in NAME_TO_ID.items():
+        agg_parts = cfg.agg_partitions(tname)
+        if tname in LIGHT_TABLES:
+            j_parts = cfg.joiner_partitions(tname)
+            if j_parts <= 1:
+                j_parts = max(1, int(cfg.workers.joiners))
+        else:
+            j_parts = cfg.joiner_partitions(tname)
+
+        route[tid] = TableRouteCfg(
+            exchange_name=_ex(tname),
+            agg_shards=agg_parts,
+            joiner_shards=j_parts,
+            key_pattern=_rk_pattern(tname),
+        )
+
+    return route
+
+
+def build_publisher_pool_from_config(cfg: "Config") -> ExchangePublisherPool:
+    def factory(exchange_name: str, routing_key: str) -> "MessageMiddleware":
+        return MessageMiddlewareExchange(
+            host=cfg.broker.host, exchange_name=exchange_name, route_keys=[routing_key]
+        )
+
+    return ExchangePublisherPool(factory)
+
+
+def build_joiner_router_from_config(cfg: "Config", in_queue: str) -> JoinerRouter:
+    in_mw = MessageMiddlewareQueue(cfg.broker.host, in_queue)
+    pool = build_publisher_pool_from_config(cfg)
+    route_cfg = build_route_cfg_from_config(cfg)
+    return JoinerRouter(in_mw=in_mw, publisher_pool=pool, route_cfg=route_cfg)
 
 
 class JoinerRouterServer:
@@ -268,9 +278,18 @@ class JoinerRouterServer:
     def __init__(self, host: str, in_queue: str, router: JoinerRouter):
         self._mw_in = MessageMiddlewareQueue(host, in_queue)
         self._router = router
+        self._log = logging.getLogger("joiner-router-server")
 
     def run(self):
+        self._log.info(
+            "JoinerRouterServer consuming from '%s'",
+            getattr(self._mw_in, "_queue", "?"),
+        )
+
         def _cb(body: bytes):
-            self._router._on_raw(body)
+            try:
+                self._router._on_raw(body)
+            except Exception as e:
+                self._log.exception("Error in joiner-router callback: %s", e)
 
         self._mw_in.start_consuming(_cb)

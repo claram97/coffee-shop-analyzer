@@ -9,7 +9,7 @@ import sys
 import threading
 from typing import Dict, Tuple
 
-from config_loader import Config
+from config.config_loader import Config
 
 from joiner.router import ExchangePublisherPool, JoinerRouter, TableRouteCfg
 from middleware.middleware_client import (
