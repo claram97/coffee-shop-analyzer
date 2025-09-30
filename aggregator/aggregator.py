@@ -9,10 +9,11 @@ from enum import Enum
 import logging
 from collections import defaultdict
 from datetime import datetime
+        
 # from middleware.middleware_client import MessageMiddlewareExchange, MessageMiddlewareQueue
 from protocol.databatch import DataBatch
 from protocol.constants import Opcodes
-from protocol.messages import NewTransactionItems, NewTransactions, NewUsers, NewMenuItems, NewStores
+from protocol.messages import NewTransactionItems, NewTransactions, NewUsers, NewMenuItems, NewStores, EOFMessage
 from protocol.entities import RawTransaction, RawMenuItems, RawStore, RawTransactionItem, RawUser
 
 # Constants
@@ -112,53 +113,78 @@ class Aggregator:
     #         logging.error(f"Failed to decode store message")
     #         return False
     
-    # def _handle_transaction(self, message: bytes) -> bool:
+    # def _handle_transaction(self, message: bytes):
     #     """Process incoming transaction messages."""
     #     try:
     #         logging.info(f"Received transaction")
-    #         transaction = DataBatch.deserialize_from_bytes(message)
-    #         # Esta lista tiene una sola posición, así que tomamos el primer elemento
-    #         query_id = transaction.query_ids[0]
-    #         table_id = transaction.table_ids[0]
-    #         logging.info(f"Transaction belongs to table {table_id} and query {query_id}")
-    #         if query_id == QueryId.FIRST_QUERY:
-    #             logging.info("First query transaction received.")
-    #         elif query_id == QueryId.SECOND_QUERY:
-    #             logging.info("Second query transaction received.")
-    #         elif query_id == QueryId.THIRD_QUERY:
-    #             logging.info("Third query transaction received.")
-    #         elif query_id == QueryId.FOURTH_QUERY:
-    #             logging.info("Fourth query transaction received.")
-            
-    #         self.joiner_queue.send(message)
-    #         return True
+    #         transactions_databatch = DataBatch.deserialize_from_bytes(message)
+    #         transactions = transactions_databatch.batch_msg.rows
+    #         query_id = transactions_databatch.query_ids[0]
+    #         table_id = transactions_databatch.table_ids[0]
+    #         logging.debug(f"Transaction belongs to table {table_id} and query {query_id}")
+
+    #         if table_id == Opcodes.NEW_TRANSACTION:
+    #             if query_id == QueryId.FIRST_QUERY or query_id == QueryId.EOF:
+    #                 self.joiner_queue.send(message)
+    #             elif query_id == QueryId.THIRD_QUERY:
+    #                 self.process_query_3(transactions)
+    #                 ## Falta devolver el mensaje en formato data batch para poder volver a mandarlo
+    #                 self.joiner_queue.send(message)
+    #             elif query_id == QueryId.FOURTH_QUERY:
+    #                 self.process_query_4_transactions(transactions)
+    #                 ## Falta devolver el mensaje en formato data batch para poder volver a mandarlo
+    #                 self.joiner_queue.send(message)
+    #             else:
+    #                 logging.error(f"Transaction message with unexpected query_id {query_id}")
+    #         else:
+    #             logging.error(f"Transaction message with unexpected table_id {table_id}")        
     #     except:
-    #         logging.error(f"Failed to decode transaction message")
-    #         return False
+    #         logging.error(f"Failed to decode transaction item message")
     
-    # def _handle_transaction_item(self, message: bytes) -> bool:
+    # def _handle_transaction_item(self, message: bytes):
     #     """Process incoming transaction item messages."""
     #     try:
     #         logging.info(f"Received transaction item")
     #         transaction_items_databatch = DataBatch.deserialize_from_bytes(message)
-    #         # transaction_items_databatch.
-    #         self.joiner_queue.send(message)
-    #         return True
+    #         transaction_items = transaction_items_databatch.batch_msg.rows
+    #         query_id = transaction_items_databatch.query_ids[0]
+    #         table_id = transaction_items_databatch.table_ids[0]
+            
+    #         if table_id == Opcodes.NEW_TRANSACTION_ITEMS and query_id == QueryId.SECOND_QUERY:
+    #             logging.debug(f"Transaction belongs to table {table_id} and query {query_id}")
+    #             self.process_query_2(transaction_items)
+    #             ## Falta devolver el mensaje en formato data batch para poder volver a mandarlo
+    #             self.joiner_queue.send(message)
+    #         elif table_id == Opcodes.EOF:
+    #             logging.debug(f"EOF message received for transaction items.")
+    #             self.joiner_queue.send(message)
+    #         else:
+    #             logging.error(f"Transaction item message with unexpected table_id {table_id} or query_id {query_id}")            
     #     except:
     #         logging.error(f"Failed to decode transaction item message")
-    #         return False
     
-    # def _handle_user(self, message: bytes) -> bool:
+    # def _handle_user(self, message: bytes):
     #     """Process incoming user messages."""
     #     try:
     #         logging.info(f"Received user")
-    #         user = DataBatch.deserialize_from_bytes(message)
+    #         user_databatch = DataBatch.deserialize_from_bytes(message)
+    #         users = user_databatch.batch_msg.rows
+    #         query_id = user_databatch.query_ids[0]
+    #         table_id = user_databatch.table_ids[0]
             
-    #         self.joiner_queue.send(message)
-    #         return True
+    #         if table_id == Opcodes.NEW_USERS and query_id == QueryId.FOURTH_QUERY:
+    #             logging.debug(f"User belongs to table {table_id} and query {query_id}")
+    #             self.process_query_4_users(users)
+    #             ## Falta devolver el mensaje en formato data batch para poder volver a mandarlo
+    #             self.joiner_queue.send(message)
+    #         elif table_id == Opcodes.EOF:
+    #             logging.debug(f"EOF message received for user.")
+    #             self.joiner_queue.send(message)
+    #         else:
+    #             logging.error(f"User message with unexpected table_id {table_id} or query_id {query_id}")
     #     except:
     #         logging.error(f"Failed to decode user message")
-    #         return False
+    
     
     def run(self):
         """Start the aggregator server."""
@@ -166,23 +192,27 @@ class Aggregator:
         logging.debug("Started aggregator server")
 
         # self.process_query_1([])
-        # self.process_query_2([])
-        # self.process_query_3([])
-        # self.process_query_4([], [])
         
-        transactions_items_databatch = self.create_mock_transaction_items_databatch()
-        logging.info(transactions_items_databatch.query_ids)
-        logging.info(transactions_items_databatch.batch_bytes)
-        logging.info(transactions_items_databatch.batch_msg)
-        logging.info(transactions_items_databatch.batch_number)
-        logging.info(transactions_items_databatch.meta)
-        logging.info(transactions_items_databatch.opcode)
-        logging.info(transactions_items_databatch.reserved_u16)
-        logging.info(transactions_items_databatch.total_shards)
-        logging.info(transactions_items_databatch.table_ids)
-        logging.info(transactions_items_databatch.shard_num)
-        logging.info(transactions_items_databatch.total_shards)
+        # logging.debug('Processing query 2')
+        # transactions_items_databatch = self.create_mock_transaction_items_databatch()
+        # transaction_items = self.obtain_table_message(transactions_items_databatch)
+        # self.process_query_2(transaction_items)
         
+        # logging.debug('Processing query 3')
+        # transactions_databatch = self.create_mock_transactions_databatch()
+        # transactions = self.obtain_table_message(transactions_databatch)
+        # self.process_query_3(transactions)
+
+        # Query 4 parte 1: transactions
+        # transactions_databatch = self.create_mock_transactions_databatch()
+        # transactions = self.obtain_table_message(transactions_databatch)
+        # self.process_query_4_transactions(transactions)
+        
+        # # Query 4 parte 1: users
+        # users_databatch = self.create_mock_users_databatch()
+        # users = self.obtain_table_message(users_databatch)
+        # self.process_query_4_users(users)
+
         self.running = False
     
     # def process_query_1(self, transactions: list[RawTransaction]):
@@ -193,14 +223,8 @@ class Aggregator:
     #     logging.debug('')
     
     def process_query_2(self, transaction_items: list[RawTransactionItem]):
-        logging.debug('Processing query 2')
-        transactions_items_databatch = self.create_mock_transaction_items_databatch()
-        transaction_items = self.obtain_table_message(transactions_items_databatch)
-        
         # Agregar year(created_at), month(created_at), item_id con agregaciones
-        from collections import defaultdict
-        from datetime import datetime
-        
+
         # Diccionario para agrupar: (year, month, item_id) -> {total_quantity, total_revenue}
         aggregated_data = defaultdict(lambda: {'total_quantity': 0.0, 'total_revenue': 0.0})
         
@@ -229,11 +253,7 @@ class Aggregator:
         logging.debug(f'Total groups: {len(aggregated_data)}')
         logging.debug('')
     
-    def process_query_3(self, transactions: list[RawTransaction]):
-        logging.debug('Processing query 3')
-        transactions_databatch = self.create_mock_transactions_databatch()
-        transactions = self.obtain_table_message(transactions_databatch)
-        
+    def process_query_3(self, transactions: list[RawTransaction]):        
         # Query 3: Agregar por (store_id, year, semester) con condiciones específicas
         aggregated_data = defaultdict(lambda: {
             'transaction_count': 0,
@@ -291,12 +311,9 @@ class Aggregator:
         logging.debug('')
         
 
-    def process_query_4(self, transactions: list[RawTransaction], users: list[RawUser]):
-        logging.debug('Processing query 4')
-        
-        # TABLA 1: Procesar transacciones
-        transactions_databatch = self.create_mock_transactions_databatch()
-        transactions = self.obtain_table_message(transactions_databatch)
+    def process_query_4_transactions(self, transactions: list[RawTransaction]):
+        """Process transactions for Query 4 - TABLE 1: Transaction counts by store and user."""
+        logging.info('Processing query 4 - Transactions')
         
         # Filtrar transacciones por año 2024-2025 y agrupar por (store_id, user_id)
         transaction_counts = defaultdict(int)
@@ -318,13 +335,10 @@ class Aggregator:
             key = (transaction.store_id, transaction.user_id)
             transaction_counts[key] += 1
         
-        # TABLA 2: Procesar usuarios (sin filtros, solo datos base)
-        users_databatch = self.create_mock_users_databatch()
-        users = self.obtain_table_message(users_databatch)
-        
         # Log de resultados - TABLA 1: Transacciones agregadas
         logging.debug(f'Query 4 - TABLE 1: Transaction counts by store and user ({VALID_YEARS[0]}-{VALID_YEARS[1]}):')
-        logging.debug(f'Filtered {filtered_count}/{total_count} transactions (year ∈ {{{VALID_YEARS[0]},{VALID_YEARS[1]}}})')
+        valid_years_str = f"{{{VALID_YEARS[0]},{VALID_YEARS[1]}}}"
+        logging.debug(f'Filtered {filtered_count}/{total_count} transactions (year ∈ {valid_years_str})')
         logging.debug('Store_ID | User_ID | Total_Purchases')
         logging.debug('-' * 40)
         
@@ -332,7 +346,11 @@ class Aggregator:
             logging.debug(f'{store_id:8s} | {user_id:7s} | {total_purchases:15d}')
         
         logging.debug(f'Total customer-store combinations: {len(transaction_counts)}')
-        logging.debug('')
+        logging.info('')
+
+    def process_query_4_users(self, users: list[RawUser]):
+        """Process users for Query 4 - TABLE 2: Users data."""
+        logging.info('Processing query 4 - Users')
         
         # Log de resultados - TABLA 2: Usuarios
         logging.debug('Query 4 - TABLE 2: Users data:')
@@ -343,7 +361,7 @@ class Aggregator:
             logging.debug(f'{user.user_id:7s} | {user.birthdate}')
         
         logging.debug(f'Total users: {len(users)}')
-        logging.debug('')
+        logging.info('')
      
     def obtain_table_message(self, databatch: DataBatch):
         """Obtain the table message from a DataBatch and log its contents."""
@@ -609,4 +627,30 @@ class Aggregator:
             
         except Exception as e:
             logging.error(f"Error creating mock DataBatch: {e}")
+            return DataBatch()
+    
+    def create_mock_eof_databatch(self, table_type: str = "transactions") -> DataBatch:
+        """Create a mock EOF DataBatch for testing."""
+        try:
+            # Crear mensaje EOF
+            eof_msg = EOFMessage()
+            eof_msg.create_eof_message(
+                batch_number=1, 
+                table_type=table_type
+            )
+            
+            # Crear DataBatch
+            databatch = DataBatch()
+            databatch.table_ids = [Opcodes.EOF]
+            databatch.query_ids = [QueryId.FIRST_QUERY.value]
+            databatch.shard_num = int(self.id)
+            databatch.total_shards = 1
+            databatch.batch_number = 1
+            databatch.batch_msg = eof_msg
+            
+            logging.debug(f"Created mock EOF DataBatch for table_type: {table_type}")
+            return databatch
+            
+        except Exception as e:
+            logging.error(f"Error creating mock EOF DataBatch: {e}")
             return DataBatch()
