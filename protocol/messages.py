@@ -4,7 +4,8 @@ Protocol message classes for handling different types of communication.
 
 import inspect
 import socket
-from typing import Tuple
+import struct
+from typing import Any, Iterator, Tuple
 
 from .constants import Opcodes, ProtocolError
 from .entities import (
@@ -41,6 +42,83 @@ class TableMessage:
         self.batch_status = 0
         self._row_factory = row_factory
 
+    @staticmethod
+    def _to_kv_iter(row: Any) -> Iterator[Tuple[str, str]]:
+        """
+        Convierte una fila (dict o objeto) en pares (key:str, value:str).
+        - dict: usa sus items
+        - objeto: intenta vars(obj); filtra attrs privados/callables
+        """
+        if isinstance(row, dict):
+            for k, v in row.items():
+                yield str(k), "" if v is None else str(v)
+            return
+
+        # objeto "row_factory"
+        try:
+            attrs = vars(row)
+        except TypeError:
+            # Fallback: nada serializable
+            return
+
+        for k, v in attrs.items():
+            if k.startswith("_"):
+                continue
+            if callable(v):
+                continue
+            yield str(k), "" if v is None else str(v)
+
+    @staticmethod
+    def _pack_string(s: str) -> bytes:
+        b = s.encode("utf-8")
+        return struct.pack("<I", len(b)) + b
+
+    def _compute_amount_if_needed(self) -> int:
+        """
+        Si amount no refleja len(rows), lo sincroniza.
+        No hace 'strict check' porque read_from ya lo popula;
+        pero si vos modificaste rows luego, esto mantiene coherencia.
+        """
+        try:
+            n = len(self.rows or [])
+        except Exception:
+            n = 0
+        self.amount = n
+        return n
+
+    # === serialización simétrica a read_from ===
+    def to_bytes(self) -> bytes:
+        """
+        Serializa el mensaje en el framing:
+        [opcode:u8][length:i32][body]
+
+        body:
+          [nRows:i32][batchNumber:i64][status:u8]
+          repeated nRows:
+            [n_pairs:i32]  (cantidad de pares key/value)
+            n_pairs * ([key_len:i32][key][val_len:i32][val])
+        """
+        n_rows = self._compute_amount_if_needed()
+        batch_number = int(getattr(self, "batch_number", 0) or 0)
+        batch_status = int(getattr(self, "batch_status", 0) or 0)
+
+        parts = []
+        parts.append(struct.pack("<I", n_rows))  # nRows
+        parts.append(struct.pack("<Q", batch_number))  # batchNumber (u64 little-endian)
+        parts.append(struct.pack("<B", batch_status))  # status (u8)
+
+        rows_iterable = self.rows or []
+        for row in rows_iterable:
+            kv = list(self._to_kv_iter(row))
+            parts.append(struct.pack("<I", len(kv)))  # n_pairs
+            for k, v in kv:
+                parts.append(self._pack_string(k))
+                parts.append(self._pack_string(v))
+
+        body = b"".join(parts)
+        header = struct.pack("<B", int(self.opcode)) + struct.pack("<I", len(body))
+        return header + body
+
     def _validate_pair_count(self, n_pairs: int):
         """Validate that the number of pairs matches required keys."""
         if n_pairs != len(self.required_keys):
@@ -71,10 +149,8 @@ class TableMessage:
             )
 
     def _create_row_object(self, current_row_data: dict[str, str]):
-        # normaliza a lowercase
         payload = {k.lower(): v for k, v in current_row_data.items()}
 
-        # si el row_factory es dict o None -> guardamos dict directamente
         if self._row_factory in (None, dict):
             self.rows.append(payload)
             return
@@ -86,31 +162,25 @@ class TableMessage:
                 if name in payload:
                     kwargs[name] = payload[name]
                 else:
-                    # si no hay valor y el parámetro no tiene default, ponemos None
                     if param.default is inspect._empty and param.kind in (
                         inspect.Parameter.POSITIONAL_OR_KEYWORD,
                         inspect.Parameter.KEYWORD_ONLY,
                     ):
                         kwargs[name] = None
-                    # si tiene default, no lo ponemos (usa el default)
 
             obj = self._row_factory(**kwargs)
             self.rows.append(obj)
         except Exception:
-            # fallback robusto: guardamos el dict
             self.rows.append(payload)
 
     def _read_table_header(self, reader: BytesReader, remaining: int) -> int:
         """Read table header: number of rows, batch number and status."""
-        # Read number of rows
         (n_rows, remaining) = read_i32(reader, remaining, self.opcode)
         self.amount = n_rows
 
-        # Read batch number
         (batch_number, remaining) = read_i64(reader, remaining, self.opcode)
         self.batch_number = batch_number
 
-        # Read batch status
         (batch_status, remaining) = read_u8_with_remaining(
             reader, remaining, self.opcode
         )
@@ -150,17 +220,13 @@ class TableMessage:
         remaining = len(body_bytes)
 
         try:
-            # Read table header
             remaining = self._read_table_header(reader, remaining)
 
-            # Read all rows
             remaining = self._read_all_rows(reader, remaining, self.amount)
 
-            # Validate no bytes remain unprocessed
             self._validate_message_length(remaining)
 
         except ProtocolError:
-            # The BytesReader will handle partially read data, so we just re-raise
             raise
 
 
@@ -417,4 +483,3 @@ class BatchRecvFail:
 
         write_u8(sock, self.opcode)
         write_i32(sock, 0)
-
