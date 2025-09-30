@@ -9,7 +9,7 @@ import sys
 import threading
 from typing import Dict
 
-from config_loader import Config
+from config.config_loader import Config
 
 from joiner.worker import JoinerWorker
 from middleware.middleware_client import (
@@ -40,7 +40,6 @@ def build_inputs_for_shard(
         exchange_name=cfg.joiner_router_exchange("users"),
         route_keys=[cfg.joiner_router_rk("users", shard)],
     )
-
     inputs[Opcodes.NEW_MENU_ITEMS] = MessageMiddlewareExchange(
         host=host,
         exchange_name=cfg.joiner_router_exchange("menu_items"),
@@ -60,7 +59,7 @@ def parse_args(argv=None):
     p.add_argument(
         "-c",
         "--config",
-        default=os.environ.get("CONFIG_INI", "./config/config.ini"),
+        default=os.environ.get("CFG", "config.ini"),
         help="Ruta al config.ini",
     )
     p.add_argument(
@@ -76,10 +75,10 @@ def main(argv=None):
     args = parse_args(argv)
 
     logging.basicConfig(
-        level=getattr(logging, args.log_level),
-        format="%(asctime)s %(levelname)s [joiner-%(threadName)s] %(message)s",
+        level=getattr(logging, args.log_level.upper(), logging.INFO),
+        format="%(asctime)s %(levelname)s [joiner-worker] %(message)s",
     )
-    log = logging.getLogger("joiner-main")
+    log = logging.getLogger("joiner-worker-main")
 
     try:
         shard = int(os.environ["JOINER_WORKER_INDEX"])
@@ -90,7 +89,12 @@ def main(argv=None):
         log.error("JOINER_WORKER_INDEX debe ser un entero")
         sys.exit(1)
 
-    cfg = Config(args.config)
+    try:
+        cfg = Config(args.config)
+    except Exception as e:
+        log.error(f"No pude cargar config: {e}")
+        sys.exit(2)
+
     host = cfg.broker.host
     out_q_name = cfg.names.results_controller_queue
 
@@ -101,7 +105,7 @@ def main(argv=None):
         in_mw=in_mw,
         out_results_mw=out_results,
         data_dir=os.environ.get("JOINER_DATA_DIR", "/data/joiner"),
-        logger=logging.getLogger("joiner-worker"),
+        logger=logging.getLogger(f"joiner-worker-{shard}"),
     )
 
     stop_event = threading.Event()

@@ -67,29 +67,57 @@ def norm(v) -> str:
     return "" if v is None else str(v)
 
 
-def rows_to_index(
-    rows: List[Dict[str, Any]], key_field: str
-) -> Dict[str, Dict[str, Any]]:
-    return {norm(r.get(key_field)): r for r in rows}
+def _get_attr_or_key(row: Union[dict, object], key: str):
+    if isinstance(row, dict):
+        return row.get(key)
+    return getattr(row, key, None)
+
+
+def rows_to_index(rows, key_field: str) -> Dict[str, Dict[str, Any]]:
+    """
+    Indexa por atributo (o key) para listas de objetos Raw* o dicts.
+    Devuelve dict[str, object] (guardamos el objeto original).
+    """
+    idx: Dict[str, Any] = {}
+    for r in rows:
+        k = norm(_get_attr_or_key(r, key_field))
+        if k != "":
+            idx[k] = r
+    return idx
 
 
 def join_embed_rows(
-    left_rows: List[Dict[str, Any]],
-    right_index: Dict[str, Dict[str, Any]],
+    left_rows,
+    right_index: Dict[str, Any],
     left_key: str,
     right_prefix: str,
-) -> List[Dict[str, Any]]:
+):
+    """
+    OJO: Para no romper la serialización del protocolo, dejamos los objetos
+    de la izquierda tal cual y NO “mutamos” el tipo. Si necesitás realmente
+    “embeddear” campos (menu.* o store.*) en el payload, lo más seguro es
+    que right_index contenga dicts ya “plaineados”. Acá mantenemos compat:
+    - Si lr es dict => devolvemos dict con los campos embeddeados.
+    - Si lr es objeto => devolvemos el objeto tal cual (sin embed) para no
+      romper to_bytes() de los Raw*.
+    """
     out = []
     for lr in left_rows:
-        k = norm(lr.get(left_key))
+        k = norm(_get_attr_or_key(lr, left_key))
         rr = right_index.get(k)
         if rr is None:
             out.append(lr)
-        else:
+            continue
+
+        if isinstance(lr, dict):
             merged = dict(lr)
+            if not isinstance(rr, dict):
+                rr = rr.__dict__
             for rk, rv in rr.items():
                 merged[f"{right_prefix}.{rk}"] = rv
             out.append(merged)
+        else:
+            out.append(lr)
     return out
 
 
@@ -109,7 +137,6 @@ class JoinerWorker:
       - Al TABLE_EOF(menu_items) y TABLE_EOF(stores) → consumir transaction_items.
       - Al TABLE_EOF(transaction_items) → consumir transactions.
       - Al TABLE_EOF(transactions) → consumir users.
-    No se leen colas pesadas hasta tener listas las livianas.
     """
 
     def __init__(
@@ -118,20 +145,27 @@ class JoinerWorker:
         out_results_mw: MessageMiddleware,
         data_dir: str = "./data/joiner",
         logger=None,
+        shard_index: int = 0,
     ):
         self._in = in_mw
         self._out = out_results_mw
         self._store = DiskKV(os.path.join(data_dir, "joiner.shelve"))
 
-        self._cache_stores: Optional[Dict[str, Dict[str, Any]]] = None
-        self._cache_menu: Optional[Dict[str, Dict[str, Any]]] = None
+        self._cache_stores: Optional[Dict[str, Any]] = None
+        self._cache_menu: Optional[Dict[str, Any]] = None
 
         self._eof: Set[int] = set()
         self._lock = threading.Lock()
         self._threads: Dict[int, threading.Thread] = {}
         self._log = logger
+        self._shard = int(shard_index)
 
     def run(self):
+        if self._log:
+            self._log.info(
+                "Arrancando consumo de livianas: menu_items, stores (shard=%d)",
+                self._shard,
+            )
         self._start_queue(Opcodes.NEW_MENU_ITEMS, self._on_raw_menu)
         self._start_queue(Opcodes.NEW_STORES, self._on_raw_stores)
         threading.Event().wait()
@@ -139,12 +173,16 @@ class JoinerWorker:
     def _start_queue(self, table_id: int, cb: Callable[[bytes], None]):
         mw = self._in.get(table_id)
         if not mw:
+            if self._log:
+                self._log.debug("No hay MW para table_id=%s; no se inicia", table_id)
             return
         if table_id in self._threads and self._threads[table_id].is_alive():
             return
         t = threading.Thread(target=mw.start_consuming, args=(cb,), daemon=True)
         self._threads[table_id] = t
         t.start()
+        if self._log:
+            self._log.info("Consumiendo table_id=%s", table_id)
 
     def _stop_queue(self, table_id: int):
         mw = self._in.get(table_id)
@@ -152,22 +190,17 @@ class JoinerWorker:
             return
         try:
             mw.stop_consuming()
+            if self._log:
+                self._log.info("Detenida cola table_id=%s", table_id)
         except Exception:
             pass
 
     def _decode_msg(
         self, body: bytes
     ) -> Tuple[str, Union[EOFMessage, DataBatch, int, None]]:
-        """
-        Retorna:
-          ("eof", EOFMessage) si es EOF
-          ("db", DataBatch)    si es DataBatch
-          ("bad", opcode/int)  si opcode desconocido
-          ("err", None)        si body vacío o error
-        """
         if not body or len(body) < 1:
             if self._log:
-                self._log.error("Received empty message")
+                self._log.error("Mensaje vacío")
             return "err", None
 
         opcode = body[0]
@@ -178,7 +211,7 @@ class JoinerWorker:
                 return "eof", eof
             except Exception as e:
                 if self._log:
-                    self._log.error(f"Failed to parse EOF message: {e}")
+                    self._log.error(f"EOF inválido: {e}")
                 return "err", None
 
         if opcode == Opcodes.DATA_BATCH:
@@ -187,11 +220,11 @@ class JoinerWorker:
                 return "db", db
             except Exception as e:
                 if self._log:
-                    self._log.error(f"Failed to parse DataBatch message: {e}")
+                    self._log.error(f"DataBatch inválido: {e}")
                 return "err", None
 
         if self._log:
-            self._log.warning(f"Unwanted message opcode: {opcode}")
+            self._log.warning(f"Opcode no deseado: {opcode}")
         return "bad", opcode
 
     def _on_raw_menu(self, raw: bytes):
@@ -207,11 +240,11 @@ class JoinerWorker:
 
         db: DataBatch = msg
         rows = (db.batch_msg.rows or []) if getattr(db, "batch_msg", None) else []
-        idx = rows_to_index(rows, "item_id")
+        idx = rows_to_index(rows, "product_id")
         self._store.put("menu_items", "full", idx)
         self._cache_menu = idx
 
-        if os.getenv("JOINER_WORKER_INDEX", "0") != "0":
+        if self._shard == 0:
             meta = copy.deepcopy(db)
             metadata_only(meta)
             self._send(meta)
@@ -233,7 +266,7 @@ class JoinerWorker:
         self._store.put("stores", "full", idx)
         self._cache_stores = idx
 
-        if os.getenv("JOINER_WORKER_INDEX", "0") != "0":
+        if self._shard == 0:
             meta = copy.deepcopy(db)
             metadata_only(meta)
             self._send(meta)
@@ -256,14 +289,15 @@ class JoinerWorker:
 
         menu = self._cache_menu or self._store.get("menu_items", "full", default=None)
         if not menu:
+            if self._log:
+                self._log.debug("Menu cache no disponible aún; drop batch TI")
             return
 
         rows = (db.batch_msg.rows or []) if getattr(db, "batch_msg", None) else []
         joined = join_embed_rows(rows, menu, "item_id", "menu")
-        if Opcodes.NEW_MENU_ITEMS not in db.table_ids:
-            db.table_ids.append(Opcodes.NEW_MENU_ITEMS)
         if getattr(db, "batch_msg", None) and hasattr(db.batch_msg, "rows"):
             db.batch_msg.rows = joined
+        db.batch_bytes = db.batch_msg.to_bytes()
         self._send(db)
 
     def _on_raw_tx(self, raw: bytes):
@@ -286,16 +320,17 @@ class JoinerWorker:
 
         stores = self._cache_stores or self._store.get("stores", "full", default=None)
         if not stores:
+            if self._log:
+                self._log.debug("Stores cache no disponible aún; drop batch TX")
             return
 
         rows = (db.batch_msg.rows or []) if getattr(db, "batch_msg", None) else []
         joined_tx_st = join_embed_rows(rows, stores, "store_id", "store")
 
         if Q3 in qset:
-            if Opcodes.NEW_STORES not in db.table_ids:
-                db.table_ids.append(Opcodes.NEW_STORES)
             if getattr(db, "batch_msg", None) and hasattr(db.batch_msg, "rows"):
                 db.batch_msg.rows = joined_tx_st
+            db.batch_bytes = db.batch_msg.to_bytes()
             self._send(db)
             return
 
@@ -304,9 +339,10 @@ class JoinerWorker:
             metadata_only(template)
             template_raw = template.serialize_to_bytes()
 
-            by_user: Dict[str, List[Dict[str, Any]]] = defaultdict(list)
+            by_user: Dict[str, List[Any]] = defaultdict(list)
             for r in joined_tx_st:
-                by_user[norm(r.get("user_id"))].append(r)
+                uid = norm(_get_attr_or_key(r, "user_id"))
+                by_user[uid].append(r)
 
             total = len(by_user) if by_user else 1
             for uid, lst in by_user.items():
@@ -332,7 +368,7 @@ class JoinerWorker:
 
         if Q4 in queries_set(db):
             for u in rows:
-                uid = norm(u.get("user_id"))
+                uid = norm(_get_attr_or_key(u, "user_id"))
                 items = self._store.pop_all("q4_by_user", uid)
                 if not items:
                     continue
@@ -340,25 +376,18 @@ class JoinerWorker:
 
                 for i, it in enumerate(items):
                     template_raw: bytes = it["template_raw"]
-                    tx_rows: List[Dict[str, Any]] = it["rows"]
+                    tx_rows: List[Any] = it["rows"]
                     total: int = int(it.get("total", len(items)))
 
                     joined = join_embed_rows(tx_rows, usr_idx, "user_id", "user")
                     out_db = DataBatch.deserialize_from_bytes(template_raw)
-
-                    if Opcodes.NEW_STORES not in out_db.table_ids:
-                        out_db.table_ids.append(Opcodes.NEW_STORES)
-                    if Opcodes.NEW_TRANSACTION not in out_db.table_ids:
-                        out_db.table_ids.append(Opcodes.NEW_TRANSACTION)
 
                     if getattr(out_db, "batch_msg", None) and hasattr(
                         out_db.batch_msg, "rows"
                     ):
                         out_db.batch_msg.rows = joined
 
-                    if getattr(out_db, "copy_info", None) is None:
-                        out_db.copy_info = []
-
+                    out_db.batch_bytes = out_db.batch_msg.to_bytes()
                     self._send(out_db)
 
         meta = copy.deepcopy(db)
@@ -372,14 +401,20 @@ class JoinerWorker:
     def _maybe_enable_ti_phase(self):
         if (Opcodes.NEW_MENU_ITEMS in self._eof) and (Opcodes.NEW_STORES in self._eof):
             self._start_queue(Opcodes.NEW_TRANSACTION_ITEMS, self._on_raw_ti)
+            if self._log:
+                self._log.info("Activada fase TI")
 
     def _maybe_enable_tx_phase(self):
         if Opcodes.NEW_TRANSACTION_ITEMS in self._eof:
             self._start_queue(Opcodes.NEW_TRANSACTION, self._on_raw_tx)
+            if self._log:
+                self._log.info("Activada fase TX")
 
     def _maybe_enable_u_phase(self):
         if Opcodes.NEW_TRANSACTION in self._eof:
             self._start_queue(Opcodes.NEW_USERS, self._on_raw_users)
+            if self._log:
+                self._log.info("Activada fase USERS")
 
     def _flush_remaining_q4_without_user(self):
         uids = self._store.keys_with_prefix("q4_by_user")
@@ -387,16 +422,13 @@ class JoinerWorker:
             items = self._store.pop_all("q4_by_user", uid)
             for it in items:
                 template_raw: bytes = it["template_raw"]
-                tx_rows: List[Dict[str, Any]] = it["rows"]
+                tx_rows: List[Any] = it["rows"]
                 out_db = DataBatch.deserialize_from_bytes(template_raw)
-                if Opcodes.NEW_STORES not in out_db.table_ids:
-                    out_db.table_ids.append(Opcodes.NEW_STORES)
-                if Opcodes.NEW_TRANSACTION not in out_db.table_ids:
-                    out_db.table_ids.append(Opcodes.NEW_TRANSACTION)
                 if getattr(out_db, "batch_msg", None) and hasattr(
                     out_db.batch_msg, "rows"
                 ):
                     out_db.batch_msg.rows = tx_rows
+                out_db.batch_bytes = out_db.batch_msg.to_bytes()
                 self._send(out_db)
 
     def _send(self, db: DataBatch):
