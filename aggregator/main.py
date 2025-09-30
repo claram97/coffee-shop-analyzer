@@ -19,7 +19,7 @@ def initialize_config():
 
     config = ConfigParser(os.environ)
     # If config.ini does not exists original config object is not modified
-    config.read("config.ini")
+    config.read("aggregator/config.ini")
 
     config_params = {}
     try:
@@ -43,7 +43,7 @@ def initialize_config():
 def main():
     config_params = initialize_config()
     logging_level = config_params["logging_level"]
-    aggregator_id = int(config_params["aggregator_id"])
+    aggregator_id = config_params["aggregator_id"]
 
     initialize_log(logging_level)
 
