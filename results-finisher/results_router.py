@@ -1,188 +1,157 @@
+import logging
 import os
 import signal
 import threading
-import time
-import logging
 from typing import Dict, List
 
 from middleware_client import MessageMiddlewareQueue, MessageMiddlewareDisconnectedError
-from protocol import Opcodes
+from protocol import DataBatch, ProtocolError, Opcodes
 
 logging.basicConfig(
     level=logging.INFO,
-    format='%(asctime)s - %(levelname)s - [ResultsRouter] - %(message)s'
+    format='%(asctime)s - %(levelname)s - [%(name)s] - %(message)s'
 )
 logger = logging.getLogger(__name__)
 
-def _simple_hash(data: str) -> int:
-    """A conceptually simple hash function that sums the ordinal values of characters."""
-    hash_value = 0
-    for character in data:
-        hash_value += ord(character)
-    return hash_value
-
-def _read_u8_list_from_body(body: bytes, offset: int) -> tuple[List[int], int]:
-    """Helper to read a u8 list (count + items) from a byte string."""
-    if offset >= len(body):
-        raise ValueError("Not enough data to read list count.")
-    count = body[offset]
-    offset += 1
-    
-    if offset + count > len(body):
-        raise ValueError("Not enough data to read list items.")
-    
-    items = list(body[offset : offset + count])
-    offset += count
-    return items, offset
-
-def _extract_first_query_id(body: bytes) -> str:
+def _calculate_route_hash(data: str) -> int:
     """
-    Parses the DataBatch binary format to extract the first query_id.
-    This is compatible with the full protocol.py definition.
+    A simple, deterministic hash function that sums the ordinal values of characters.
     """
-    try:
-        # Skip the outer frame: opcode (1 byte) + length (4 bytes) = 5 bytes
-        if len(body) < 5:
-            raise ValueError("Message too short to contain outer frame")
-            
-        opcode = body[0]
-        if opcode != Opcodes.DATA_BATCH:
-            raise ValueError(f"Expected DATA_BATCH opcode ({Opcodes.DATA_BATCH}), got {opcode}")
-
-        # Skip opcode and length to get to DataBatch inner content
-        inner_body = body[5:]
-        
-        offset = 0
-        # The first list in a DataBatch is table_ids, which we can skip for routing.
-        _, offset = _read_u8_list_from_body(inner_body, offset)
-        # The second list is query_ids.
-        query_ids, _ = _read_u8_list_from_body(inner_body, offset)
-
-        if not query_ids:
-            raise ValueError("Message contains no query_ids for routing.")
-        
-        # Route based on the first query_id
-        return str(query_ids[0])
-
-    except IndexError:
-        raise ValueError("Message body is malformed or incomplete.")
+    return sum(ord(char) for char in data)
 
 class ResultsRouter:
     """
-    Consumes messages and routes them to the correct ResultsFinisher
-    node based on a hash of the query_id.
+    Consumes DataBatch messages and routes them to the correct ResultsFinisher
+    instance based on a hash of the query_id.
+    
+    This ensures that all batches for a single query are processed by the same worker.
     """
     def __init__(self,
                  input_client: MessageMiddlewareQueue,
                  output_clients: Dict[str, MessageMiddlewareQueue]):
         
         if not output_clients:
-            raise ValueError("Must provide at least one output client.")
+            raise ValueError("Must provide at least one output client for routing.")
 
         self.input_client = input_client
         self.output_clients = output_clients
+
         self.output_queue_names = sorted(output_clients.keys())
         self.finisher_count = len(self.output_queue_names)
 
-        logging.info(f"Router initialized to distribute to {self.finisher_count} finisher queues: {self.output_queue_names}")
+        logger.info(
+            f"Router initialized. Distributing to {self.finisher_count} finisher queues: "
+            f"{self.output_queue_names}"
+        )
 
-    def _get_target_queue(self, query_id: str) -> str:
-        """Determines the target queue using a simple hash algorithm."""
-        if self.finisher_count == 1:
-            return self.output_queue_names[0]
-
-        hash_as_int = _simple_hash(query_id)
-        target_index = hash_as_int % self.finisher_count
-        
+    def _get_target_queue_name(self, query_id: str) -> str:
+        """Determines the target queue using a deterministic hash algorithm."""
+        hash_value = _calculate_route_hash(query_id)
+        target_index = hash_value % self.finisher_count
         return self.output_queue_names[target_index]
 
-    def _message_handler(self, body: bytes):
-        """Callback for incoming messages."""
+    def _process_message(self, body: bytes):
+        """
+        Parses, validates, and routes a single incoming message.
+        This is the core callback for the message consumer.
+        """
+        if not body:
+            logger.warning("Received an empty message body. Discarding.")
+            return
+
         try:
-            if not body:
-                logging.warning("Received empty message body, discarding.")
+            # The primary responsibility is to route DataBatch messages.
+            # We use the official protocol library for safe and correct parsing.
+            if body[0] != Opcodes.DATA_BATCH:
+                logger.warning(f"Received message with unsupported opcode {body[0]}. Discarding.")
                 return
 
-            opcode = body[0]
-
-            if opcode == Opcodes.DATA_BATCH:
-                # Route based on query_id for data batches (includes EOF via BatchStatus)
-                query_id = _extract_first_query_id(body)
-                target_queue_name = self._get_target_queue(query_id)
-                target_client = self.output_clients[target_queue_name]
-                target_client.send(body)
-                logging.debug(f"Routed DATA_BATCH for query '{query_id}' to queue '{target_queue_name}'")
+            message = DataBatch.deserialize_from_bytes(body)
             
-            else:
-                logging.warning(f"Received message with unknown opcode {opcode}, discarding.")
+            if not message.query_ids:
+                logger.warning("DataBatch contains no query_ids for routing. Discarding.")
+                return
+            
+            # Route based on the first query_id in the list.
+            query_id = str(message.query_ids[0])
+            target_queue_name = self._get_target_queue_name(query_id)
+            target_client = self.output_clients[target_queue_name]
+            
+            target_client.send(body)
+            
+            logger.debug(f"Routed DATA_BATCH for query '{query_id}' to queue '{target_queue_name}'")
 
-        except (ValueError, UnicodeDecodeError) as e:
-            logging.error(f"Failed to parse message, discarding. Error: {e}. Body prefix: {body[:50]}")
+        except ProtocolError as e:
+            logger.error(f"Failed to parse message due to protocol error, discarding. Error: {e}. Body prefix: {body[:60]!r}")
         except Exception as e:
-            logging.error(f"Unexpected error in handler: {e}", exc_info=True)
+            # Catch-all for unexpected errors to keep the router alive.
+            logger.critical(f"An unexpected error occurred in the message handler: {e}", exc_info=True)
 
     def start(self):
-        """Starts the consumer in a background thread."""
-        logging.info("ResultsRouter starting consumer...")
-        self.input_client.start_consuming(self._message_handler)
+        """Starts the message consumer in a dedicated thread."""
+        logger.info("ResultsRouter is starting...")
+        self.input_client.start_consuming(self._process_message)
 
     def stop(self):
         """Stops the consumer and closes all connections gracefully."""
-        logging.info("ResultsRouter stopping...")
+        logger.info("ResultsRouter is shutting down...")
         self.input_client.stop_consuming()
         self.input_client.close()
         for client in self.output_clients.values():
             client.close()
-        logging.info("ResultsRouter stopped.")
+        logger.info("ResultsRouter has stopped.")
 
-
+# --- Service Entrypoint ---
 def main():
     """Main entry point for the ResultsRouter service."""
     try:
+        # Load configuration from environment variables with sensible defaults.
         rabbitmq_host = os.getenv("RABBITMQ_HOST", "localhost")
-        input_queue_name = os.getenv("INPUT_QUEUE", "results_router_input_queue")
-        output_queues_str = os.getenv("OUTPUT_QUEUES", "results_finisher_queue_1")
-        output_queue_names = sorted([q.strip() for q in output_queues_str.split(',') if q.strip()])
+        input_queue = os.getenv("INPUT_QUEUE", "results_router_input")
+        output_queues_csv = os.getenv("OUTPUT_QUEUES", "results_finisher_1,results_finisher_2")
+        output_queues = sorted([q.strip() for q in output_queues_csv.split(',') if q.strip()])
 
-        print("--- ResultsRouter Service (Class-based) ---")
-        print(f"RabbitMQ Host: {rabbitmq_host}")
-        print(f"Input Queue: {input_queue_name}")
-        print(f"Output Queues: {output_queue_names}")
-        print("-------------------------------------------")
+        if not output_queues:
+            raise ValueError("OUTPUT_QUEUES environment variable must be configured with at least one queue.")
 
-        if not output_queue_names:
-            raise ValueError("OUTPUT_QUEUES environment variable must be set.")
+        logger.info("--- ResultsRouter Service ---")
+        logger.info(f"Connecting to RabbitMQ at: {rabbitmq_host}")
+        logger.info(f"Consuming from input queue: {input_queue}")
+        logger.info(f"Routing to output queues: {output_queues}")
+        logger.info("-----------------------------")
 
-        input_client = MessageMiddlewareQueue(host=rabbitmq_host, queue_name=input_queue_name)
+        # Initialize middleware clients
+        input_client = MessageMiddlewareQueue(host=rabbitmq_host, queue_name=input_queue)
         output_clients = {
             name: MessageMiddlewareQueue(host=rabbitmq_host, queue_name=name)
-            for name in output_queue_names
+            for name in output_queues
         }
 
+        # Setup and run the router
         router = ResultsRouter(input_client=input_client, output_clients=output_clients)
-        
         shutdown_event = threading.Event()
+
         def shutdown_handler(signum, frame):
-            print("\nShutdown signal received. Stopping router...")
-            router.stop()
+            logger.info("Shutdown signal received. Stopping router gracefully.")
             shutdown_event.set()
             
         signal.signal(signal.SIGINT, shutdown_handler)
         signal.signal(signal.SIGTERM, shutdown_handler)
 
         router.start()
+        logger.info("Service is running. Press Ctrl+C to exit.")
         
-        print("Service is running. Press Ctrl+C to exit.")
+        # Wait until shutdown is signaled
         shutdown_event.wait()
         
-        print("Shutdown complete.")
+        # Perform cleanup
+        router.stop()
+        logger.info("Shutdown complete.")
 
-    except (MessageMiddlewareDisconnectedError, ValueError) as e:
-        print(f"Could not start router. Aborting. Error: {e}")
+    except (ValueError, MessageMiddlewareDisconnectedError) as e:
+        logger.critical(f"Service could not start due to a configuration or connection error: {e}")
     except Exception as e:
-        print(f"An unexpected error occurred during setup: {e}", exc_info=True)
-
+        logger.critical(f"An unexpected error occurred during service setup: {e}", exc_info=True)
 
 if __name__ == '__main__':
     main()
-

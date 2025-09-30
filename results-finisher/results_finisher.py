@@ -1,313 +1,170 @@
 import json
 import logging
 import os
-import pickle
 import threading
 import time
-from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
-from typing import Dict, Any, List
+from typing import Dict, Any, Set
 
 from middleware_client import MessageMiddlewareQueue
-from protocol import (
-    ProtocolError, Opcodes, BatchStatus, DataBatch
-)
+from protocol import ProtocolError, Opcodes, BatchStatus, DataBatch
 from query_strategy import get_strategy
 from constants import QueryType
 
+# --- Configuration ---
 logging.basicConfig(
     level=logging.INFO,
-    format='%(asctime)s - %(levelname)s - [ResultsFinisher] - %(message)s'
+    format='%(asctime)s - %(levelname)s - [%(name)s] - %(message)s'
 )
+logger = logging.getLogger(__name__)
 
+OPCODE_TO_TABLE_TYPE = {
+    Opcodes.NEW_TRANSACTION: "Transactions",
+    Opcodes.NEW_STORES: "Stores",
+    Opcodes.NEW_MENU_ITEMS: "MenuItems",
+    Opcodes.NEW_TRANSACTION_ITEMS: "TransactionItems",
+    Opcodes.NEW_USERS: "Users"
+}
+
+QUERY_TYPE_TO_EXPECTED_TABLES = {
+    QueryType.Q1: {"Transactions"},
+    QueryType.Q2: {"TransactionItems", "MenuItems"},
+    QueryType.Q3: {"Transactions", "Stores"},
+    QueryType.Q4: {"Transactions", "Stores", "Users"}
+}
+
+# --- State Management ---
 @dataclass
 class QueryState:
-    """State for tracking a specific query's data and completion."""
+    """Represents the state for a single, in-flight query."""
     query_id: str
     query_type: QueryType
-    status: str = "processing"
     consolidated_data: Dict[str, Any] = field(default_factory=dict)
-    completion_tracker: Dict[str, Any] = field(default_factory=dict)
-    batch_counters: Dict[str, Dict[str, int]] = field(default_factory=dict)  # table_type -> {received: N, expected: M}
+    batch_counters: Dict[str, Dict[str, int]] = field(default_factory=dict)
+    completed_tables: Set[str] = field(default_factory=set)
     last_update_time: float = field(default_factory=time.time)
+    lock: threading.Lock = field(default_factory=threading.Lock, repr=False)
 
+# --- Core Service ---
 class ResultsFinisher:
     """
-    The ResultsFinisher processes DataBatch messages containing query data and EOFMessage signals.
-    
-    Flow:
-    1. Receives DataBatch messages from ResultsRouter containing data for specific queries
-    2. Consolidates data per query using query-specific strategies  
-    3. When EOFMessage arrives, finalizes the query and sends results to output queue
-    4. Maintains checkpoints for fault tolerance
+    Processes batches concurrently using a deadlock-free, per-query locking mechanism.
     """
-    
     def __init__(self,
                  input_client: MessageMiddlewareQueue,
-                 output_client: MessageMiddlewareQueue,
-                 checkpoint_dir: str):
+                 output_client: MessageMiddlewareQueue):
         
         self.input_client = input_client
         self.output_client = output_client
-        self.checkpoint_dir = checkpoint_dir    
         
         self.active_queries: Dict[str, QueryState] = {}
-        self.lock = threading.Lock()
-        self.executor = ThreadPoolExecutor(max_workers=os.cpu_count() or 1)
-        
-        os.makedirs(self.checkpoint_dir, exist_ok=True)
-        self._load_state_from_checkpoints()
+        # The global lock protects the self.active_queries dictionary itself.
+        self.global_lock = threading.Lock()
 
-    def _load_state_from_checkpoints(self):
-        """Load saved query states from checkpoint files."""
-        logging.info("Loading state from checkpoints...")
-        for filename in os.listdir(self.checkpoint_dir):
-            if filename.endswith(".state"):
-                filepath = os.path.join(self.checkpoint_dir, filename)
-                try:
-                    with open(filepath, 'rb') as f:
-                        state: QueryState = pickle.load(f)
-                        self.active_queries[state.query_id] = state
-                        logging.info(f"Recovered state for query: {state.query_id}")
-                except Exception as e:
-                    logging.error(f"Failed to load checkpoint {filename}: {e}")
+        logger.info("Initialized ResultsFinisher for concurrent processing (in-memory).")
 
-    def _save_checkpoint(self, query_state: QueryState):
-        """Save query state to checkpoint file."""
-        filepath = os.path.join(self.checkpoint_dir, f"{query_state.query_id}.state")
+    def _process_message(self, body: bytes):
         try:
-            with open(filepath, 'wb') as f:
-                pickle.dump(query_state, f)
-        except IOError as e:
-            logging.error(f"Failed to save checkpoint for query {query_state.query_id}: {e}")
-
-    def _message_handler(self, body: bytes):
-        """Main message handler that processes incoming DataBatch messages."""
-        logging.info(f"DEBUG: Received message of {len(body)} bytes")
-        
-        try:
-            if len(body) < 5:  # Minimum: 1 byte opcode + 4 bytes length
-                logging.error("Message too short for valid protocol frame")
+            if not body or body[0] != Opcodes.DATA_BATCH:
                 return
 
-            # Read opcode to determine message type
-            opcode = body[0]
-            
-            if opcode == Opcodes.DATA_BATCH:
-                # Use DataBatch deserialization
-                message = DataBatch.deserialize_from_bytes(body)
-                self._handle_data_batch(message)
-                
-            else:
-                logging.error(f"Unexpected message opcode: {opcode}")
-                return
+            batch = DataBatch.deserialize_from_bytes(body)
+            self._handle_data_batch(batch)
 
-            logging.info("DEBUG: Successfully processed message")
-        
-        except ProtocolError as e:
-            logging.error(f"Message is malformed, discarding. Error: {e}")
-            return
-        
+        except (ProtocolError, ValueError) as e:
+            logger.error(f"Message is malformed or invalid, discarding. Error: {e}")
         except Exception as e:
-            logging.error(f"Error in message handler: {e}", exc_info=True)
-            raise
+            logger.critical(f"Unexpected error in message handler: {e}", exc_info=True)
 
     def _handle_data_batch(self, batch: DataBatch):
-        """Process DataBatch message containing query data."""
-        logging.info(f"DEBUG: Processing DataBatch #{getattr(batch, 'batch_number', 0)} for queries: {batch.query_ids}")
-        
         if not batch.query_ids:
-            logging.warning("DataBatch has no query_ids, skipping")
             return
-
-        # Get table type from embedded message
-        table_type = self._get_table_type_from_batch(batch)
+        
+        query_id = str(batch.query_ids[0])
+        table_type = OPCODE_TO_TABLE_TYPE.get(batch.batch_msg.opcode)
         if not table_type:
-            logging.warning("Could not determine table type from DataBatch, skipping")
             return
 
-        # Process data for each query ID mentioned in the batch
-        for query_id_int in batch.query_ids:
-            query_id = str(query_id_int)
-            
-            with self.lock:
-                # Create query state if doesn't exist
-                if query_id not in self.active_queries:
-                    try:
-                        query_type = QueryType(f"Q{query_id}")
-                    except ValueError:
-                        query_type = QueryType.UNKNOWN
-                    
-                    self.active_queries[query_id] = QueryState(query_id, query_type)
-                    logging.info(f"New query started: {query_id} (Type: {query_type.value})")
-                
-                state = self.active_queries[query_id]
-                
-                # Process batch data (if not EOF-only batch)
-                if hasattr(batch.batch_msg, 'rows') and batch.batch_msg.rows:
-                    self._process_data_batch_rows(state, batch)
-                
-                # Handle batch counting and EOF detection
-                self._process_batch_completion(state, batch, table_type)
-                
-                self._save_checkpoint(state)
+        with self.global_lock:
+            state = self._get_or_create_query_state(query_id)
+        
+        is_complete = False
+        with state.lock:
+            self._update_batch_accounting(state, table_type, batch)
+            self._consolidate_batch_data(state, batch)
+            state.last_update_time = time.time()
+            if self._is_query_complete(state):
+                is_complete = True
+        
+        if is_complete:
+            logger.info(f"All tables for query '{query_id}' are complete. Finalizing.")
+            self._finalize_query(state)
+            self._cleanup_query_state(query_id)
 
-    def _get_table_type_from_batch(self, batch: DataBatch) -> str:
-        """Extract table type from DataBatch embedded message."""
-        if not hasattr(batch, 'batch_msg') or not batch.batch_msg:
-            return ""
+    def _get_or_create_query_state(self, query_id: str) -> QueryState:
+        """MUST be called within the context of the global_lock."""
+        if query_id not in self.active_queries:
+            try:
+                query_type = QueryType(int(query_id))
+                logger.info(f"New query detected: ID '{query_id}', Type '{query_type.name}'.")
+                self.active_queries[query_id] = QueryState(query_id=query_id, query_type=query_type)
+            except ValueError:
+                raise ValueError(f"Cannot determine a valid QueryType from query_id '{query_id}'")
         
-        # Map message opcodes to table types
-        table_type_map = {
-            Opcodes.NEW_TRANSACTION: "transactions",
-            Opcodes.NEW_STORES: "stores", 
-            Opcodes.NEW_MENU_ITEMS: "menu_items",
-            Opcodes.NEW_TRANSACTION_ITEMS: "transaction_items",
-            Opcodes.NEW_USERS: "users"
-        }
-        
-        return table_type_map.get(batch.batch_msg.opcode, "")
+        return self.active_queries[query_id]
 
-    def _process_batch_completion(self, state: QueryState, batch: DataBatch, table_type: str):
-        """Handle batch counting and check for table completion."""
-        batch_number = getattr(batch, 'batch_number', 0)
-        batch_status = getattr(batch.batch_msg, 'batch_status', BatchStatus.CONTINUE)
+    def _update_batch_accounting(self, state: QueryState, table_type: str, batch: DataBatch):
+        counter = state.batch_counters.setdefault(table_type, {"received": 0, "expected": None})
+        counter["received"] += 1
         
-        # Initialize batch counter for this table if needed
-        if table_type not in state.batch_counters:
-            state.batch_counters[table_type] = {"received": 0, "expected": None}
-        
-        # Increment received batch count
-        state.batch_counters[table_type]["received"] += 1
-        
-        logging.debug(f"Query {state.query_id}: Received batch #{batch_number} for table '{table_type}' (status: {batch_status})")
-        
-        # Check if this is the final batch (EOF status)
-        if batch_status == BatchStatus.EOF:
-            # Set expected total based on batch number
-            state.batch_counters[table_type]["expected"] = batch_number
-            logging.info(f"Query {state.query_id}: Table '{table_type}' marked complete at batch #{batch_number}")
-            
-            # Check if all batches for this table have been received
-            if self._is_table_complete(state, table_type):
-                logging.info(f"Query {state.query_id}: All batches received for table '{table_type}'")
-                state.completion_tracker.setdefault("completed_tables", set()).add(table_type)
-                
-                # Check if query is fully complete
-                if self._is_query_complete(state):
-                    state.status = "finalizing"
-                    self.executor.submit(self._finalize_query, state)
-
-    def _is_table_complete(self, state: QueryState, table_type: str) -> bool:
-        """Check if all expected batches have been received for a table."""
-        counter = state.batch_counters.get(table_type, {})
-        expected = counter.get("expected")
-        received = counter.get("received", 0)
-        
-        if expected is None:
-            return False  # Haven't received EOF batch yet
-            
-        return received >= expected
-
-    def _process_data_batch_rows(self, state: QueryState, batch: DataBatch):
-        """Consolidate data from batch into query state using query-specific strategy."""
-        logging.info(f"Processing DataBatch #{getattr(batch, 'batch_number', 0)} for query {state.query_id}")
-        
-        if hasattr(batch.batch_msg, 'rows') and batch.batch_msg.rows:
-            strategy = get_strategy(state.query_type)
-            strategy.consolidate(state.consolidated_data, batch.batch_msg.rows)
-            logging.debug(f"Consolidated {len(batch.batch_msg.rows)} rows for query {state.query_id}")
-
-        state.last_update_time = time.time()
+        if batch.batch_msg.batch_status == BatchStatus.EOF:
+            counter["expected"] = batch.batch_number
+            if counter["received"] >= counter["expected"]:
+                state.completed_tables.add(table_type)
+                logger.info(f"Query '{state.query_id}': Table '{table_type}' is now complete.")
+    
+    def _consolidate_batch_data(self, state: QueryState, batch: DataBatch):
+        rows = getattr(batch.batch_msg, 'rows', [])
+        if not rows: return
+        strategy = get_strategy(state.query_type)
+        strategy.consolidate(state.consolidated_data, rows)
 
     def _is_query_complete(self, state: QueryState) -> bool:
-        """Check if query has received all expected tables completely."""
-        expected_tables = self._get_expected_tables_for_query(state.query_type)
-        completed_tables = state.completion_tracker.get("completed_tables", set())
-        
-        if not expected_tables:
-            logging.debug(f"Query {state.query_id}: No expected tables for type {state.query_type}")
-            return False
-        
-        # Query is complete when all expected tables are completed
-        missing_tables = expected_tables - completed_tables
-        if missing_tables:
-            logging.debug(f"Query {state.query_id}: Still waiting for tables: {missing_tables}")
-            return False
-
-        logging.info(f"Query {state.query_id} is complete! All tables received: {completed_tables}")
-        return True
-    
-    def _get_expected_tables_for_query(self, query_type: int) -> set:
-        """Get the set of expected table types for a specific query type."""
-        if query_type == 1:  # Q1
-            return {"NewTransactions"}
-        elif query_type == 2:  # Q2  
-            return {"NewStores"}
-        elif query_type == 3:  # Q3
-            return {"NewTransactions", "NewStores"}
-        elif query_type == 4:  # Q4
-            return {"NewTransactions", "NewStores"}
-        else:
-            logging.warning(f"Unknown query type: {query_type}")
-            return set()
+        expected_tables = QUERY_TYPE_TO_EXPECTED_TABLES.get(state.query_type, set())
+        return expected_tables.issubset(state.completed_tables)
 
     def _finalize_query(self, state: QueryState):
-        """Finalize query using query-specific strategy and send result."""
+        """Called WITHOUT holding locks to prevent blocking other queries."""
         try:
-            logging.info(f"Finalizing query {state.query_id} (Type: {state.query_type.value})...")
-            
             strategy = get_strategy(state.query_type)
             final_result = strategy.finalize(state.consolidated_data)
-            
-            self._send_final_result(state.query_id, final_result)
-        
+            self._send_result(state.query_id, "success", final_result)
         except Exception as e:
-            logging.error(f"Error during finalization of query {state.query_id}: {e}", exc_info=True)
-            self._send_error_result(state.query_id, str(e))
-        
-        finally:
-            self._cleanup_query(state.query_id)
+            logger.error(f"Error during finalization of query '{state.query_id}': {e}", exc_info=True)
+            self._send_result(state.query_id, "error", error_message=str(e))
 
-    def _send_final_result(self, query_id: str, result: Any, status: str = "success", error_msg: str = ""):
-        """Send final query result to output queue."""
-        message = {
-            "query_id": query_id, 
-            "status": status, 
-            "result": result, 
-            "error": error_msg
-        }
-        try:
-            self.output_client.send(json.dumps(message, indent=2).encode('utf-8'))
-            logging.info(f"Sent final result for query {query_id}")
-        except Exception as e:
-            logging.error(f"Failed to send final result for query {query_id}: {e}")
-
-    def _send_error_result(self, query_id: str, error_msg: str):
-        """Send error result for failed query."""
-        self._send_final_result(query_id, None, "error", error_msg)
-
-    def _cleanup_query(self, query_id: str):
-        """Remove query from active state and clean up checkpoint file."""
-        with self.lock:
+    def _cleanup_query_state(self, query_id: str):
+        """Removes the query from the active dictionary. Requires the global lock."""
+        with self.global_lock:
             if query_id in self.active_queries:
                 del self.active_queries[query_id]
-        
-        checkpoint_file = os.path.join(self.checkpoint_dir, f"{query_id}.state")
-        if os.path.exists(checkpoint_file):
-            os.remove(checkpoint_file)
-        logging.info(f"Cleanup complete for query {query_id}.")
+            logger.info(f"In-memory cleanup complete for query '{query_id}'.")
+
+    def _send_result(self, query_id: str, status: str, result: Any = None, error_message: str = ""):
+        message = json.dumps({
+            "query_id": query_id, "status": status,
+            "result": result, "error": error_message
+        }, indent=2).encode('utf-8')
+        self.output_client.send(message)
+        logger.info(f"Sent final '{status}' result for query '{query_id}'.")
 
     def start(self):
-        """Start consuming messages from input queue."""
-        logging.info("ResultsFinisher starting consumer...")
-        self.input_client.start_consuming(self._message_handler)
+        logger.info("ResultsFinisher is starting...")
+        self.input_client.start_consuming(self._process_message)
 
     def stop(self):
-        """Stop consuming and shutdown gracefully."""
-        logging.info("ResultsFinisher stopping...")
+        logger.info("ResultsFinisher is shutting down...")
         self.input_client.stop_consuming()
-        self.executor.shutdown(wait=True)
         self.input_client.close()
         self.output_client.close()
-        logging.info("ResultsFinisher stopped.")
+        logger.info("ResultsFinisher has stopped.")

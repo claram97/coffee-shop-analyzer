@@ -1,7 +1,6 @@
 import os
 import signal
 import threading
-import time
 import logging
 from results_finisher import ResultsFinisher
 from middleware_client import MessageMiddlewareQueue, MessageMiddlewareDisconnectedError
@@ -12,14 +11,14 @@ def main():
     rabbitmq_host = os.getenv("RABBITMQ_HOST", "localhost")
     input_queue_name = os.getenv("INPUT_QUEUE", "results_finisher_queue_1")
     output_queue_name = os.getenv("OUTPUT_QUEUE", "orchestrator_results_queue")
-    checkpoint_dir = os.getenv("CHECKPOINT_DIR", "/checkpoints/finisher")
-
-    print("--- ResultsFinisher Service Configuration ---")
-    print(f"RabbitMQ Host: {rabbitmq_host}")
-    print(f"Input Queue: {input_queue_name}")
-    print(f"Output Queue: {output_queue_name}")
-    print(f"Checkpoint Directory: {checkpoint_dir}")
-    print("-------------------------------------------")
+    
+    # FIX: Removed checkpoint_dir as it's no longer used
+    
+    logging.info("--- ResultsFinisher Service (In-Memory) ---")
+    logging.info(f"RabbitMQ Host: {rabbitmq_host}")
+    logging.info(f"Input Queue: {input_queue_name}")
+    logging.info(f"Output Queue: {output_queue_name}")
+    logging.info("-------------------------------------------")
 
     try:
         input_client = MessageMiddlewareQueue(host=rabbitmq_host, queue_name=input_queue_name)
@@ -27,13 +26,12 @@ def main():
 
         finisher = ResultsFinisher(
             input_client=input_client,
-            output_client=output_client,
-            checkpoint_dir=checkpoint_dir
+            output_client=output_client
         )
         
         shutdown_event = threading.Event()
         def shutdown_handler(signum, frame):
-            print("\nShutdown signal received. Stopping finisher...")
+            logging.info("Shutdown signal received. Stopping finisher...")
             finisher.stop()
             shutdown_event.set()
             
@@ -42,15 +40,16 @@ def main():
 
         finisher.start()
         
-        print("Service is running. Press Ctrl+C to exit.")
+        logging.info("Service is running. Press Ctrl+C to exit.")
         shutdown_event.wait()
         
-        print("Shutdown complete.")
+        logging.info("Shutdown complete.")
 
     except MessageMiddlewareDisconnectedError as e:
-        print(f"Could not connect to RabbitMQ. Aborting. Error: {e}")
+        logging.critical(f"Could not connect to RabbitMQ. Aborting. Error: {e}")
     except Exception as e:
-        print(f"An unexpected error occurred during setup: {e}", exc_info=True)
+        # FIX: Use logger to correctly show exception info
+        logging.critical(f"An unexpected error occurred during setup: {e}", exc_info=True)
 
 if __name__ == '__main__':
     main()

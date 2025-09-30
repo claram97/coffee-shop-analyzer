@@ -1,9 +1,11 @@
 from enum import Enum
 
 class QueryType(Enum):
-    """Defines the valid, known query types to avoid magic strings."""
-    Q1 = "Q1"
-    Q2 = "Q2"
-    Q3 = "Q3"
-    Q4 = "Q4"
-    UNKNOWN = "UNKNOWN"
+    """
+    Defines the types of queries the system can process.
+    The integer values MUST correspond to the query_ids being sent.
+    """
+    Q1 = 1
+    Q2 = 2
+    Q3 = 3
+    Q4 = 4
