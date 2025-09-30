@@ -19,12 +19,12 @@ class BaseQueryStrategy:
     Abstract base class for query-specific data consolidation and finalization logic.
     Each subclass implements the business logic for a specific query type (Q1, Q2, etc.).
     """
-    def consolidate(self, state_data: Dict[str, Any], new_rows: List[Any]):
+    def consolidate(self, state_data: Dict[str, Any], table_type: str, new_rows: List[Any]):
         """
-        Processes a batch of new data rows and merges them into the query's
-        accumulated state data.
+        Default consolidation behavior: stores all raw rows, categorized by their table type.
+        This allows subclasses to process the full dataset during the finalization step.
         """
-        raise NotImplementedError("Each query strategy must implement the 'consolidate' method.")
+        state_data.setdefault(table_type, []).extend(new_rows)
 
     def finalize(self, consolidated_data: Dict[str, Any]) -> Dict[str, Any]:
         """
@@ -57,17 +57,13 @@ class BaseQueryStrategy:
 # --- Strategy Implementations ---
 class Q1Strategy(BaseQueryStrategy):
     """Strategy for Q1: Filters transactions based on time and amount."""
-    def consolidate(self, state_data: Dict[str, Any], new_rows: List[Any]):
-        """Consolidates all transaction data."""
-        state_data.setdefault('transactions', []).extend(new_rows)
-
     def finalize(self, consolidated_data: Dict[str, Any]) -> Dict[str, Any]:
         """
         Filters transactions to include only those created between 06:00 and 23:00
         with a final_amount >= 75.
         """
         filtered_transactions = []
-        for tx in consolidated_data.get('transactions', []):
+        for tx in consolidated_data.get('Transactions', []):
             try:
                 created_at = self._safe_extract_date(tx, 'created_at')
                 final_amount = self._safe_extract_numeric(tx, 'final_amount')
@@ -84,14 +80,13 @@ class Q1Strategy(BaseQueryStrategy):
 
 class Q2Strategy(BaseQueryStrategy):
     """Strategy for Q2: Ranks products by sales quantity and revenue per month."""
-    def consolidate(self, state_data: Dict[str, Any], new_rows: List[Any]):
-        """Aggregates product sales data from transaction items joined with menu items."""
-        metrics = state_data.setdefault('product_metrics', defaultdict(lambda: {'quantity': 0, 'revenue': 0.0}))
-        for row in new_rows:
+    def finalize(self, consolidated_data: Dict[str, Any]) -> Dict[str, Any]:
+        """Processes pre-joined TransactionItemsMenuItems data."""
+        metrics = defaultdict(lambda: {'quantity': 0, 'revenue': 0.0})
+        for row in consolidated_data.get('TransactionItemsMenuItems', []):
             try:
                 date = self._safe_extract_date(row)
                 month_key = date.strftime('%Y-%m')
-                # Assumes joined data with transaction_items and menu_items details
                 item_name = getattr(row, 'item_name', 'Unknown Item')
                 key = f"{month_key}|{item_name}"
                 
@@ -100,8 +95,6 @@ class Q2Strategy(BaseQueryStrategy):
             except (ValueError, AttributeError):
                 continue
 
-    def finalize(self, consolidated_data: Dict[str, Any]) -> Dict[str, Any]:
-        metrics = consolidated_data.get('product_metrics', {})
         parsed_data = [
             {"month": key.split('|')[0], "name": key.split('|')[1], **value}
             for key, value in metrics.items()
@@ -123,59 +116,51 @@ class Q2Strategy(BaseQueryStrategy):
 
 class Q3Strategy(BaseQueryStrategy):
     """Strategy for Q3: Calculates Total Processing Volume (TPV) by store per semester."""
-    def consolidate(self, state_data: Dict[str, Any], new_rows: List[Any]):
-        """Aggregates transaction final amounts by store and time."""
-        tpv = state_data.setdefault('tpv_metrics', defaultdict(float))
-        for row in new_rows:
+    def finalize(self, consolidated_data: Dict[str, Any]) -> Dict[str, Any]:
+        """Processes pre-joined TransactionStores data."""
+        tpv_metrics = defaultdict(float)
+        for row in consolidated_data.get('TransactionStores', []):
             try:
                 date = self._safe_extract_date(row)
-                # Filter for transactions between 06:00 and 23:00 as required by the query
                 if not (6 <= date.hour < 23):
                     continue
 
                 semester = "S1" if date.month <= 6 else "S2"
-                key = f"{date.year}-{semester}|{self._extract_store_name(row)}"
-                tpv[key] += self._safe_extract_numeric(row, 'final_amount')
+                store_name = getattr(row, 'store_name', 'Unknown Store')
+                key = f"{date.year}-{semester}|{store_name}"
+                tpv_metrics[key] += self._safe_extract_numeric(row, 'final_amount')
             except (ValueError, AttributeError):
                 continue
 
-    def finalize(self, consolidated_data: Dict[str, Any]) -> Dict[str, Any]:
         final_result = defaultdict(dict)
-        for key, total_volume in consolidated_data.get('tpv_metrics', {}).items():
+        for key, total_volume in tpv_metrics.items():
             year_semester, store_name = key.split('|', 1)
             final_result[store_name][year_semester] = round(total_volume, 2)
         return dict(final_result)
 
 class Q4Strategy(BaseQueryStrategy):
     """Strategy for Q4: Identifies top 3 customers by purchase count for each store."""
-    def consolidate(self, state_data: Dict[str, Any], new_rows: List[Any]):
-        """Counts purchases per user for each store."""
-        # Key: (store_name, user_id), Value: count
-        counts = state_data.setdefault('purchase_counts', defaultdict(int))
-        # Store user birthdates to avoid large joins later
-        users = state_data.setdefault('users', {})
+    def finalize(self, consolidated_data: Dict[str, Any]) -> Dict[str, Any]:
+        """Processes pre-joined TransactionStoresUsers data."""
+        purchase_counts = defaultdict(int)
+        user_birthdates = {}
 
-        for row in new_rows:
+        for row in consolidated_data.get('TransactionStoresUsers', []):
             user_id = getattr(row, 'user_id', None)
             if not user_id:
                 continue
             
-            store_name = self._extract_store_name(row)
+            store_name = getattr(row, 'store_name', 'Unknown Store')
             key = (store_name, user_id)
-            counts[key] += 1
-            
-            # Store user's birthdate if we haven't seen it before
-            if user_id not in users and hasattr(row, 'birthdate'):
-                users[user_id] = getattr(row, 'birthdate')
+            purchase_counts[key] += 1
 
-    def finalize(self, consolidated_data: Dict[str, Any]) -> Dict[str, Any]:
-        counts = consolidated_data.get('purchase_counts', {})
-        users = consolidated_data.get('users', {})
-        
+            if user_id not in user_birthdates:
+                user_birthdates[user_id] = getattr(row, 'birthdate', 'Unknown')
+
         # Convert purchase counts to a more usable list format
         parsed_data = [
             {"store_name": key[0], "user_id": key[1], "count": count}
-            for key, count in counts.items()
+            for key, count in purchase_counts.items()
         ]
         
         final_result = {}
@@ -184,7 +169,7 @@ class Q4Strategy(BaseQueryStrategy):
             
             final_result[store_name] = [
                 {
-                    "birthdate": users.get(c['user_id'], 'Unknown'), 
+                    "birthdate": user_birthdates.get(c['user_id'], 'Unknown'), 
                     "purchase_count": c['count']
                 }
                 for c in top_3

@@ -23,14 +23,17 @@ OPCODE_TO_TABLE_TYPE = {
     Opcodes.NEW_STORES: "Stores",
     Opcodes.NEW_MENU_ITEMS: "MenuItems",
     Opcodes.NEW_TRANSACTION_ITEMS: "TransactionItems",
-    Opcodes.NEW_USERS: "Users"
+    Opcodes.NEW_USERS: "Users",
+    Opcodes.NEW_TRANSACTION_STORES: "TransactionStores",
+    Opcodes.NEW_TRANSACTION_ITEMS_MENU_ITEMS: "TransactionItemsMenuItems",
+    Opcodes.NEW_TRANSACTION_STORES_USERS: "TransactionStoresUsers",
 }
 
 QUERY_TYPE_TO_EXPECTED_TABLES = {
     QueryType.Q1: {"Transactions"},
-    QueryType.Q2: {"TransactionItems", "MenuItems"},
-    QueryType.Q3: {"Transactions", "Stores"},
-    QueryType.Q4: {"Transactions", "Stores", "Users"}
+    QueryType.Q2: {"TransactionItems", "MenuItems", "TransactionItemsMenuItems"},
+    QueryType.Q3: {"Transactions", "Stores", "TransactionStores"},
+    QueryType.Q4: {"Transactions", "Stores", "Users", "TransactionStoresUsers"}
 }
 
 # --- State Management ---
@@ -91,7 +94,7 @@ class ResultsFinisher:
         is_complete = False
         with state.lock:
             self._update_batch_accounting(state, table_type, batch)
-            self._consolidate_batch_data(state, batch)
+            self._consolidate_batch_data(state, table_type, batch)
             state.last_update_time = time.time()
             if self._is_query_complete(state):
                 is_complete = True
@@ -123,11 +126,11 @@ class ResultsFinisher:
                 state.completed_tables.add(table_type)
                 logger.info(f"Query '{state.query_id}': Table '{table_type}' is now complete.")
     
-    def _consolidate_batch_data(self, state: QueryState, batch: DataBatch):
+    def _consolidate_batch_data(self, state: QueryState, table_type: str, batch: DataBatch):
         rows = getattr(batch.batch_msg, 'rows', [])
         if not rows: return
         strategy = get_strategy(state.query_type)
-        strategy.consolidate(state.consolidated_data, rows)
+        strategy.consolidate(state.consolidated_data, table_type, rows)
 
     def _is_query_complete(self, state: QueryState) -> bool:
         expected_tables = QUERY_TYPE_TO_EXPECTED_TABLES.get(state.query_type, set())

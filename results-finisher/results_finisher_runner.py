@@ -11,9 +11,7 @@ def main():
     rabbitmq_host = os.getenv("RABBITMQ_HOST", "localhost")
     input_queue_name = os.getenv("INPUT_QUEUE", "results_finisher_queue_1")
     output_queue_name = os.getenv("OUTPUT_QUEUE", "orchestrator_results_queue")
-    
-    # FIX: Removed checkpoint_dir as it's no longer used
-    
+        
     logging.info("--- ResultsFinisher Service (In-Memory) ---")
     logging.info(f"RabbitMQ Host: {rabbitmq_host}")
     logging.info(f"Input Queue: {input_queue_name}")
