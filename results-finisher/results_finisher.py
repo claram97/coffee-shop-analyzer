@@ -16,6 +16,7 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 # This is for testing different ways of handling the data.
+# Will use this when we have the whole system running.
 STRATEGY_MODE = os.getenv("STRATEGY_MODE", "append_only").lower()
 if STRATEGY_MODE == "incremental":
     from query_strategy_incremental import get_strategy
@@ -24,6 +25,10 @@ else:
     from query_strategy_append_only import get_strategy
     logger.info("Using APPEND-ONLY aggregation strategy.")
 from constants import QueryType
+
+# --- Metadata Keys for DataBatch Copies ---
+COPY_NUMBER_KEY = 1
+TOTAL_COPIES_KEY = 2
 
 OPCODE_TO_TABLE_TYPE = {
     Opcodes.NEW_TRANSACTION: "Transactions",
@@ -36,11 +41,11 @@ OPCODE_TO_TABLE_TYPE = {
     Opcodes.NEW_TRANSACTION_STORES_USERS: "TransactionStoresUsers",
 }
 
-QUERY_TYPE_TO_EXPECTED_TABLES = {
-    QueryType.Q1: {"Transactions"},
-    QueryType.Q2: {"TransactionItems", "MenuItems", "TransactionItemsMenuItems"},
-    QueryType.Q3: {"Transactions", "Stores", "TransactionStores"},
-    QueryType.Q4: {"Transactions", "Stores", "Users", "TransactionStoresUsers"}
+QUERY_TYPE_TO_TABLE = {
+    QueryType.Q1: "Transactions",
+    QueryType.Q2: "TransactionItemsMenuItems",
+    QueryType.Q3: "TransactionStores",
+    QueryType.Q4: "TransactionStoresUsers",
 }
 
 @dataclass
@@ -50,6 +55,11 @@ class QueryState:
     query_type: QueryType
     consolidated_data: Dict[str, Any] = field(default_factory=dict)
     batch_counters: Dict[str, Dict[int, Dict[str, Any]]] = field(default_factory=dict)
+    # Definitive Structure: 
+    # {table: {batch_num: {
+    #     "total_shards": int,
+    #     "shards": {shard_num: {"received_copies": set(), "total_copies": int}}
+    # }}}
     completed_tables: Set[str] = field(default_factory=set)
     eof_received: Dict[str, int] = field(default_factory=dict)
     last_update_time: float = field(default_factory=time.time)
@@ -69,7 +79,7 @@ class ResultsFinisher:
         self.active_queries: Dict[str, QueryState] = {}
         self.global_lock = threading.Lock()
 
-        logger.info("Initialized ResultsFinisher for concurrent processing (in-memory).")
+        logger.info("Initialized ResultsFinisher for processing.")
 
     def _process_message(self, body: bytes):
         try:
@@ -90,7 +100,11 @@ class ResultsFinisher:
         
         query_id = str(batch.query_ids[0])
         table_type = OPCODE_TO_TABLE_TYPE.get(batch.batch_msg.opcode)
-        if not table_type:
+        expected_table = QUERY_TYPE_TO_TABLE.get(QueryType(int(query_id)))
+
+        # If the batch's table type doesn't match the single one we expect for this query, ignore it.
+        if not table_type or table_type != expected_table:
+            logger.warning(f"Query {query_id} received unexpected table type '{table_type}'. Expected '{expected_table}'. Ignoring.")
             return
 
         with self.global_lock:
@@ -121,17 +135,27 @@ class ResultsFinisher:
         return self.active_queries[query_id]
 
     def _update_batch_accounting(self, state: QueryState, table_type: str, batch: DataBatch):
-        table_batches = state.batch_counters.setdefault(table_type, {})
-        batch_num = batch.batch_number
+        total_copies = batch.meta.get(TOTAL_COPIES_KEY, 1)
+        copy_num = batch.meta.get(COPY_NUMBER_KEY, 1)
         total_shards = batch.total_shards if batch.total_shards > 0 else 1
         shard_num = batch.shard_num if batch.total_shards > 0 else 1
 
-        shard_info = table_batches.setdefault(batch_num, {
-            "received_shards": set(),
-            "total_shards": total_shards
+        table_batches = state.batch_counters.setdefault(table_type, {})
+        batch_info = table_batches.setdefault(batch.batch_number, {
+            "total_shards": total_shards,
+            "shards": {}
         })
+        
+        # It's possible for different copies of the same shard to arrive.
+        # The total_shards value should be consistent across them.
+        batch_info["total_shards"] = total_shards
 
-        shard_info["received_shards"].add(shard_num)
+        shard_copies = batch_info["shards"].setdefault(shard_num, {
+            "received_copies": set(),
+            "total_copies": total_copies
+        })
+        shard_copies["total_copies"] = total_copies # Ensure it's updated
+        shard_copies["received_copies"].add(copy_num)
 
         if batch.batch_msg.batch_status == BatchStatus.EOF:
             state.eof_received[table_type] = max(state.eof_received.get(table_type, 0), batch_num)
@@ -147,21 +171,32 @@ class ResultsFinisher:
     def _check_and_mark_table_as_complete(self, state: QueryState, table_type: str):
         max_batch_num = state.eof_received.get(table_type)
         if max_batch_num is None:
-            return 
+            return
 
-        table_batches = state.batch_counters.get(table_type, {})
-        
+        all_batches_info = state.batch_counters.get(table_type, {})
+
         for i in range(1, max_batch_num + 1):
-            batch_info = table_batches.get(i)
-            if not batch_info or len(batch_info["received_shards"]) != batch_info["total_shards"]:
+            batch_info = all_batches_info.get(i)
+            if not batch_info: return # Batch 'i' has not arrived yet.
+
+            # Level 1 Check: Have all shards for this batch arrived?
+            if len(batch_info["shards"]) != batch_info["total_shards"]:
                 return
 
+            # Level 2 Check: For each shard, have all copies arrived?
+            for shard_num, shard_copies in batch_info["shards"].items():
+                if len(shard_copies["received_copies"]) != shard_copies["total_copies"]:
+                    return
+        
+        # If all checks pass for all batches up to the EOF, the table is complete.
         state.completed_tables.add(table_type)
         logger.info(f"Query '{state.query_id}': Table '{table_type}' is now complete.")
 
     def _is_query_complete(self, state: QueryState) -> bool:
-        expected_tables = QUERY_TYPE_TO_EXPECTED_TABLES.get(state.query_type, set())
-        return expected_tables.issubset(state.completed_tables)
+        expected_table = QUERY_TYPE_TO_TABLE.get(state.query_type)
+        if not expected_table:
+            return False
+        return expected_table in state.completed_tables
 
     def _finalize_query(self, state: QueryState):
         try:
