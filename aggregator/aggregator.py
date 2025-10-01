@@ -7,7 +7,10 @@ processing and analyzing coffee shop data from multiple clients.
 """
 import logging
 
-from aggregator.mock import mock_process
+from aggregator.mock import QueryId, mock_process
+from aggregator.processing import process_query_2, process_query_2, process_query_3, process_query_4_transactions, process_query_4_transactions, process_query_4_users, process_query_4_users
+from protocol.constants import Opcodes
+from protocol.databatch import DataBatch
 
 # from middleware.middleware_client import MessageMiddlewareExchange, MessageMiddlewareQueue
 
@@ -69,11 +72,10 @@ class Aggregator:
         
         mock_process(self.id)
 
-    
-    # def stop(self):
-    #     """Stop the aggregator server."""
-    #     self.running = False
-    #     logging.debug("Stopping aggregator server")
+    def stop(self):
+        """Stop the aggregator server."""
+        self.running = False
+        logging.debug("Stopping aggregator server")
     
     # def _handle_menu_item(self, message: bytes) -> bool:
     #     """Process incoming menu item messages."""
@@ -109,11 +111,11 @@ class Aggregator:
     #             if query_id == QueryId.FIRST_QUERY or query_id == QueryId.EOF:
     #                 self.joiner_queue.send(message)
     #             elif query_id == QueryId.THIRD_QUERY:
-    #                 self.process_query_3(transactions)
+    #                 process_query_3(transactions)
     #                 ## Falta devolver el mensaje en formato data batch para poder volver a mandarlo
     #                 self.joiner_queue.send(message)
     #             elif query_id == QueryId.FOURTH_QUERY:
-    #                 self.process_query_4_transactions(transactions)
+    #                 process_query_4_transactions(transactions)
     #                 ## Falta devolver el mensaje en formato data batch para poder volver a mandarlo
     #                 self.joiner_queue.send(message)
     #             else:
@@ -134,7 +136,7 @@ class Aggregator:
             
     #         if table_id == Opcodes.NEW_TRANSACTION_ITEMS and query_id == QueryId.SECOND_QUERY:
     #             logging.debug(f"Transaction belongs to table {table_id} and query {query_id}")
-    #             self.process_query_2(transaction_items)
+    #             process_query_2(transaction_items)
     #             ## Falta devolver el mensaje en formato data batch para poder volver a mandarlo
     #             self.joiner_queue.send(message)
     #         elif table_id == Opcodes.EOF:
@@ -156,7 +158,7 @@ class Aggregator:
             
     #         if table_id == Opcodes.NEW_USERS and query_id == QueryId.FOURTH_QUERY:
     #             logging.debug(f"User belongs to table {table_id} and query {query_id}")
-    #             self.process_query_4_users(users)
+    #             process_query_4_users(users)
     #             ## Falta devolver el mensaje en formato data batch para poder volver a mandarlo
     #             self.joiner_queue.send(message)
     #         elif table_id == Opcodes.EOF:
