@@ -6,6 +6,8 @@ bin/
 
 # Data files
 .data/*.csv
+.vscode
+middleware/__pycache__
 .data/
 
 # Python
