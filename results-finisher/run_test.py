@@ -228,9 +228,9 @@ class TestFullPipeline:
         top_customers_store1 = res_data['Downtown']
         # There are 3 unique customers for the Downtown store, so the top 3 should return all of them.
         assert len(top_customers_store1) == 3
-        # User 102 and 103 are tied with 2 purchases each. The order is not guaranteed.
-        # So we check that the top two customers both have 2 purchases.
+        # All three customers (101, 102, 103) have exactly 2 purchases each at Downtown store.
+        # User 101: t1, t4 | User 102: t6, t7 | User 103: t3, t8
+        # So all three should have purchase_count == 2
         assert top_customers_store1[0]['purchase_count'] == 2
         assert top_customers_store1[1]['purchase_count'] == 2
-        # And the third customer has 1 purchase
-        assert top_customers_store1[2]['purchase_count'] == 1
+        assert top_customers_store1[2]['purchase_count'] == 2

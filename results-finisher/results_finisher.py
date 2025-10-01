@@ -8,7 +8,14 @@ from typing import Dict, Any, Set
 
 from middleware_client import MessageMiddlewareQueue
 from protocol import ProtocolError, Opcodes, BatchStatus, DataBatch
-# This is for testing different ways of handling the data.s
+
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(levelname)s - [%(name)s] - %(message)s'
+)
+logger = logging.getLogger(__name__)
+
+# This is for testing different ways of handling the data.
 STRATEGY_MODE = os.getenv("STRATEGY_MODE", "append_only").lower()
 if STRATEGY_MODE == "incremental":
     from query_strategy_incremental import get_strategy
@@ -17,12 +24,6 @@ else:
     from query_strategy_append_only import get_strategy
     logger.info("Using APPEND-ONLY aggregation strategy.")
 from constants import QueryType
-
-logging.basicConfig(
-    level=logging.INFO,
-    format='%(asctime)s - %(levelname)s - [%(name)s] - %(message)s'
-)
-logger = logging.getLogger(__name__)
 
 OPCODE_TO_TABLE_TYPE = {
     Opcodes.NEW_TRANSACTION: "Transactions",
