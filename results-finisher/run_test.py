@@ -14,7 +14,10 @@ sys.path.insert(0, project_root)
 
 from middleware_client import MessageMiddlewareQueue
 from protocol import DataBatch, BatchStatus, Opcodes
-from protocol.messages import NewTransactions, NewStores, NewUsers, NewMenuItems, NewTransactionItems
+from protocol.messages import (
+    NewTransactions, NewStores, NewUsers, NewMenuItems, NewTransactionItems,
+    NewTransactionStores, NewTransactionItemsMenuItems, NewTransactionStoresUsers
+)
 from protocol.parsing import write_i32, write_string, write_u8
 from constants import QueryType
 
@@ -152,19 +155,17 @@ class TestFullPipeline:
         producer, _, result_queue = producer_and_listener
         QUERY_ID = 2
         
-        # FIX: Send pre-joined data for Q2 as per the new requirement
+        # 1. Create joined data
         joined_df = pd.merge(self.mock_data['transaction_items'], self.mock_data['menu_items'], on='item_id')
         joined_data = joined_df.to_dict('records')
 
-        main_batch = create_data_batch(
-            QUERY_ID, NewTransactionItems, joined_data, 1, is_eof=True,
-            table_ids=[Opcodes.NEW_TRANSACTION_ITEMS, Opcodes.NEW_MENU_ITEMS]
-        )
+        # 2. Send the main batch with joined data
+        main_batch = create_data_batch(QUERY_ID, NewTransactionItemsMenuItems, joined_data, 1, is_eof=True)
         producer.send(main_batch)
 
-        # Send the accounting-only EOF for the MenuItems table
-        menu_items_eof = create_data_batch(QUERY_ID, NewMenuItems, [], 1, is_eof=True)
-        producer.send(menu_items_eof)
+        # 3. Send accounting EOFs for source tables
+        producer.send(create_data_batch(QUERY_ID, NewTransactionItems, [], 1, is_eof=True))
+        producer.send(create_data_batch(QUERY_ID, NewMenuItems, [], 1, is_eof=True))
         
         result = result_queue.get(timeout=10)
 
@@ -177,17 +178,17 @@ class TestFullPipeline:
         producer, _, result_queue = producer_and_listener
         QUERY_ID = 3
         
+        # 1. Create joined data
         joined_df = pd.merge(self.mock_data['transactions'], self.mock_data['stores'], on='store_id')
         joined_data = joined_df.to_dict('records')
         
-        main_batch = create_data_batch(
-            QUERY_ID, NewTransactions, joined_data, 1, is_eof=True,
-            table_ids=[Opcodes.NEW_TRANSACTION, Opcodes.NEW_STORES]
-        )
+        # 2. Send the main batch with joined data
+        main_batch = create_data_batch(QUERY_ID, NewTransactionStores, joined_data, 1, is_eof=True)
         producer.send(main_batch)
         
-        stores_eof = create_data_batch(QUERY_ID, NewStores, [], 1, is_eof=True)
-        producer.send(stores_eof)
+        # 3. Send accounting EOFs for source tables
+        producer.send(create_data_batch(QUERY_ID, NewTransactions, [], 1, is_eof=True))
+        producer.send(create_data_batch(QUERY_ID, NewStores, [], 1, is_eof=True))
 
         result = result_queue.get(timeout=10)
         
@@ -200,21 +201,19 @@ class TestFullPipeline:
         producer, _, result_queue = producer_and_listener
         QUERY_ID = 4
 
+        # 1. Create joined data
         tx_stores = pd.merge(self.mock_data['transactions'], self.mock_data['stores'], on='store_id')
         joined_df = pd.merge(tx_stores, self.mock_data['users'], on='user_id')
         joined_data = joined_df.to_dict('records')
 
-        main_batch = create_data_batch(
-            QUERY_ID, NewTransactions, joined_data, 1, is_eof=True,
-            table_ids=[Opcodes.NEW_TRANSACTION, Opcodes.NEW_STORES, Opcodes.NEW_USERS]
-        )
+        # 2. Send the main batch with joined data
+        main_batch = create_data_batch(QUERY_ID, NewTransactionStoresUsers, joined_data, 1, is_eof=True)
         producer.send(main_batch)
 
-        stores_eof = create_data_batch(QUERY_ID, NewStores, [], 1, is_eof=True)
-        producer.send(stores_eof)
-        
-        users_eof = create_data_batch(QUERY_ID, NewUsers, [], 1, is_eof=True)
-        producer.send(users_eof)
+        # 3. Send accounting EOFs for source tables
+        producer.send(create_data_batch(QUERY_ID, NewTransactions, [], 1, is_eof=True))
+        producer.send(create_data_batch(QUERY_ID, NewStores, [], 1, is_eof=True))
+        producer.send(create_data_batch(QUERY_ID, NewUsers, [], 1, is_eof=True))
 
         result = result_queue.get(timeout=10)
 
