@@ -8,10 +8,16 @@ from typing import Dict, Any, Set
 
 from middleware_client import MessageMiddlewareQueue
 from protocol import ProtocolError, Opcodes, BatchStatus, DataBatch
-from query_strategy import get_strategy
+# This is for testing different ways of handling the data.s
+STRATEGY_MODE = os.getenv("STRATEGY_MODE", "append_only").lower()
+if STRATEGY_MODE == "incremental":
+    from query_strategy_incremental import get_strategy
+    logger.info("Using INCREMENTAL aggregation strategy.")
+else:
+    from query_strategy_append_only import get_strategy
+    logger.info("Using APPEND-ONLY aggregation strategy.")
 from constants import QueryType
 
-# --- Configuration ---
 logging.basicConfig(
     level=logging.INFO,
     format='%(asctime)s - %(levelname)s - [%(name)s] - %(message)s'
@@ -36,22 +42,21 @@ QUERY_TYPE_TO_EXPECTED_TABLES = {
     QueryType.Q4: {"Transactions", "Stores", "Users", "TransactionStoresUsers"}
 }
 
-# --- State Management ---
 @dataclass
 class QueryState:
     """Represents the state for a single, in-flight query."""
     query_id: str
     query_type: QueryType
     consolidated_data: Dict[str, Any] = field(default_factory=dict)
-    batch_counters: Dict[str, Dict[str, int]] = field(default_factory=dict)
+    batch_counters: Dict[str, Dict[int, Dict[str, Any]]] = field(default_factory=dict)
     completed_tables: Set[str] = field(default_factory=set)
+    eof_received: Dict[str, int] = field(default_factory=dict)
     last_update_time: float = field(default_factory=time.time)
     lock: threading.Lock = field(default_factory=threading.Lock, repr=False)
 
-# --- Core Service ---
 class ResultsFinisher:
     """
-    Processes batches concurrently using a deadlock-free, per-query locking mechanism.
+    Processes batches using per-query locking mechanism.
     """
     def __init__(self,
                  input_client: MessageMiddlewareQueue,
@@ -61,7 +66,6 @@ class ResultsFinisher:
         self.output_client = output_client
         
         self.active_queries: Dict[str, QueryState] = {}
-        # The global lock protects the self.active_queries dictionary itself.
         self.global_lock = threading.Lock()
 
         logger.info("Initialized ResultsFinisher for concurrent processing (in-memory).")
@@ -105,7 +109,6 @@ class ResultsFinisher:
             self._cleanup_query_state(query_id)
 
     def _get_or_create_query_state(self, query_id: str) -> QueryState:
-        """MUST be called within the context of the global_lock."""
         if query_id not in self.active_queries:
             try:
                 query_type = QueryType(int(query_id))
@@ -117,14 +120,19 @@ class ResultsFinisher:
         return self.active_queries[query_id]
 
     def _update_batch_accounting(self, state: QueryState, table_type: str, batch: DataBatch):
-        counter = state.batch_counters.setdefault(table_type, {"received": 0, "expected": None})
-        counter["received"] += 1
-        
+        table_batches = state.batch_counters.setdefault(table_type, {})
+        batch_num = batch.batch_number
+        shard_info = table_batches.setdefault(batch_num, {
+            "received_shards": set(),
+            "total_shards": batch.total_shards
+        })
+
+        shard_info["received_shards"].add(batch.shard_num)
+
         if batch.batch_msg.batch_status == BatchStatus.EOF:
-            counter["expected"] = batch.batch_number
-            if counter["received"] >= counter["expected"]:
-                state.completed_tables.add(table_type)
-                logger.info(f"Query '{state.query_id}': Table '{table_type}' is now complete.")
+            state.eof_received[table_type] = max(state.eof_received.get(table_type, 0), batch_num)
+
+        self._check_and_mark_table_as_complete(state, table_type)
     
     def _consolidate_batch_data(self, state: QueryState, table_type: str, batch: DataBatch):
         rows = getattr(batch.batch_msg, 'rows', [])
@@ -132,12 +140,26 @@ class ResultsFinisher:
         strategy = get_strategy(state.query_type)
         strategy.consolidate(state.consolidated_data, table_type, rows)
 
+    def _check_and_mark_table_as_complete(self, state: QueryState, table_type: str):
+        max_batch_num = state.eof_received.get(table_type)
+        if max_batch_num is None:
+            return 
+
+        table_batches = state.batch_counters.get(table_type, {})
+        
+        for i in range(1, max_batch_num + 1):
+            batch_info = table_batches.get(i)
+            if not batch_info or len(batch_info["received_shards"]) != batch_info["total_shards"]:
+                return
+
+        state.completed_tables.add(table_type)
+        logger.info(f"Query '{state.query_id}': Table '{table_type}' is now complete.")
+
     def _is_query_complete(self, state: QueryState) -> bool:
         expected_tables = QUERY_TYPE_TO_EXPECTED_TABLES.get(state.query_type, set())
         return expected_tables.issubset(state.completed_tables)
 
     def _finalize_query(self, state: QueryState):
-        """Called WITHOUT holding locks to prevent blocking other queries."""
         try:
             strategy = get_strategy(state.query_type)
             final_result = strategy.finalize(state.consolidated_data)
@@ -147,7 +169,6 @@ class ResultsFinisher:
             self._send_result(state.query_id, "error", error_message=str(e))
 
     def _cleanup_query_state(self, query_id: str):
-        """Removes the query from the active dictionary. Requires the global lock."""
         with self.global_lock:
             if query_id in self.active_queries:
                 del self.active_queries[query_id]

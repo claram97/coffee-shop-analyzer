@@ -73,7 +73,7 @@ def generate_mock_data():
     return data
 
 # --- Protocol Helper ---
-def create_data_batch(query_id, TableMsgClass, rows, batch_num, is_eof=False, table_ids=None):
+def create_data_batch(query_id, TableMsgClass, rows, batch_num, is_eof=False, table_ids=None, shard_num=1, total_shards=1):
     """
     FIXED: Serializes ALL fields from the row object, not just the base fields.
     """
@@ -103,7 +103,9 @@ def create_data_batch(query_id, TableMsgClass, rows, batch_num, is_eof=False, ta
         query_ids=[query_id],
         meta={},
         table_ids=table_ids,
-        batch_bytes=DataBatch.make_embedded(table_msg.opcode, bytes(body_buf))
+        batch_bytes=DataBatch.make_embedded(table_msg.opcode, bytes(body_buf)),
+        total_shards=total_shards,
+        shard_num=shard_num
     )
     batch.batch_number = batch_num
     return batch.to_bytes()
@@ -178,19 +180,22 @@ class TestFullPipeline:
         producer, _, result_queue = producer_and_listener
         QUERY_ID = 3
         
-        # 1. Create joined data
+        # 1. Create joined data and split into two shards
         joined_df = pd.merge(self.mock_data['transactions'], self.mock_data['stores'], on='store_id')
         joined_data = joined_df.to_dict('records')
+        shard1_data = joined_data[:len(joined_data)//2]
+        shard2_data = joined_data[len(joined_data)//2:]
+
+        # 2. Send the two shards for the main joined data batch
+        # Note: Both are batch_num=1, but different shards. EOF is on the last shard.
+        producer.send(create_data_batch(QUERY_ID, NewTransactionStores, shard1_data, 1, is_eof=False, shard_num=1, total_shards=2))
+        producer.send(create_data_batch(QUERY_ID, NewTransactionStores, shard2_data, 1, is_eof=True, shard_num=2, total_shards=2))
         
-        # 2. Send the main batch with joined data
-        main_batch = create_data_batch(QUERY_ID, NewTransactionStores, joined_data, 1, is_eof=True)
-        producer.send(main_batch)
-        
-        # 3. Send accounting EOFs for source tables
+        # 3. Send accounting EOFs for source tables (these are not sharded)
         producer.send(create_data_batch(QUERY_ID, NewTransactions, [], 1, is_eof=True))
         producer.send(create_data_batch(QUERY_ID, NewStores, [], 1, is_eof=True))
 
-        result = result_queue.get(timeout=10)
+        result = result_queue.get(timeout=15)
         
         assert result['status'] == 'success'
         res_data = result['result']
