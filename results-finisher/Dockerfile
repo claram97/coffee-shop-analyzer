@@ -1,0 +1,20 @@
+# results-finisher/Dockerfile
+FROM python:3.11-slim
+
+WORKDIR /app
+
+# Add the working directory to the PYTHONPATH so imports work correctly
+ENV PYTHONPATH=/app
+
+# Copy requirements first for better Docker layer caching
+COPY results-finisher/requirements.txt .
+RUN pip install --no-cache-dir -r requirements.txt
+
+# Copy the protocol folder from repository root
+COPY protocol ./protocol
+
+# Copy all the Python scripts and other files from results-finisher
+COPY results-finisher .
+
+# Create an __init__.py file to make sure the protocol can be imported properly
+RUN touch protocol/__init__.py || true

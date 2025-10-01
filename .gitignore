@@ -8,3 +8,4 @@ bin/
 .vscode
 middleware/__pycache__
 .data/
+results-finisher/__pycache__
