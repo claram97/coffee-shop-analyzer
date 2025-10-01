@@ -5,7 +5,6 @@ from aggregator import Aggregator
 import logging
 import os
 
-
 def initialize_config():
     """Parse env variables or config file to find program config params
 
@@ -39,7 +38,6 @@ def initialize_config():
 
     return config_params
 
-
 def main():
     config_params = initialize_config()
     logging_level = config_params["logging_level"]
@@ -56,7 +54,6 @@ def main():
     server = Aggregator(aggregator_id)
     server.run()
 
-
 def initialize_log(logging_level):
     """
     Python custom logging initialization
@@ -69,7 +66,6 @@ def initialize_log(logging_level):
         level=logging_level,
         datefmt="%Y-%m-%d %H:%M:%S",
     )
-
 
 if __name__ == "__main__":
     main()
