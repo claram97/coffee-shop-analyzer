@@ -57,15 +57,18 @@ class Aggregator:
     #         queue_name="aggregator_to_joiner_queue"
     #     )
     
-    # def run(self):
-    #     """Start the aggregator server."""
-    #     self.running = True
-    #     self._menu_items_exchange.start_consuming(self._handle_menu_item)
-    #     self._stores_exchange.start_consuming(self._handle_store)
-    #     self._transactions_exchange.start_consuming(self._handle_transaction)
-    #     self._transaction_items_exchange.start_consuming(self._handle_transaction_item)
-    #     self._users_exchange.start_consuming(self._handle_user)
-    #     logging.debug("Started aggregator server")
+    def run(self):
+        """Start the aggregator server."""
+        self.running = True
+        # self._menu_items_exchange.start_consuming(self._handle_menu_item)
+        # self._stores_exchange.start_consuming(self._handle_store)
+        # self._transactions_exchange.start_consuming(self._handle_transaction)
+        # self._transaction_items_exchange.start_consuming(self._handle_transaction_item)
+        # self._users_exchange.start_consuming(self._handle_user)
+        # logging.debug("Started aggregator server")
+        
+        mock_process(self.id)
+
     
     # def stop(self):
     #     """Stop the aggregator server."""
@@ -163,12 +166,3 @@ class Aggregator:
     #             logging.error(f"User message with unexpected table_id {table_id} or query_id {query_id}")
     #     except:
     #         logging.error(f"Failed to decode user message")
-    
-    def run(self):
-        """Start the aggregator server."""
-        self.running = True
-        logging.debug("Started aggregator server")
-        
-        mock_process(self.id)
-
-        self.running = False
