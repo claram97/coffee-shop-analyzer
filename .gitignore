@@ -6,3 +6,6 @@ bin/
 
 .data/*.csv
 .data/
+
+/aggregator/__pycache__/
+/protocol/__pycache__/
