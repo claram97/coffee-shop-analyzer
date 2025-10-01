@@ -4,8 +4,13 @@
 # Executables
 bin/
 
+# Data files
 .data/*.csv
 .data/
 
-/aggregator/__pycache__/
-/protocol/__pycache__/
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
