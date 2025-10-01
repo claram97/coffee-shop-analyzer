@@ -14,6 +14,9 @@ from .entities import (
     RawTransaction,
     RawTransactionItem,
     RawUser,
+    RawTransactionStore,
+    RawTransactionItemMenuItem,
+    RawTransactionStoreUser,
 )
 from .parsing import (
     BytesReader,
@@ -320,6 +323,62 @@ class NewStores(TableMessage):
             opcode=Opcodes.NEW_STORES,
             required_keys=required,
             row_factory=RawStore,
+        )
+
+
+class NewTransactionStores(TableMessage):
+    """NEW_TRANSACTION_STORES message for joined transaction and store data."""
+
+    def __init__(self):
+        required = (
+            "transaction_id",
+            "store_id",
+            "store_name",
+            "city",
+            "final_amount",
+            "created_at",
+        )
+        super().__init__(
+            opcode=Opcodes.NEW_TRANSACTION_STORES,
+            required_keys=required,
+            row_factory=RawTransactionStore,
+        )
+
+
+class NewTransactionItemsMenuItems(TableMessage):
+    """NEW_TRANSACTION_ITEMS_MENU_ITEMS message for joined transaction item and menu item data."""
+
+    def __init__(self):
+        required = (
+            "transaction_id",
+            "item_name",
+            "quantity",
+            "subtotal",
+            "created_at",
+        )
+        super().__init__(
+            opcode=Opcodes.NEW_TRANSACTION_ITEMS_MENU_ITEMS,
+            required_keys=required,
+            row_factory=RawTransactionItemMenuItem,
+        )
+
+
+class NewTransactionStoresUsers(TableMessage):
+    """NEW_TRANSACTION_STORES_USERS message for joined transaction, store, and user data."""
+
+    def __init__(self):
+        required = (
+            "transaction_id",
+            "store_id",
+            "store_name",
+            "user_id",
+            "birthdate",
+            "created_at",
+        )
+        super().__init__(
+            opcode=Opcodes.NEW_TRANSACTION_STORES_USERS,
+            required_keys=required,
+            row_factory=RawTransactionStoreUser,
         )
 
 
