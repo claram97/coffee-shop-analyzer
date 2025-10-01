@@ -122,12 +122,15 @@ class ResultsFinisher:
     def _update_batch_accounting(self, state: QueryState, table_type: str, batch: DataBatch):
         table_batches = state.batch_counters.setdefault(table_type, {})
         batch_num = batch.batch_number
+        total_shards = batch.total_shards if batch.total_shards > 0 else 1
+        shard_num = batch.shard_num if batch.total_shards > 0 else 1
+
         shard_info = table_batches.setdefault(batch_num, {
             "received_shards": set(),
-            "total_shards": batch.total_shards
+            "total_shards": total_shards
         })
 
-        shard_info["received_shards"].add(batch.shard_num)
+        shard_info["received_shards"].add(shard_num)
 
         if batch.batch_msg.batch_status == BatchStatus.EOF:
             state.eof_received[table_type] = max(state.eof_received.get(table_type, 0), batch_num)

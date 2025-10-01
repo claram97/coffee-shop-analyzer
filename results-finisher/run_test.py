@@ -73,7 +73,7 @@ def generate_mock_data():
     return data
 
 # --- Protocol Helper ---
-def create_data_batch(query_id, TableMsgClass, rows, batch_num, is_eof=False, table_ids=None, shard_num=1, total_shards=1):
+def create_data_batch(query_id, TableMsgClass, rows, batch_num, is_eof=False, table_ids=None, shard_num=0, total_shards=0):
     """
     FIXED: Serializes ALL fields from the row object, not just the base fields.
     """
