@@ -1,5 +1,6 @@
 import pika
 import threading
+import logging
 from abc import ABC, abstractmethod
 import time
 
@@ -192,9 +193,11 @@ class MessageMiddlewareQueue(RabbitMQBase):
 
 
 class MessageMiddlewareExchange(RabbitMQBase):
-    def __init__(self, host, exchange_name, route_keys):
+    def __init__(self, host, exchange_name, route_keys, is_consumer=True, queue_name=None):
         self.exchange_name = exchange_name
         self.route_keys = route_keys if isinstance(route_keys, list) else [route_keys]
+        self.is_consumer = is_consumer
+        self.provided_queue_name = queue_name
 
         if not self.route_keys:
             raise ValueError("MessageMiddlewareExchange requires at least one route key for sending.")
@@ -205,14 +208,34 @@ class MessageMiddlewareExchange(RabbitMQBase):
 
     def _setup_exchange(self):
         self._channel.exchange_declare(exchange=self.exchange_name, exchange_type='topic', durable=True)
-        result = self._channel.queue_declare(queue='', exclusive=True)
-        self.queue_name = result.method.queue
-        for key in self.route_keys:
-            self._channel.queue_bind(
-                exchange=self.exchange_name,
-                queue=self.queue_name,
-                routing_key=key
+        
+        # If this is a consumer, create a durable named queue
+        if self.is_consumer:
+            if self.provided_queue_name:
+                # Use the provided queue name if given
+                queue_name = self.provided_queue_name
+            else:
+                # Create a stable queue name from the exchange and first routing key
+                safe_rk = self.default_routing_key.replace('.', '_').replace('*', 'star').replace('#', 'hash')
+                queue_name = f"{self.exchange_name}.{safe_rk}"
+            
+            result = self._channel.queue_declare(
+                queue=queue_name,
+                durable=True,       # Survive broker restarts
+                exclusive=False     # Allow reconnections to the same queue
             )
+            self.queue_name = result.method.queue
+            
+            # Bind the queue to each routing key
+            for key in self.route_keys:
+                self._channel.queue_bind(
+                    exchange=self.exchange_name,
+                    queue=self.queue_name,
+                    routing_key=key
+                )
+        else:
+            # For publishers, we don't need a queue
+            self.queue_name = None
 
     def send(self, message):
         try:
@@ -232,6 +255,15 @@ class MessageMiddlewareExchange(RabbitMQBase):
         try:
             self.stop_consuming()
             if self._channel and self._channel.is_open:
-                self._channel.exchange_delete(exchange=self.exchange_name)
+                # Only delete queue if we're a consumer and have a queue
+                if self.is_consumer and self.queue_name:
+                    try:
+                        self._channel.queue_delete(queue=self.queue_name)
+                    except Exception as e:
+                        logging.warning(f"Failed to delete queue {self.queue_name}: {e}")
+                
+                # Be careful with exchange deletion - it might be used by other components
+                # Only uncomment if you're sure it's safe to delete the exchange
+                # self._channel.exchange_delete(exchange=self.exchange_name)
         except Exception as e:
-            raise MessageMiddlewareDeleteError(f"Error deleting exchange '{self.exchange_name}'") from e
+            raise MessageMiddlewareDeleteError(f"Error cleaning up exchange resources '{self.exchange_name}'") from e

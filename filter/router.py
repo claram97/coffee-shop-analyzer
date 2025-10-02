@@ -383,10 +383,17 @@ class ExchangeBusProducer:
         key = (ex, rk)
         pub = self._pub_cache.get(key)
         if pub is None:
-            self._log.debug(
+            self._log.info(
                 "create publisher exchange=%s rk=%s host=%s", ex, rk, self._host
             )
-            pub = MessageMiddlewareExchange(self._host, ex, [rk])
+            # Configure as a producer (is_consumer=False) - we don't need a queue
+            pub = MessageMiddlewareExchange(
+                host=self._host, 
+                exchange_name=ex, 
+                route_keys=[rk],
+                is_consumer=False,
+                queue_name=None
+            )
             self._pub_cache[key] = pub
         return pub
 
