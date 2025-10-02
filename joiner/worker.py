@@ -329,6 +329,7 @@ class JoinerWorker:
                     city=norm(getattr(st, "city", "")),
                     final_amount=norm(getattr(tx, "final_amount", "")),
                     created_at=norm(getattr(tx, "created_at", "")),
+                    user_id=norm(getattr(tx, "user_id", "")),
                 )
             )
 
@@ -358,7 +359,7 @@ class JoinerWorker:
                 template.meta[total_u8] = idx_u8
 
                 template.batch_bytes = template.batch_msg.to_bytes()
-                template_raw = template.serialize_to_bytes()
+                template_raw = template.to_bytes()
 
                 item = {"template_raw": template_raw, "rows": lst}
                 self._store.append_list("q4_by_user", uid, item)
@@ -453,5 +454,5 @@ class JoinerWorker:
     def _send(self, db: DataBatch):
         if getattr(db, "batch_msg", None) and hasattr(db.batch_msg, "to_bytes"):
             db.batch_bytes = db.batch_msg.to_bytes()
-        raw = db.serialize_to_bytes()
+        raw = db.to_bytes()
         self._out.send(raw)
