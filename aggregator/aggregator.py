@@ -23,7 +23,7 @@ from middleware.middleware_client import (
     MessageMiddlewareExchange,
     MessageMiddlewareQueue,
 )
-from protocol.constants import Opcodes
+from protocol.constants import Opcodes, BatchStatus
 from protocol.databatch import DataBatch
 
 # Para transactions y query 1: re-enviar
@@ -154,24 +154,32 @@ class Aggregator:
             transactions_databatch = DataBatch.deserialize_from_bytes(message)
             transactions = transactions_databatch.batch_msg.rows
             query_id = transactions_databatch.query_ids[0]
-            table_id = transactions_databatch.table_ids[0]
+            table_id = transactions_databatch.batch_msg.opcode
             logging.debug(
                 f"Transaction belongs to table {table_id} and query {query_id}"
             )
 
             if table_id == Opcodes.NEW_TRANSACTION:
-                if query_id == QueryId.FIRST_QUERY or query_id == QueryId.EOF:
+                if query_id == QueryId.FIRST_QUERY or transactions_databatch.batch_msg.batch_status == BatchStatus.EOF:
                     self.joiner_queue.send(message)
                 elif query_id == QueryId.THIRD_QUERY:
                     processed_data = process_query_3(transactions)
                     serialized_data = serialize_query3_results(processed_data)
-                    self.joiner_queue.send(serialized_data)
+                    transactions_databatch.batch_msg.rows = serialized_data
+                    transactions_databatch.batch_msg.amount = len(serialized_data)
+                    transactions_databatch.batch_bytes = transactions_databatch.batch_msg.to_bytes()
+                    serialized_databatch = transactions_databatch.to_bytes()
+                    self.joiner_queue.send(serialized_databatch)
                 elif query_id == QueryId.FOURTH_QUERY:
                     processed_data = process_query_4_transactions(transactions)
                     serialized_data = serialize_query4_transaction_results(
                         processed_data
                     )
-                    self.joiner_queue.send(serialized_data)
+                    transactions_databatch.batch_msg.rows = serialized_data
+                    transactions_databatch.batch_msg.amount = len(serialized_data)
+                    transactions_databatch.batch_bytes = transactions_databatch.batch_msg.to_bytes()
+                    serialized_databatch = transactions_databatch.to_bytes()
+                    self.joiner_queue.send(serialized_databatch)
                 else:
                     logging.error(
                         f"Transaction message with unexpected query_id {query_id}"
@@ -190,25 +198,40 @@ class Aggregator:
             transaction_items_databatch = DataBatch.deserialize_from_bytes(message)
             transaction_items = transaction_items_databatch.batch_msg.rows
             query_id = transaction_items_databatch.query_ids[0]
-            table_ids = transaction_items_databatch.table_ids
+            table_id = transaction_items_databatch.batch_msg.opcode
 
-            if (
-                Opcodes.NEW_TRANSACTION_ITEMS in table_ids
-                and query_id == QueryId.SECOND_QUERY
-            ):
-                logging.debug(
-                    f"Transaction belongs to table {table_ids} and query {query_id}"
-                )
-                processed_data = process_query_2(transaction_items)
-                serialized_data = serialize_query2_results(processed_data)
-                self.joiner_queue.send(serialized_data)
-            elif Opcodes.EOF in table_ids:
+            if transaction_items_databatch.batch_msg.batch_status == BatchStatus.EOF:
                 logging.info(f"EOF message received for transaction items.")
                 self.joiner_queue.send(message)
             else:
-                logging.error(
-                    f"Transaction item message with unexpected table_id {table_ids} or query_id {query_id}"
+                logging.debug(
+                    f"Transaction belongs to table {table_id} and query {query_id}"
                 )
+                processed_data = process_query_2(transaction_items)
+                serialized_data = serialize_query2_results(processed_data)
+                transaction_items_databatch.batch_msg.rows = serialized_data
+                transaction_items_databatch.batch_msg.amount = len(serialized_data)
+                transaction_items_databatch.batch_bytes = transaction_items_databatch.batch_msg.to_bytes()
+                serialized_databatch = transaction_items_databatch.to_bytes()
+                self.joiner_queue.send(serialized_databatch)
+
+            # if (
+            #     Opcodes.NEW_TRANSACTION_ITEMS == table_id
+            #     and QueryId.SECOND_QUERY in transaction_items_databatch.query_ids 
+            # ):
+            #     logging.debug(
+            #         f"Transaction belongs to table {table_id} and query {query_id}"
+            #     )
+            #     processed_data = process_query_2(transaction_items)
+            #     serialized_data = serialize_query2_results(processed_data)
+            #     self.joiner_queue.send(serialized_data)
+            # elif transaction_items_databatch.batch_msg.batch_status == BatchStatus.EOF:
+            #     logging.info(f"EOF message received for transaction items.")
+            #     self.joiner_queue.send(message)
+            # else:
+            #     logging.error(
+            #         f"Transaction item message with unexpected opcode {table_id} or query_id {query_id}"
+            #     )
         except Exception as e:
             logging.error("Failed to decode transaction item message: %s", e)
 
