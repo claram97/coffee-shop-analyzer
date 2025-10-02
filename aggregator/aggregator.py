@@ -197,7 +197,7 @@ class Aggregator:
                 and query_id == QueryId.SECOND_QUERY
             ):
                 logging.debug(
-                    f"Transaction belongs to table {table_id} and query {query_id}"
+                    f"Transaction belongs to table {table_ids} and query {query_id}"
                 )
                 processed_data = process_query_2(transaction_items)
                 serialized_data = serialize_query2_results(processed_data)
@@ -207,7 +207,7 @@ class Aggregator:
                 self.joiner_queue.send(message)
             else:
                 logging.error(
-                    f"Transaction item message with unexpected table_id {table_id} or query_id {query_id}"
+                    f"Transaction item message with unexpected table_id {table_ids} or query_id {query_id}"
                 )
         except Exception as e:
             logging.error("Failed to decode transaction item message: %s", e)
