@@ -1,15 +1,10 @@
 # id: 1
-orchestrator:
-  address: "orchestrator:12345"
+server:
+  address: "server:12345"
 loop:
   amount: 5
   period: "5s"
 log:
-  level: "info"
+  level: "INFO"
 batch:
-  maxAmount: 50000 # number of lines
-data:
-  folder: "/data" # folder with CSV files
-retries:
-  attempts: 5
-  retryInterval: 2 # in seconds
+  maxAmount: 10
