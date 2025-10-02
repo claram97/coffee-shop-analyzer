@@ -55,11 +55,11 @@ def _shard_key_for_row(table_id: int, row, queries: List[int]) -> Optional[str]:
         return str(key) if key is not None else None
 
     if 2 in q and table_id == Opcodes.NEW_TRANSACTION_ITEMS:
-        key = getattr(row, "transaction_id", None)
+        key = getattr(row, "item_id", None)
         return str(key) if key is not None else None
 
     if 3 in q and table_id == Opcodes.NEW_TRANSACTION:
-        key = getattr(row, "transaction_id", None)
+        key = getattr(row, "store_id", None)
         return str(key) if key is not None else None
 
     return None
@@ -129,10 +129,30 @@ class JoinerRouter:
 
     @staticmethod
     def _eof_table_id(eof: EOFMessage) -> Optional[int]:
-        val = getattr(eof, "table_type", None)
-        if val is None:
+        # Intentar ambos: atributo y método helper
+        raw = getattr(eof, "table_type", None)
+        if raw in (None, "") and hasattr(eof, "get_table_type"):
+            try:
+                raw = eof.get_table_type()
+            except Exception:
+                raw = None
+
+        if raw is None:
             return None
-        return NAME_TO_ID.get(str(val).lower())
+
+        s = str(raw).strip().lower()
+
+        # 1) nombre → id
+        if s in NAME_TO_ID:
+            return NAME_TO_ID[s]
+
+        # 2) numérico → id
+        try:
+            num = int(s)
+            # validar que sea un opcode conocido
+            return num if num in ID_TO_NAME else None
+        except ValueError:
+            return None
 
     def _on_raw(self, raw: bytes):
         eof = self._try_parse_eof(raw)
@@ -177,7 +197,7 @@ class JoinerRouter:
             if getattr(db_sh, "batch_msg", None) and hasattr(db_sh.batch_msg, "rows"):
                 db_sh.batch_msg.rows = shard_rows
             db_sh.batch_bytes = db_sh.batch_msg.to_bytes()
-            raw_sh = db_sh.serialize_to_bytes()
+            raw_sh = db_sh.to_bytes()
             self._publish(cfg, shard, raw_sh)
 
     def _handle_partition_eof_like(self, eof: EOFMessage, raw_eof: bytes) -> None:
@@ -231,7 +251,7 @@ def build_route_cfg_from_config(cfg: "Config") -> Dict[int, TableRouteCfg]:
         return ex_fmt.format(table=table)
 
     def _rk_pattern(table: str) -> str:
-        return rk_fmt.format(table=table, shard="{shard:02d}")
+        return rk_fmt.replace("{table}", table)
 
     route: Dict[int, TableRouteCfg] = {}
 
