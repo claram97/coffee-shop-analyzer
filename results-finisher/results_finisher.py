@@ -52,6 +52,7 @@ class QueryState:
     query_type: QueryType
     consolidated_data: Dict[str, Any] = field(default_factory=dict)
     batch_counters: Dict[str, Dict[int, Dict[str, Any]]] = field(default_factory=dict)
+    
     # Definitive Structure: 
     # {table: {batch_num: {
     #     "total_shards": int,
