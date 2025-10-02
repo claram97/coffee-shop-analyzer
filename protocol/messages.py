@@ -13,6 +13,9 @@ from .entities import (
     RawStore,
     RawTransaction,
     RawTransactionItem,
+    RawTransactionItemMenuItem,
+    RawTransactionStore,
+    RawTransactionStoreUser,
     RawUser,
 )
 from .parsing import (
@@ -323,6 +326,62 @@ class NewStores(TableMessage):
         )
 
 
+class NewTransactionStores(TableMessage):
+    """NEW_TRANSACTION_STORES message for joined transaction and store data."""
+
+    def __init__(self):
+        required = (
+            "transaction_id",
+            "store_id",
+            "store_name",
+            "city",
+            "final_amount",
+            "created_at",
+        )
+        super().__init__(
+            opcode=Opcodes.NEW_TRANSACTION_STORES,
+            required_keys=required,
+            row_factory=RawTransactionStore,
+        )
+
+
+class NewTransactionItemsMenuItems(TableMessage):
+    """NEW_TRANSACTION_ITEMS_MENU_ITEMS message for joined transaction item and menu item data."""
+
+    def __init__(self):
+        required = (
+            "transaction_id",
+            "item_name",
+            "quantity",
+            "subtotal",
+            "created_at",
+        )
+        super().__init__(
+            opcode=Opcodes.NEW_TRANSACTION_ITEMS_MENU_ITEMS,
+            required_keys=required,
+            row_factory=RawTransactionItemMenuItem,
+        )
+
+
+class NewTransactionStoresUsers(TableMessage):
+    """NEW_TRANSACTION_STORES_USERS message for joined transaction, store, and user data."""
+
+    def __init__(self):
+        required = (
+            "transaction_id",
+            "store_id",
+            "store_name",
+            "user_id",
+            "birthdate",
+            "created_at",
+        )
+        super().__init__(
+            opcode=Opcodes.NEW_TRANSACTION_STORES_USERS,
+            required_keys=required,
+            row_factory=RawTransactionStoreUser,
+        )
+
+
 class EOFMessage(TableMessage):
     """EOF message that inherits from TableMessage and specifies table type."""
 
@@ -336,18 +395,21 @@ class EOFMessage(TableMessage):
         self.table_type = ""  # Store table type directly
 
     @staticmethod
-    def deserialize_from_bytes(body: bytes) -> "EOFMessage":
-        """Deserialize an EOFMessage from bytes.
+    def deserialize_from_bytes(buf: bytes) -> "EOFMessage":
+        if not buf:
+            raise ProtocolError("empty EOF buffer", Opcodes.EOF)
 
-        Args:
-            body: The byte buffer containing the message body.
+        if buf[0] == Opcodes.EOF and len(buf) >= 5:
+            length = int.from_bytes(buf[1:5], "little", signed=True)
+            if length < 0 or len(buf) != 5 + length:
+                raise ProtocolError("invalid EOF frame length", Opcodes.EOF)
+            body = buf[5:]
+        else:
+            body = buf
 
-        Returns:
-            An instance of EOFMessage with parsed data.
-        """
-        eof_msg = EOFMessage()
-        eof_msg.read_from(body)
-        return eof_msg
+        msg = EOFMessage()
+        msg.read_from(body)
+        return msg
 
     def create_eof_message(self, batch_number: int, table_type: str):
         """Create an EOF message for a specific table type.

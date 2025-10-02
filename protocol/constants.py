@@ -62,6 +62,16 @@ class Opcodes:
     # A control signal indicating end of file/stream.
     EOF = 9
 
+    # --- Joined Data Messages ---
+    # A data message containing transactions joined with store information.
+    NEW_TRANSACTION_STORES = 10
+
+    # A data message containing transaction items joined with menu item information.
+    NEW_TRANSACTION_ITEMS_MENU_ITEMS = 11
+
+    # A data message containing transactions joined with store and user information.
+    NEW_TRANSACTION_STORES_USERS = 12
+
 
 class BatchStatus:
     """

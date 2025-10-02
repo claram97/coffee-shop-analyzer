@@ -14,7 +14,8 @@ from .parsing import (
 )
 from .messages import (
     Finished, NewMenuItems, NewStores, NewTransactionItems,
-    NewTransactions, NewUsers
+    NewTransactions, NewUsers, NewTransactionStores,
+    NewTransactionItemsMenuItems, NewTransactionStoresUsers
 )
 
 
@@ -45,6 +46,12 @@ def instantiate_message_for_opcode(opcode: int):
         return NewTransactions()
     elif opcode == Opcodes.NEW_USERS:
         return NewUsers()
+    elif opcode == Opcodes.NEW_TRANSACTION_STORES:
+        return NewTransactionStores()
+    elif opcode == Opcodes.NEW_TRANSACTION_ITEMS_MENU_ITEMS:
+        return NewTransactionItemsMenuItems()
+    elif opcode == Opcodes.NEW_TRANSACTION_STORES_USERS:
+        return NewTransactionStoresUsers()
     else:
         raise ProtocolError(f"invalid embedded opcode: {opcode}", Opcodes.DATA_BATCH)
 

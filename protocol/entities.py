@@ -164,3 +164,67 @@ class RawUser:
         self.gender = gender
         self.birthdate = birthdate
         self.registered_at = registered_at
+
+
+class RawTransactionStore:
+    """Represents a transaction record joined with store information."""
+
+    def __init__(
+        self,
+        transaction_id: str,
+        store_id: str,
+        store_name: str,
+        city: str,
+        final_amount: str,
+        created_at: str,
+        user_id: str,
+        **kwargs
+    ):
+        self.transaction_id = transaction_id
+        self.store_id = store_id
+        self.store_name = store_name
+        self.city = city
+        self.final_amount = final_amount
+        self.created_at = created_at
+        self.user_id = user_id
+
+
+class RawTransactionItemMenuItem:
+    """Represents a transaction item joined with its corresponding menu item."""
+
+    def __init__(
+        self,
+        transaction_id: str,
+        item_name: str,
+        quantity: str,
+        subtotal: str,
+        created_at: str,
+        **kwargs
+    ):
+        self.transaction_id = transaction_id
+        self.item_name = item_name
+        self.quantity = quantity
+        self.subtotal = subtotal
+        self.created_at = created_at
+
+
+class RawTransactionStoreUser:
+    """Represents a transaction joined with store and user information."""
+
+    def __init__(
+        self,
+        transaction_id: str,
+        store_id: str,
+        store_name: str,
+        user_id: str,
+        birthdate: str,
+        created_at: str,
+        **kwargs
+    ):
+        self.transaction_id = transaction_id
+        self.store_id = store_id
+        self.store_name = store_name
+        self.user_id = user_id
+        self.birthdate = birthdate
+        self.created_at = created_at
+

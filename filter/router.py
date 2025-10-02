@@ -5,8 +5,8 @@ import copy
 import hashlib
 import logging
 from collections import defaultdict
-from dataclasses import dataclass, field
-from typing import Any, Dict, List, NamedTuple, Optional, Tuple, Union
+from dataclasses import dataclass
+from typing import Any, Dict, List, Optional, Union
 
 from middleware.middleware_client import (
     MessageMiddlewareExchange,
@@ -49,18 +49,12 @@ def get_field(row: Union[dict, object], key: str):
     return getattr(row, key, None)
 
 
-class CopyInfo(NamedTuple):
-    index: int
-    total: int
-
-
 @dataclass
 class MetadataCompat:
     table_name: str
     queries: List[int]
     total_filter_steps: int
     reserved_u16: int = 0
-    copy_info: List[CopyInfo] = field(default_factory=list)
 
 
 def table_eof_to_bytes(table_name: str) -> bytes:
@@ -206,7 +200,6 @@ class FilterRouter:
             else:
                 self._log.warning("Unknown message type: %r", type(msg))
         except Exception as e:
-            # catch-all para que un batch malo no mate al proceso
             self._log.exception("Unhandled error in process_message: %s", e)
 
     def _handle_data(self, batch: DataBatch) -> None:
@@ -238,12 +231,10 @@ class FilterRouter:
                 sk = [k for k in dir(sample) if not k.startswith("_")][:8]
             self._log.debug("sample_row_keys=%s", sk)
 
-        # contador de pendientes (sólo cuando viene con mask==0)
         if mask == 0:
             self._pending_batches[table] += 1
             self._log.debug("pending++ %s -> %d", table, self._pending_batches[table])
 
-        # decidir próximo paso de filtros
         total_steps = self._pol.total_steps(table, queries)
         next_step = first_zero_bit(mask, total_steps)
         if next_step is not None and self._pol.steps_remaining(
@@ -262,9 +253,16 @@ class FilterRouter:
                 self._log.error("send_to_filters_pool failed: %s", e)
             return
 
-        # fan-out por queries (si corresponde)
         dup_count = int(self._pol.get_duplication_count(queries) or 1)
         if dup_count > 1:
+            if mask == 0:
+                self._pending_batches[table] = max(0, self._pending_batches[table] - 1)
+                self._log.debug(
+                    "pending-- (fanout parent) %s -> %d",
+                    table,
+                    self._pending_batches[table],
+                )
+
             self._log.debug(
                 "Fan-out x%d table=%s queries=%s", dup_count, table, queries
             )
@@ -280,13 +278,11 @@ class FilterRouter:
                     self._log.error("requeue_to_router failed (copy=%d): %s", i, e)
             return
 
-        # Sharding hacia aggregators
         try:
             self._send_sharded_to_aggregators(batch, table, queries)
         except Exception as e:
             self._log.error("send_sharded failed: %s", e)
 
-        # decrementa pendientes y tal vez flush EOF
         self._pending_batches[table] = max(0, self._pending_batches[table] - 1)
         self._log.debug("pending-- %s -> %d", table, self._pending_batches[table])
         self._maybe_flush_pending_eof(table)
