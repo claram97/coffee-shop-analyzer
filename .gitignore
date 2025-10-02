@@ -4,8 +4,16 @@
 # Executables
 bin/
 
+# Data files
 .data/*.csv
 .vscode
 middleware/__pycache__
 .data/
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
 results-finisher/__pycache__

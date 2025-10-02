@@ -4,18 +4,28 @@ table-specific data messages along with essential metadata for routing and proce
 """
 
 import logging
-from typing import List, Dict, Optional
+from typing import Dict, List, Optional
 
-from .constants import ProtocolError, Opcodes
+from .constants import Opcodes, ProtocolError
+from .messages import (
+    Finished,
+    NewMenuItems,
+    NewStores,
+    NewTransactionItems,
+    NewTransactionItemsMenuItems,
+    NewTransactions,
+    NewTransactionStores,
+    NewTransactionStoresUsers,
+    NewUsers,
+)
 from .parsing import (
     BytesReader,
-    read_u16, read_i32, read_i64, read_u8_with_remaining,
-    read_u8_list, read_u8_u8_dict
-)
-from .messages import (
-    Finished, NewMenuItems, NewStores, NewTransactionItems,
-    NewTransactions, NewUsers, NewTransactionStores,
-    NewTransactionItemsMenuItems, NewTransactionStoresUsers
+    read_i32,
+    read_i64,
+    read_u8_list,
+    read_u8_u8_dict,
+    read_u8_with_remaining,
+    read_u16,
 )
 
 
@@ -84,7 +94,7 @@ class DataBatch:
         total_shards: Optional[int],
         shard_num: Optional[int],
         reserved_u16: int,
-        batch_bytes: Optional[bytes]
+        batch_bytes: Optional[bytes],
     ):
         """Internal helper to initialize all instance fields with defaults or provided values."""
         self.opcode = Opcodes.DATA_BATCH
@@ -93,7 +103,7 @@ class DataBatch:
         # are populated by read_from().
         self.table_ids: List[int] = [] if table_ids is None else list(table_ids)
         self.query_ids: List[int] = [] if query_ids is None else list(query_ids)
-        self.reserved_u16: int = int(reserved_u16)
+        self.reserved_u16: int = 0 if reserved_u16 is None else int(reserved_u16)
         self.meta: Dict[int, int] = {} if meta is None else dict(meta)
         self.total_shards: int = 0 if total_shards is None else int(total_shards)
         self.shard_num: int = 0 if shard_num is None else int(shard_num)
@@ -127,7 +137,7 @@ class DataBatch:
         self,
         table_ids: Optional[List[int]],
         query_ids: Optional[List[int]],
-        meta: Optional[Dict[int, int]]
+        meta: Optional[Dict[int, int]],
     ):
         """Internal helper to run validations before serialization."""
         if table_ids is not None:
@@ -157,8 +167,13 @@ class DataBatch:
         serialization or as an empty container for deserialization.
         """
         self._initialize_fields(
-            table_ids, query_ids, meta, total_shards,
-            shard_num, reserved_u16, batch_bytes
+            table_ids,
+            query_ids,
+            meta,
+            total_shards,
+            shard_num,
+            reserved_u16,
+            batch_bytes,
         )
         self._validate_serialization_parameters(table_ids, query_ids, meta)
 
@@ -202,13 +217,15 @@ class DataBatch:
         inner_len, remaining = read_i32(reader, remaining, self.opcode)
 
         if remaining < inner_len:
-            raise ProtocolError("indicated length doesn't match body length", self.opcode)
+            raise ProtocolError(
+                "indicated length doesn't match body length", self.opcode
+            )
 
         # Read the embedded message body into a separate bytes object
         embedded_body_bytes = reader.read(inner_len)
 
         inner_msg = instantiate_message_for_opcode(inner_opcode)
-        
+
         # Pass the raw bytes of the body to the message's read_from method
         inner_msg.read_from(embedded_body_bytes)
         self.batch_msg = inner_msg
@@ -219,7 +236,9 @@ class DataBatch:
     def _validate_remaining_bytes(self, remaining: int):
         """Checks that all bytes of the message body have been consumed."""
         if remaining != 0:
-            raise ProtocolError("Indicated length doesn't match body length", self.opcode)
+            raise ProtocolError(
+                "Indicated length doesn't match body length", self.opcode
+            )
 
     def read_from(self, body_bytes: bytes):
         """
@@ -246,13 +265,17 @@ class DataBatch:
     def _validate_batch_bytes(self):
         """Internal helper to validate the embedded message bytes before serialization."""
         if self.batch_bytes is None:
-            raise ProtocolError("missing embedded batch bytes for DataBatch serialization", self.opcode)
+            raise ProtocolError(
+                "missing embedded batch bytes for DataBatch serialization", self.opcode
+            )
         if len(self.batch_bytes) < 5:
             raise ProtocolError("invalid embedded framing (too short)", self.opcode)
 
         inner_len = int.from_bytes(self.batch_bytes[1:5], "little", signed=True)
         if inner_len < 0 or inner_len != len(self.batch_bytes) - 5:
-            raise ProtocolError("invalid embedded framing (length mismatch)", self.opcode)
+            raise ProtocolError(
+                "invalid embedded framing (length mismatch)", self.opcode
+            )
 
     def _serialize_u8_list(self, items: List[int]) -> bytearray:
         """Serializes a list of integers as a u8-prefixed list."""
@@ -273,7 +296,9 @@ class DataBatch:
         body.extend(self._serialize_u8_list(self.table_ids))
         body.extend(self._serialize_u8_list(self.query_ids))
         body.extend(int(self.reserved_u16).to_bytes(2, "little", signed=False))
-        body.extend(int(getattr(self, 'batch_number', 0)).to_bytes(8, "little", signed=True))
+        body.extend(
+            int(getattr(self, "batch_number", 0)).to_bytes(8, "little", signed=True)
+        )
         body.extend(self._serialize_u8_dict(self.meta))
         body.extend(int(self.total_shards).to_bytes(2, "little", signed=False))
         body.extend(int(self.shard_num).to_bytes(2, "little", signed=False))
@@ -293,8 +318,13 @@ class DataBatch:
             "action: data_batch_to_bytes | batch_number: %d | "
             "table_ids: %s | query_ids: %s | total_shards: %d | shard_num: %d | "
             "body_size: %d bytes | final_size: %d bytes",
-            getattr(self, 'batch_number', 0), self.table_ids, self.query_ids,
-            self.total_shards, self.shard_num, len(body), len(result_bytes)
+            getattr(self, "batch_number", 0),
+            self.table_ids,
+            self.query_ids,
+            self.total_shards,
+            self.shard_num,
+            len(body),
+            len(result_bytes),
         )
 
     def to_bytes(self) -> bytes:
@@ -329,8 +359,8 @@ class DataBatch:
             raise ProtocolError("Message too short for valid protocol frame")
 
         # Read opcode and length from the beginning of the message
-        opcode = int.from_bytes(body[0:1], 'little')
-        length = int.from_bytes(body[1:5], 'little', signed=True)
+        opcode = int.from_bytes(body[0:1], "little")
+        length = int.from_bytes(body[1:5], "little", signed=True)
 
         if length < 0:
             raise ProtocolError("Invalid message length")
@@ -339,12 +369,15 @@ class DataBatch:
             raise ProtocolError(f"Expected {5 + length} bytes, got {len(body)} bytes")
 
         if opcode != Opcodes.DATA_BATCH:
-            raise ProtocolError(f"Expected DATA_BATCH opcode ({Opcodes.DATA_BATCH}), got {opcode}")
+            raise ProtocolError(
+                f"Expected DATA_BATCH opcode ({Opcodes.DATA_BATCH}), got {opcode}"
+            )
 
         message_body = body[5:]
 
         # Create and parse DataBatch
         msg = DataBatch()
         msg.read_from(message_body)
-        
+
         return msg
+

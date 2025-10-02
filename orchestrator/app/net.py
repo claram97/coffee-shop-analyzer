@@ -24,7 +24,7 @@ class Orchestrator:
         
         # Setup middleware connections
         rabbitmq_host = os.getenv("RABBITMQ_HOST", "rabbitmq")
-        self._filter_router_queue = MessageMiddlewareQueue(rabbitmq_host, "filter_router_queue")
+        self._filter_router_queue = MessageMiddlewareQueue(rabbitmq_host, "filter.router.in")
         
         # Setup the results consumer
         results_queue = os.getenv("RESULTS_QUEUE", "orchestrator_results_queue")

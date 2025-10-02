@@ -9,8 +9,7 @@ import sys
 import threading
 from typing import Dict
 
-from config.config_loader import Config
-
+from app_config.config_loader import Config
 from joiner.worker import JoinerWorker
 from middleware.middleware_client import (
     MessageMiddlewareExchange,
@@ -71,14 +70,43 @@ def parse_args(argv=None):
     return p.parse_args(argv)
 
 
+def resolve_config_path(cli_value: str | None) -> str:
+    candidates = []
+    if cli_value:
+        candidates.append(cli_value)
+    env_cfg_path = os.getenv("CONFIG_PATH")
+    if env_cfg_path:
+        candidates.append(env_cfg_path)
+    env_cfg = os.getenv("CFG")
+    if env_cfg:
+        candidates.append(env_cfg)
+    candidates.extend(("/config/config.ini", "./config.ini", "/app_config/config.ini"))
+
+    for path in candidates:
+        if path and os.path.exists(path):
+            return os.path.abspath(path)
+
+    return os.path.abspath(candidates[0])
+
+
 def main(argv=None):
-    args = parse_args(argv)
+    ap = argparse.ArgumentParser()
+    ap.add_argument("-c", "--config", help="Ruta al config.ini")
+    ap.add_argument("--log-level", default=os.environ.get("LOG_LEVEL", "INFO"))
+    args = ap.parse_args()
 
     logging.basicConfig(
         level=getattr(logging, args.log_level.upper(), logging.INFO),
         format="%(asctime)s %(levelname)s [joiner-worker] %(message)s",
     )
     log = logging.getLogger("joiner-worker-main")
+
+    cfg_path = resolve_config_path(args.config)
+    if not os.path.exists(cfg_path):
+        print(f"[joiner-worker] config no encontrado: {cfg_path}", file=sys.stderr)
+        sys.exit(2)
+
+    log.info(f"Usando config: {cfg_path}")
 
     try:
         shard = int(os.environ["JOINER_WORKER_INDEX"])
@@ -90,7 +118,7 @@ def main(argv=None):
         sys.exit(1)
 
     try:
-        cfg = Config(args.config)
+        cfg = Config(cfg_path)
     except Exception as e:
         log.error(f"No pude cargar config: {e}")
         sys.exit(2)
