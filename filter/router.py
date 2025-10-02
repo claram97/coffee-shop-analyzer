@@ -312,7 +312,7 @@ class FilterRouter:
             inner = getattr(b, "batch_msg", None)
             if inner is not None and hasattr(inner, "rows"):
                 inner.rows = subrows
-            self._log.debug(
+            self._log.info(
                 "→ aggregator part=%d table=%s rows=%d", int(pid), table, len(subrows)
             )
             self._p.send_to_aggregator_partition(int(pid), b)
@@ -338,7 +338,7 @@ class FilterRouter:
         eof = self._pending_eof.get(table)
         if eof is None or pending > 0:
             if eof is not None:
-                self._log.debug(
+                self._log.info(
                     "TABLE_EOF deferred: table=%s pending=%d", table, pending
                 )
             return
@@ -388,11 +388,11 @@ class ExchangeBusProducer:
             )
             # Configure as a producer (is_consumer=False) - we don't need a queue
             pub = MessageMiddlewareExchange(
-                host=self._host, 
-                exchange_name=ex, 
+                host=self._host,
+                exchange_name=ex,
                 route_keys=[rk],
                 is_consumer=False,
-                queue_name=None
+                queue_name=None,
             )
             self._pub_cache[key] = pub
         return pub

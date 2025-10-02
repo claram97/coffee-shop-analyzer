@@ -206,7 +206,7 @@ class FilterWorker:
             out_raw = db.to_bytes()
             self._out.send(out_raw)
             dt_ms = (time.perf_counter() - t0) * 1000
-            logger.info(
+            logger.debug(
                 "Filtro aplicado y reenviado",
                 extra={
                     "table_id": table_id,
