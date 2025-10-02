@@ -64,6 +64,9 @@ def recv_msg(sock: socket.socket):
         raise ProtocolError(f"invalid opcode: {opcode}")
 
     body_bytes = recv_exact(sock, length)
-    msg.read_from(body_bytes, length)
+    if opcode == Opcodes.FINISHED:
+        msg.read_from(body_bytes, length)
+    else:
+        msg.read_from(body_bytes)
     
     return msg
