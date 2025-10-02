@@ -119,12 +119,15 @@ func (bp *BatchProcessor) processCSVLoop(ctx context.Context, reader *csv.Reader
 //
 // isLastFile indicates if this is the last file for this table type, which
 // determines whether the final batch should have BatchStatus=EOF
-func (bp *BatchProcessor) BuildAndSendBatches(ctx context.Context, reader *csv.Reader, batchNumber int64, isLastFile bool) error {
+//
+// Returns the error (if any) and the last batch number used
+func (bp *BatchProcessor) BuildAndSendBatches(ctx context.Context, reader *csv.Reader, batchNumber int64, isLastFile bool) (error, int64) {
 	var batchBuff bytes.Buffer
 	var counter int32 = 0
 	currentBatchNumber := batchNumber // Current batch number (not incremented per line)
 
-	return bp.processCSVLoop(ctx, reader, &batchBuff, &counter, &currentBatchNumber, isLastFile)
+	err := bp.processCSVLoop(ctx, reader, &batchBuff, &counter, &currentBatchNumber, isLastFile)
+	return err, currentBatchNumber
 }
 
 // GetConnection returns the network connection used by this processor
