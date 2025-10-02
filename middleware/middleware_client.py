@@ -60,8 +60,15 @@ class MessageMiddlewareQueue(MessageMiddleware):
                 )
             )
             self._channel = self._connection.channel()
-        except (pika.exceptions.AMQPConnectionError, OSError, Exception) as e:
+        except (pika.exceptions.AMQPConnectionError, OSError) as e:
             raise MessageMiddlewareDisconnectedError(f"Could not connect to RabbitMQ on '{self._host}'") from e
+
+    def _setup_queue(self):
+        """Declare the queue to ensure it exists."""
+        try:
+            self._channel.queue_declare(queue=self.queue_name, durable=True)
+        except pika.exceptions.AMQPError as e:
+            raise MessageMiddlewareMessageError(f"Error declaring queue '{self.queue_name}'") from e
 
         
     def start_consuming(self, on_message_callback):
