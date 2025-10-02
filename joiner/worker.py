@@ -192,15 +192,18 @@ class JoinerWorker:
         t.start()
         self._log.info("Consumiendo table_id=%s", table_id)
 
+    # joiner/worker.py
     def _stop_queue(self, table_id: int):
         mw = self._in.get(table_id)
         if not mw:
             return
         try:
-            mw.stop_consuming()
-            self._log.info("Detenida cola table_id=%s", table_id)
+            threading.Thread(target=mw.stop_consuming, daemon=True).start()
+            if self._log:
+                self._log.info("Detenida cola table_id=%s", table_id)
         except Exception as e:
-            self._log.warning("Error deteniendo cola %s: %s", table_id, e)
+            if self._log:
+                self._log.warning("Error deteniendo cola %s: %s", table_id, e)
 
     # ---------- decodificación ----------
     def _decode_msg(

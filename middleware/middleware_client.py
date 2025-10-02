@@ -251,6 +251,24 @@ class MessageMiddlewareExchange(MessageMiddleware):
         # Connect and declare exchange
         self._connect()
         self._setup_exchange()
+        if consumer and queue_name:
+            try:
+                # declarar la cola (durable) y bindear todas las routing keys
+                self._channel.queue_declare(queue=self.queue_name, durable=True)
+                for key in self.route_keys:
+                    self._channel.queue_bind(
+                        exchange=self.exchange_name,
+                        queue=self.queue_name,
+                        routing_key=key,
+                    )
+                # QoS opcional si después vas a consumir con este canal
+                self._channel.basic_qos(prefetch_count=3)
+                logging.info(
+                    f"[MMX] ensured binding ex={self.exchange_name} q={self.queue_name} rk={self.route_keys}"
+                )
+            except Exception as e:
+                logging.error(f"[MMX] ensure binding failed: {e}", exc_info=True)
+                raise
 
     def _connect(self):
         try:
@@ -374,13 +392,17 @@ class MessageMiddlewareExchange(MessageMiddleware):
             try:
                 logging.info("Stopping exchange consumer")
                 self._stop_event.set()
-                self._consuming_thread.join(timeout=1.0)
 
-                if self._consuming_thread.is_alive():
-                    logging.warning(
-                        "Consumer thread still alive after timeout, forcing cleanup"
-                    )
-                    self._force_cleanup()
+                # ⚠️ Si estamos en el mismo thread del consumidor, NO hacer join()
+                if threading.current_thread() is self._consuming_thread:
+                    logging.info("Stop requested from consumer thread; skipping join")
+                else:
+                    self._consuming_thread.join(timeout=1.0)
+                    if self._consuming_thread.is_alive():
+                        logging.warning(
+                            "Consumer thread still alive after timeout, forcing cleanup"
+                        )
+                        self._force_cleanup()
 
             except Exception as e:
                 logging.error(f"Error stopping consumer: {e}")
