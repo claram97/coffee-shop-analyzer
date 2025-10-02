@@ -1,9 +1,10 @@
-
-
-from configparser import ConfigParser
-from aggregator import Aggregator
 import logging
 import os
+import time
+from configparser import ConfigParser
+
+from aggregator import Aggregator
+
 
 def initialize_config():
     """Parse env variables or config file to find program config params
@@ -26,9 +27,9 @@ def initialize_config():
             "LOGGING_LEVEL", config["DEFAULT"]["LOGGING_LEVEL"]
         )
         config_params["aggregator_id"] = os.getenv(
-            "AGGREGATOR_ID", config.get("DEFAULT", "AGGREGATOR_ID", fallback="1")
+            "AGGREGATOR_ID", config.get("DEFAULT", "AGGREGATOR_ID", fallback="2")
         )
-        
+
     except KeyError as e:
         raise KeyError("Key was not found. Error: {} .Aborting server".format(e))
     except ValueError as e:
@@ -37,6 +38,7 @@ def initialize_config():
         )
 
     return config_params
+
 
 def main():
     config_params = initialize_config()
@@ -53,6 +55,12 @@ def main():
 
     server = Aggregator(aggregator_id)
     server.run()
+    try:
+        while True:
+            time.sleep(1)
+    except KeyboardInterrupt:
+        pass
+
 
 def initialize_log(logging_level):
     """
@@ -67,5 +75,7 @@ def initialize_log(logging_level):
         datefmt="%Y-%m-%d %H:%M:%S",
     )
 
+
 if __name__ == "__main__":
     main()
+
