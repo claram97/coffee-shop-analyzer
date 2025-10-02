@@ -5,7 +5,7 @@ import time
 from dataclasses import dataclass, field
 from typing import Dict, Any, Set
 
-from middleware_client import MessageMiddlewareQueue
+from middleware.middleware_client import MessageMiddlewareQueue
 from protocol import ProtocolError, Opcodes, BatchStatus, DataBatch
 from protocol import messages, entities
 from protocol.messages import TableMessage

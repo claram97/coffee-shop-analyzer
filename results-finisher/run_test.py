@@ -13,7 +13,7 @@ import sys
 project_root = os.path.abspath(os.path.join(os.path.dirname(__file__), '..'))
 sys.path.insert(0, project_root)
 
-from middleware_client import MessageMiddlewareQueue
+from middleware.middleware_client import MessageMiddlewareQueue
 from protocol import DataBatch, BatchStatus, Opcodes
 from protocol.messages import (
     NewTransactions, NewStores, NewUsers, NewMenuItems, NewTransactionItems,
@@ -21,7 +21,10 @@ from protocol.messages import (
 )
 from protocol.parsing import write_i32, write_string, write_u8
 from constants import QueryType
-from results_finisher.constants import COPY_NUMBER_KEY, TOTAL_COPIES_KEY
+
+# Define constants for copy handling
+COPY_NUMBER_KEY = 'copy_num'
+TOTAL_COPIES_KEY = 'total_copies'
 
 # --- Test Configuration & Mock Data ---
 RABBITMQ_HOST = os.getenv("RABBITMQ_HOST", "localhost")
@@ -136,7 +139,48 @@ def producer_and_listener(rabbitmq_setup, strategy_mode):
     result_queue = Queue()
     def callback(body): result_queue.put(json.loads(body.decode('utf-8')))
     listener.start_consuming(callback)
+    
+    # Start the router and finisher processes
+    from results_router import ResultsRouter
+    from results_finisher import ResultsFinisher
+    
+    # Initialize the router
+    router_input = MessageMiddlewareQueue(RABBITMQ_HOST, ROUTER_INPUT_QUEUE)
+    router_outputs = {}
+    for queue in FINISHER_INPUT_QUEUES:
+        router_outputs[queue] = MessageMiddlewareQueue(RABBITMQ_HOST, queue)
+    router = ResultsRouter(input_client=router_input, output_clients=router_outputs)
+    
+    # Start finisher instances
+    finishers = []
+    for queue in FINISHER_INPUT_QUEUES:
+        finisher_input = MessageMiddlewareQueue(RABBITMQ_HOST, queue)
+        finisher_output = MessageMiddlewareQueue(RABBITMQ_HOST, FINISHER_OUTPUT_QUEUE)
+        finisher = ResultsFinisher(input_client=finisher_input, output_client=finisher_output)
+        finishers.append(finisher)
+    
+    # Start router and finishers in threads
+    import threading
+    router_thread = threading.Thread(target=router.start)
+    router_thread.daemon = True
+    router_thread.start()
+    
+    finisher_threads = []
+    for finisher in finishers:
+        t = threading.Thread(target=finisher.start)
+        t.daemon = True
+        t.start()
+        finisher_threads.append(t)
+    
+    # Wait a short time for connections to establish
+    time.sleep(1)
+    
     yield producer, listener, result_queue
+    
+    # Stop everything
+    router.stop()
+    for finisher in finishers:
+        finisher.stop()
     listener.stop_consuming()
 
 @pytest.mark.usefixtures("strategy_mode")

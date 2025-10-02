@@ -4,7 +4,7 @@ import signal
 import threading
 from typing import Dict, List
 
-from middleware_client import MessageMiddlewareQueue, MessageMiddlewareDisconnectedError
+from middleware.middleware_client import MessageMiddlewareQueue, MessageMiddlewareDisconnectedError
 from protocol import DataBatch, ProtocolError, Opcodes
 
 logging.basicConfig(
