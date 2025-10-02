@@ -63,14 +63,7 @@ def recv_msg(sock: socket.socket):
         # If the opcode is not recognized, it's a protocol violation
         raise ProtocolError(f"invalid opcode: {opcode}")
 
-    # Handle different message types based on their read_from signature
-    if opcode == Opcodes.FINISHED:
-        # Finished message expects (sock, length) parameters
-        msg.read_from(sock, length)
-    else:
-        # Other messages expect body_bytes parameter
-        # Read the entire message body from the socket first
-        body_bytes = recv_exact(sock, length)
-        msg.read_from(body_bytes)
+    body_bytes = recv_exact(sock, length)
+    msg.read_from(body_bytes, length)
     
     return msg

@@ -511,11 +511,24 @@ class Finished:
         self.agency_id = None
         self._length = 4
 
-    def read_from(self, sock: socket.socket, length: int):
-        """Validate fixed body length (4) and read agency_id."""
+    def read_from(self, data, length: int):
+        """Validate fixed body length (4) and read agency_id.
+        
+        Args:
+            data: Either a socket object or bytes buffer
+            length: Expected body length (should be 4)
+        """
         if length != self._length:
             raise ProtocolError("invalid length", self.opcode)
-        (agency_id, _) = read_i32(sock, length, self.opcode)
+        
+        # Handle different input types
+        if isinstance(data, bytes):
+            reader = BytesReader(data)
+            (agency_id, _) = read_i32(reader, length, self.opcode)
+        else:
+            from .socket_parsing import read_i32 as socket_read_i32
+            (agency_id, _) = socket_read_i32(data, length, self.opcode)
+        
         self.agency_id = agency_id
 
 
