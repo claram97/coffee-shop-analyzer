@@ -386,13 +386,10 @@ class ExchangeBusProducer:
             self._log.info(
                 "create publisher exchange=%s rk=%s host=%s", ex, rk, self._host
             )
-            # Configure as a producer (is_consumer=False) - we don't need a queue
             pub = MessageMiddlewareExchange(
                 host=self._host,
                 exchange_name=ex,
-                route_keys=[rk],
-                is_consumer=False,
-                queue_name=None,
+                route_keys=[rk]
             )
             self._pub_cache[key] = pub
         return pub
@@ -484,7 +481,6 @@ class RouterServer:
                 else:
                     self._log.warning(f"Unwanted message opcode: {opcode}")
             except Exception as e:
-                # no romper el hilo de consumo
                 self._log.exception("Error in router callback: %s", e)
 
         try:
