@@ -273,45 +273,38 @@ class MessageMiddlewareExchange(MessageMiddleware):
 
     def start_consuming(self, on_message_callback):
         with self._consume_lock:
-            logging.info("====================> STARTING CONSUMER ====================")
             if self._consuming_thread and self._consuming_thread.is_alive():
                 return
 
-            logging.info("====================> CONSUMER STARTED ====================")
             if not self.queue_name:
-                logging.info(
-                    f"Creating consumer queue for exchange '{self.exchange_name}'"
-                )
                 result = self._channel.queue_declare(queue="", exclusive=True)
                 self.queue_name = result.method.queue
-                logging.info(f"Created queue: {self.queue_name}")
 
-                for key in self.route_keys:
+            for key in self.route_keys:
+                try:
                     self._channel.queue_bind(
                         exchange=self.exchange_name,
                         queue=self.queue_name,
                         routing_key=key,
                     )
-                    logging.info(
-                        f"Bound queue {self.queue_name} to exchange {self.exchange_name} with routing key {key}"
+                except Exception as e:
+                    logging.error(
+                        "Failed to bind queue %s to exchange %s (rk=%s): %s",
+                        self.queue_name,
+                        self.exchange_name,
+                        key,
+                        e,
                     )
+                    raise
 
-                self._channel.basic_qos(prefetch_count=3)
+            self._channel.basic_qos(prefetch_count=3)
 
             self._stop_event.clear()
             callback_wrapper = self._create_callback_wrapper(on_message_callback)
-
-            try:
-                logging.info(
-                    f"==================> Starting consumer thread for queue {self.queue_name}"
-                )
-                self._consuming_thread = threading.Thread(
-                    target=self._consume_loop, args=(callback_wrapper,), daemon=True
-                )
-                self._consuming_thread.start()
-            except Exception as e:
-                logging.error(f"Failed to start consumer thread: {e}")
-                raise MessageMiddlewareMessageError("Error starting consumer") from e
+            self._consuming_thread = threading.Thread(
+                target=self._consume_loop, args=(callback_wrapper,), daemon=True
+            )
+            self._consuming_thread.start()
 
     def _create_callback_wrapper(self, on_message_callback):
         def callback_wrapper(ch, method, properties, body):
