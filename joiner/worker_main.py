@@ -9,6 +9,8 @@ import sys
 import threading
 from typing import Dict
 
+import pika
+
 from app_config.config_loader import Config
 from joiner.worker import JoinerWorker
 from middleware.middleware_client import (
@@ -16,6 +18,20 @@ from middleware.middleware_client import (
     MessageMiddlewareQueue,
 )
 from protocol import Opcodes
+
+
+def force_bind(host: str, exchange: str, queue: str, routing_key: str):
+    conn = pika.BlockingConnection(
+        pika.ConnectionParameters(
+            host=host, heartbeat=1200, blocked_connection_timeout=600
+        )
+    )
+    ch = conn.channel()
+    # Idempotente: no rompe si ya existen
+    ch.exchange_declare(exchange=exchange, exchange_type="topic", durable=True)
+    ch.queue_declare(queue=queue, durable=True)
+    ch.queue_bind(exchange=exchange, queue=queue, routing_key=routing_key)
+    conn.close()
 
 
 def ensure_joiner_bindings(cfg: Config, host: str, shard: int) -> None:
@@ -62,15 +78,15 @@ def build_inputs_for_shard(
     inputs: Dict[int, MessageMiddlewareExchange] = {}
 
     def make(table: str) -> MessageMiddlewareExchange:
-        rk = cfg.joiner_router_rk(table, shard)
-        qn = cfg.joiner_queue(table, shard)
-        ex = cfg.joiner_router_exchange(table)
+        ex = cfg.joiner_router_exchange(table)  # jx.{table}
+        rk = cfg.joiner_router_rk(table, shard)  # join.{table}.shard.{shard:02d}
+        qn = cfg.joiner_queue(table, shard)  # join.{table}.shard.{shard:02d} (estable)
         return MessageMiddlewareExchange(
             host=host,
             exchange_name=ex,
             route_keys=[rk],
-            consumer=True,
-            queue_name=qn,
+            consumer=True,  # ← ok, la clase acepta 'consumer'
+            queue_name=qn,  # ← cola estable (no exclusiva) ya bindeada al exchange+rk
         )
 
     inputs[Opcodes.NEW_TRANSACTION_ITEMS] = make("transaction_items")
@@ -191,6 +207,13 @@ def main(argv=None):
     )
     ensure_joiner_bindings(cfg, host, shard)
     in_mw = build_inputs_for_shard(cfg, host, shard)
+    # joiner/worker-main.py (en main)
+    ensure = []
+    for table in ["menu_items", "stores", "transactions", "transaction_items", "users"]:
+        ex = cfg.joiner_router_exchange(table)  # ej: jx.menu_items
+        rk = cfg.joiner_router_rk(table, shard)  # ej: join.menu_items.shard.03
+        qn = cfg.joiner_queue(table, shard)  # ej: join.menu_items.shard.03
+        force_bind(host, ex, qn, rk)  # <-- bind explícito y seguro
     worker.run()
 
 

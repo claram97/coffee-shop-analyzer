@@ -67,12 +67,7 @@ def _shard_key_for_row(table_id: int, row, queries: List[int]) -> Optional[str]:
 
 
 def is_broadcast_table(table_id: int, queries: List[int]) -> bool:
-    q = set(queries)
-    if 2 in q and table_id == Opcodes.NEW_MENU_ITEMS:
-        return True
-    if (3 in q or 4 in q) and table_id == Opcodes.NEW_STORES:
-        return True
-    return False
+    return table_id in (Opcodes.NEW_MENU_ITEMS, Opcodes.NEW_STORES)
 
 
 class ExchangePublisherPool:
@@ -356,8 +351,6 @@ def build_publisher_pool_from_config(cfg: "Config") -> ExchangePublisherPool:
             host=cfg.broker.host,
             exchange_name=exchange_name,
             route_keys=[routing_key],
-            queue_name=routing_key,  # asegura queue con ese nombre
-            consumer=False,
         )
 
     log.info("Publisher pool factory using host=%s", cfg.broker.host)
