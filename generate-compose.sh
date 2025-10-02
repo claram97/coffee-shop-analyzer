@@ -9,7 +9,7 @@ set -euo pipefail
 #   - config_subscript.py en el mismo repo (o en PATH)
 #   - config.ini con las secciones acordadas
 
-INI_PATH="config/config.ini"
+INI_PATH="app_config/config.ini"
 OUT_PATH="docker-compose-dev.yaml"
 
 while getopts "c:o:" opt; do
@@ -20,9 +20,9 @@ while getopts "c:o:" opt; do
   esac
 done
 
-read FILTERS AGGS JOINERS < <(python3 ./config/config_subscript.py -c "$INI_PATH" workers --format=plain)
+read FILTERS AGGS JOINERS < <(python3 ./app_config/config_subscript.py -c "$INI_PATH" workers --format=plain)
 
-eval "$(python3 ./config/config_subscript.py -c "$INI_PATH" broker --format=env)"
+eval "$(python3 ./app_config/config_subscript.py -c "$INI_PATH" broker --format=env)"
 
 # Defaults por si faltan en INI
 : "${RABBIT_HOST:=rabbitmq}"
@@ -95,10 +95,11 @@ services:
       - PYTHONUNBUFFERED=1
       - RABBITMQ_HOST=rabbitmq
       - LOG_LEVEL=INFO
+      - CONFIG_PATH=/config/config.ini
     networks:
       - testing_net
     volumes:
-      - ./filter/config.ini:/app/config.ini:ro
+      - ./app_config/config.ini:/config/config.ini:ro
     depends_on:
       rabbitmq:
         condition: service_healthy
@@ -117,10 +118,11 @@ cat >> "$OUT_PATH" <<YAML
       - PYTHONUNBUFFERED=1
       - RABBITMQ_HOST=rabbitmq
       - LOG_LEVEL=INFO
+      - CONFIG_PATH=/config/config.ini
     networks:
       - testing_net
     volumes:
-      - ./filter/config.ini:/app/config.ini:ro
+      - ./app_config/config.ini:/config/config.ini:ro
     depends_on:
       rabbitmq:
         condition: service_healthy
@@ -165,12 +167,12 @@ done
 #       dockerfile: joiner/Dockerfile.router
 #     environment:
 #       - PYTHONUNBUFFERED=1
-#       - RABBITMQ_HOST=rabbitmq
 #       - LOG_LEVEL=INFO
+#       - CONFIG_PATH=/config/config.ini
 #     networks:
 #       - testing_net
 #     volumes:
-#       - ./joiner/config.ini:/app/config.ini:ro
+#       - ./app_config/config.ini:/config/config.ini:ro
 #     depends_on:
 #       rabbitmq:
 #         condition: service_healthy
@@ -189,13 +191,13 @@ done
 #       dockerfile: joiner/Dockerfile.worker
 #     environment:
 #       - PYTHONUNBUFFERED=1
-#       - RABBITMQ_HOST=rabbitmq
 #       - LOG_LEVEL=INFO
 #       - JOINER_WORKER_INDEX=${i}
+#       - CONFIG_PATH=/config/config.ini
 #     networks:
 #       - testing_net
 #     volumes:
-#       - ./joiner/config.ini:/app/config.ini:ro
+#       - ./app_config/config.ini:/config/config.ini:ro
 #     depends_on:
 #       rabbitmq:
 #         condition: service_healthy
