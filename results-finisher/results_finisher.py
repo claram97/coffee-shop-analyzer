@@ -26,10 +26,6 @@ else:
     logger.info("Using APPEND-ONLY aggregation strategy.")
 from constants import QueryType
 
-# --- Metadata Keys for DataBatch Copies ---
-COPY_NUMBER_KEY = 1
-TOTAL_COPIES_KEY = 2
-
 OPCODE_TO_TABLE_TYPE = {
     Opcodes.NEW_TRANSACTION: "Transactions",
     Opcodes.NEW_STORES: "Stores",
@@ -135,8 +131,17 @@ class ResultsFinisher:
         return self.active_queries[query_id]
 
     def _update_batch_accounting(self, state: QueryState, table_type: str, batch: DataBatch):
-        total_copies = batch.meta.get(TOTAL_COPIES_KEY, 1)
-        copy_num = batch.meta.get(COPY_NUMBER_KEY, 1)
+        if batch.meta:
+            total_copies_key = next(iter(batch.meta.keys()), 0)
+            copy_num = batch.meta.get(total_copies_key, 0)
+            total_copies = total_copies_key
+        else:
+            total_copies = 1
+            copy_num = 0
+            
+        if total_copies <= 0:
+            total_copies = 1
+        
         total_shards = batch.total_shards if batch.total_shards > 0 else 1
         shard_num = batch.shard_num if batch.total_shards > 0 else 1
 
@@ -146,19 +151,19 @@ class ResultsFinisher:
             "shards": {}
         })
         
-        # It's possible for different copies of the same shard to arrive.
-        # The total_shards value should be consistent across them.
         batch_info["total_shards"] = total_shards
 
         shard_copies = batch_info["shards"].setdefault(shard_num, {
             "received_copies": set(),
             "total_copies": total_copies
         })
-        shard_copies["total_copies"] = total_copies # Ensure it's updated
+        
+        shard_copies["total_copies"] = total_copies
+        
         shard_copies["received_copies"].add(copy_num)
-
+        
         if batch.batch_msg.batch_status == BatchStatus.EOF:
-            state.eof_received[table_type] = max(state.eof_received.get(table_type, 0), batch_num)
+            state.eof_received[table_type] = max(state.eof_received.get(table_type, 0), batch.batch_number)
 
         self._check_and_mark_table_as_complete(state, table_type)
     
