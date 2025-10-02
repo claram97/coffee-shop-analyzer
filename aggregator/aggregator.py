@@ -44,18 +44,15 @@ class Aggregator:
         for table in tables:
             exchange_name = self.config.filter_router_exchange(table)
             routing_key = self.config.filter_router_rk(table, self.id)
-            # Create a stable queue name that identifies this aggregator
-            queue_name = f"aggregator.{self.id}.{table}"
+            queue_name = self.config.aggregator_queue(table, self.id)
+
             self._exchanges[table] = MessageMiddlewareExchange(
                 host=self.host,
                 exchange_name=exchange_name,
                 route_keys=[routing_key],
-                is_consumer=True,
-                queue_name=queue_name
             )
             logging.info(f"Created exchange connection for {table}: {exchange_name} -> {routing_key} with queue {queue_name}")
             
-        # Setup the joiner output queue
         self.joiner_queue = MessageMiddlewareQueue(
             host=self.host,
             queue_name=self.config.aggregator_to_joiner_router_queue(tables[0], self.id)

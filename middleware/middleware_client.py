@@ -192,51 +192,143 @@ class MessageMiddlewareQueue(RabbitMQBase):
             raise MessageMiddlewareDeleteError(f"Error al eliminar la cola '{self.queue_name}'") from e
 
 
-class MessageMiddlewareExchange(RabbitMQBase):
-    def __init__(self, host, exchange_name, route_keys, is_consumer=True, queue_name=None):
+class MessageMiddlewareExchange(MessageMiddleware):
+    def __init__(self, host, exchange_name, route_keys):
+        self._host = host
         self.exchange_name = exchange_name
         self.route_keys = route_keys if isinstance(route_keys, list) else [route_keys]
-        self.is_consumer = is_consumer
-        self.provided_queue_name = queue_name
-
+        
         if not self.route_keys:
             raise ValueError("MessageMiddlewareExchange requires at least one route key for sending.")
         self.default_routing_key = self.route_keys[0]
         
-        super().__init__(host)
-        self._setup_exchange()
-
-    def _setup_exchange(self):
-        self._channel.exchange_declare(exchange=self.exchange_name, exchange_type='topic', durable=True)
+        self._connection = None
+        self._channel = None
+        self._consumer_tag = None
+        self._consuming_thread = None
+        self._stop_event = threading.Event()
+        self._consume_lock = threading.Lock()
+        self.queue_name = None
         
-        # If this is a consumer, create a durable named queue
-        if self.is_consumer:
-            if self.provided_queue_name:
-                # Use the provided queue name if given
-                queue_name = self.provided_queue_name
-            else:
-                # Create a stable queue name from the exchange and first routing key
-                safe_rk = self.default_routing_key.replace('.', '_').replace('*', 'star').replace('#', 'hash')
-                queue_name = f"{self.exchange_name}.{safe_rk}"
-            
-            result = self._channel.queue_declare(
-                queue=queue_name,
-                durable=True,       # Survive broker restarts
-                exclusive=False     # Allow reconnections to the same queue
+        self._connect()
+        self._setup_exchange()
+    
+    def _connect(self):
+        try:
+            self._connection = pika.BlockingConnection(pika.ConnectionParameters(host=self._host))
+            self._channel = self._connection.channel()
+        except (pika.exceptions.AMQPConnectionError, OSError, Exception) as e:
+            raise MessageMiddlewareDisconnectedError(f"Could not connect to RabbitMQ on '{self._host}'") from e
+    
+    def _setup_exchange(self):
+        """Declare the exchange but don't create a queue yet"""
+        self._channel.exchange_declare(exchange=self.exchange_name, exchange_type='topic', durable=True)
+    
+    def _setup_consumer_queue(self):
+        """Create and bind a queue for consuming - called when start_consuming is invoked"""
+        safe_rk = self.default_routing_key.replace('.', '_').replace('*', 'star').replace('#', 'hash')
+        queue_name = f"{self.exchange_name}.{safe_rk}"
+        
+        result = self._channel.queue_declare(
+            queue=queue_name,
+            durable=True,
+            exclusive=False
+        )
+        self.queue_name = result.method.queue
+        
+        for key in self.route_keys:
+            self._channel.queue_bind(
+                exchange=self.exchange_name,
+                queue=self.queue_name,
+                routing_key=key
             )
-            self.queue_name = result.method.queue
+        
+        self._channel.basic_qos(prefetch_count=3)
+    
+    def start_consuming(self, on_message_callback):
+        with self._consume_lock:
+            if self._consuming_thread and self._consuming_thread.is_alive():
+                return
             
-            # Bind the queue to each routing key
-            for key in self.route_keys:
-                self._channel.queue_bind(
-                    exchange=self.exchange_name,
-                    queue=self.queue_name,
-                    routing_key=key
+            if not self.queue_name:
+                self._setup_consumer_queue()
+                
+            self._stop_event.clear()
+            callback_wrapper = self._create_callback_wrapper(on_message_callback)
+            
+            try:
+                self._consuming_thread = threading.Thread(
+                    target=self._consume_loop, 
+                    args=(callback_wrapper,), 
+                    daemon=True
                 )
-        else:
-            # For publishers, we don't need a queue
-            self.queue_name = None
-
+                self._consuming_thread.start()
+            except Exception as e:
+                raise MessageMiddlewareMessageError("Error starting consumer") from e
+    
+    def _create_callback_wrapper(self, on_message_callback):
+        def callback_wrapper(ch, method, properties, body):
+            if self._stop_event.is_set():
+                return
+            try:
+                on_message_callback(body)
+                ch.basic_ack(delivery_tag=method.delivery_tag)
+            except Exception as e:
+                ch.basic_nack(delivery_tag=method.delivery_tag, requeue=True)
+        return callback_wrapper
+    
+    def _consume_loop(self, callback_wrapper):
+        try:
+            self._consumer_tag = self._channel.basic_consume(
+                queue=self.queue_name, 
+                on_message_callback=callback_wrapper
+            )
+            
+            while not self._stop_event.is_set():
+                try:
+                    self._connection.process_data_events(time_limit=1.0)
+                except Exception as e:
+                    if not self._stop_event.is_set():
+                        break
+            
+            if self._consumer_tag and self._channel.is_open:
+                try:
+                    self._channel.basic_cancel(self._consumer_tag)
+                except Exception:
+                    pass
+                self._consumer_tag = None
+                
+        except pika.exceptions.AMQPError as e:
+            if not self._stop_event.is_set():
+                raise MessageMiddlewareMessageError("Consumer error") from e
+    
+    def stop_consuming(self):
+        with self._consume_lock:
+            if not self._consuming_thread or not self._consuming_thread.is_alive():
+                return
+            
+            try:
+                self._stop_event.set()
+                self._consuming_thread.join(timeout=1.0)
+                
+                if self._consuming_thread.is_alive():
+                    self._force_cleanup()
+                
+            except Exception as e:
+                raise MessageMiddlewareDisconnectedError("Error stopping consumer") from e
+            finally:
+                self._consuming_thread = None
+                self._consumer_tag = None
+    
+    def _force_cleanup(self):
+        try:
+            if self._connection and self._connection.is_open:
+                self._connection.close()
+            self._connection = None
+            self._channel = None
+        except Exception:
+            pass
+    
     def send(self, message):
         try:
             if not isinstance(message, bytes):
@@ -250,20 +342,26 @@ class MessageMiddlewareExchange(RabbitMQBase):
             )
         except pika.exceptions.AMQPError as e:
             raise MessageMiddlewareMessageError("Error sending message") from e
-
+    
+    def close(self):
+        try:
+            self.stop_consuming()
+            if self._connection and self._connection.is_open:
+                self._connection.close()
+            self._connection = None
+            self._channel = None
+        except Exception as e:
+            raise MessageMiddlewareCloseError("Error closing connection") from e
+    
     def delete(self):
         try:
             self.stop_consuming()
             if self._channel and self._channel.is_open:
-                # Only delete queue if we're a consumer and have a queue
-                if self.is_consumer and self.queue_name:
+                if self.queue_name:
                     try:
                         self._channel.queue_delete(queue=self.queue_name)
                     except Exception as e:
                         logging.warning(f"Failed to delete queue {self.queue_name}: {e}")
-                
-                # Be careful with exchange deletion - it might be used by other components
-                # Only uncomment if you're sure it's safe to delete the exchange
-                # self._channel.exchange_delete(exchange=self.exchange_name)
+                        
         except Exception as e:
             raise MessageMiddlewareDeleteError(f"Error cleaning up exchange resources '{self.exchange_name}'") from e
