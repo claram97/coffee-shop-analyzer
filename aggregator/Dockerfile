@@ -1,15 +1,25 @@
 FROM python:3.9.7-slim
 
+# Copy requirements.txt if you have one
+# COPY aggregator/requirements.txt /tmp/requirements.txt
+# RUN pip install -r /tmp/requirements.txt && rm /tmp/requirements.txt
+
 # Install required dependencies
 RUN pip install pika
 
-# Copy orchestrator code
-COPY aggregator /
-
-# Copy middleware code to make it available for imports
+# Copy all code to root for easier imports
+COPY aggregator /aggregator
 COPY middleware /middleware
-
-# Copy protocol code to make it available for imports
 COPY protocol /protocol
+COPY app_config /app_config
 
-ENTRYPOINT ["/bin/sh"]
+# Set Python path to include root directory
+ENV PYTHONPATH=/
+
+# Set working directory
+WORKDIR /aggregator
+
+# Make the entry point executable
+RUN chmod +x main.py
+
+ENTRYPOINT ["python3", "/aggregator/main.py"]
