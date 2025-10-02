@@ -52,16 +52,17 @@ class MessageMiddlewareQueue(MessageMiddleware):
         
     def _connect(self):
         try:
-            self._connection = pika.BlockingConnection(pika.ConnectionParameters(host=self._host))
+            self._connection = pika.BlockingConnection(
+                pika.ConnectionParameters(
+                    host=self._host,
+                    heartbeat=1200,
+                    blocked_connection_timeout=600
+                )
+            )
             self._channel = self._connection.channel()
         except (pika.exceptions.AMQPConnectionError, OSError, Exception) as e:
             raise MessageMiddlewareDisconnectedError(f"Could not connect to RabbitMQ on '{self._host}'") from e
 
-    def _setup_queue(self):
-        # durable=True makes sure the queue survives broker restarts.
-        self._channel.queue_declare(queue=self.queue_name, durable=True)
-        # Amount of unacknowledged messages a consumer can have.
-        self._channel.basic_qos(prefetch_count=3)
         
     def start_consuming(self, on_message_callback):
         with self._consume_lock:
@@ -121,7 +122,7 @@ class MessageMiddlewareQueue(MessageMiddleware):
         """Process RabbitMQ events until stop is requested"""
         while not self._stop_event.is_set():
             try:
-                self._connection.process_data_events(time_limit=1.0)
+                self._connection.process_data_events(time_limit=10.0)  # Set a longer time limit (e.g., 10 seconds)
             except Exception as e:
                 if not self._stop_event.is_set():
                     logging.error(f"DEBUG: Exception in process_data_events: {e}", exc_info=True)
@@ -222,11 +223,17 @@ class MessageMiddlewareExchange(MessageMiddleware):
     
     def _connect(self):
         try:
-            self._connection = pika.BlockingConnection(pika.ConnectionParameters(host=self._host))
+            self._connection = pika.BlockingConnection(
+                pika.ConnectionParameters(
+                    host=self._host,
+                    heartbeat=1200,
+                    blocked_connection_timeout=600
+                )
+            )
             self._channel = self._connection.channel()
         except (pika.exceptions.AMQPConnectionError, OSError, Exception) as e:
             raise MessageMiddlewareDisconnectedError(f"Could not connect to RabbitMQ on '{self._host}'") from e
-    
+
     def _setup_exchange(self):
         """Declare the exchange but don't create a queue yet"""
         self._channel.exchange_declare(exchange=self.exchange_name, exchange_type='topic', durable=True)
@@ -296,18 +303,16 @@ class MessageMiddlewareExchange(MessageMiddleware):
                 on_message_callback=callback_wrapper
             )
             
-            # Process events until stopped
             logging.info("Entering event processing loop")
             while not self._stop_event.is_set():
                 try:
-                    self._connection.process_data_events(time_limit=1.0)
+                    self._connection.process_data_events(time_limit=10.0)
                 except Exception as e:
                     if not self._stop_event.is_set():
                         logging.error(f"Exception in exchange process_data_events: {e}", exc_info=True)
                         logging.error("Consumer loop broke due to exception - this is likely the cause of stuck messages!")
                         break
             
-            # Clean up consumer resources
             if self._consumer_tag and self._channel and self._channel.is_open:
                 try:
                     self._channel.basic_cancel(self._consumer_tag)
