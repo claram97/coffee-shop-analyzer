@@ -177,6 +177,7 @@ class RawTransactionStore:
         city: str,
         final_amount: str,
         created_at: str,
+        user_id: str,
         **kwargs
     ):
         self.transaction_id = transaction_id
@@ -185,6 +186,7 @@ class RawTransactionStore:
         self.city = city
         self.final_amount = final_amount
         self.created_at = created_at
+        self.user_id = user_id
 
 
 class RawTransactionItemMenuItem:
@@ -225,3 +227,4 @@ class RawTransactionStoreUser:
         self.user_id = user_id
         self.birthdate = birthdate
         self.created_at = created_at
+
