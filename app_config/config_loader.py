@@ -42,6 +42,7 @@ class NamesCfg:
     results_controller_queue: str
     rc_to_orch_queue: str
     orchestrator_input_queue: str
+    joiner_queue_fmt: str
 
 
 @dataclass(frozen=True)
@@ -118,6 +119,7 @@ class Config:
             results_controller_queue=n.get("results_controller_queue"),
             rc_to_orch_queue=n.get("rc_to_orch_queue"),
             orchestrator_input_queue=n.get("orchestrator_input_queue"),
+            joiner_queue_fmt=n.get("joiner_queue_fmt"),
         )
 
         batches = cp["batches"]
@@ -155,3 +157,6 @@ class Config:
 
     def joiner_router_rk(self, table: str, shard: int) -> str:
         return self.names.joiner_router_rk_fmt.format(table=table, shard=int(shard))
+
+    def joiner_queue(self, table: str, shard: int) -> str:
+        return self.names.joiner_queue_fmt.format(table=table, shard=int(shard))

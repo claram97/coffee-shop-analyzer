@@ -18,37 +18,66 @@ from middleware.middleware_client import (
 from protocol import Opcodes
 
 
+def ensure_joiner_bindings(cfg: Config, host: str, shard: int) -> None:
+    """
+    Declara la cola estable de cada tabla para este shard y asegura el binding
+    exchange -> routing_key -> queue.
+    """
+    # Utilizamos MessageMiddlewareQueue para asegurarnos que la cola exista.
+    # Luego creamos un publisher del exchange para forzar/asegurar el binding.
+    tables = ["menu_items", "stores", "transactions", "transaction_items", "users"]
+    for table in tables:
+        rk = cfg.joiner_router_rk(table, shard)  # p.ej. join.stores.shard.15
+        qn = cfg.joiner_queue(table, shard)  # p.ej. join.stores.shard.15
+        ex = cfg.joiner_router_exchange(table)  # p.ej. jx.stores
+
+        # 1) Declarar cola estable
+        q = MessageMiddlewareQueue(host=host, queue_name=qn)
+        # Cerramos el canal; la cola queda declarada en Rabbit
+        try:
+            q.close()
+        except Exception:
+            pass
+
+        # 2) Asegurar el binding exchange<->rk->queue
+        # Muchas implementaciones de Exchange crean el binding al pasar queue_name.
+        # Si tu wrapper no bindea por sí solo, crea un consumidor efímero para forzar el bind.
+        _tmp_consumer = MessageMiddlewareExchange(
+            host=host,
+            exchange_name=ex,
+            route_keys=[rk],
+            consumer=True,
+            queue_name=qn,
+        )
+        # No arrancamos el consumo; con abrir/cerrar alcanza para declarar/bindear
+        try:
+            _tmp_consumer.close()
+        except Exception:
+            pass
+
+
 def build_inputs_for_shard(
     cfg: Config, host: str, shard: int
 ) -> Dict[int, MessageMiddlewareExchange]:
-    """Crea los consumers bindeados a los exchanges del Joiner Router con la routing key del shard."""
     inputs: Dict[int, MessageMiddlewareExchange] = {}
 
-    inputs[Opcodes.NEW_TRANSACTION_ITEMS] = MessageMiddlewareExchange(
-        host=host,
-        exchange_name=cfg.joiner_router_exchange("transaction_items"),
-        route_keys=[cfg.joiner_router_rk("transaction_items", shard)],
-    )
-    inputs[Opcodes.NEW_TRANSACTION] = MessageMiddlewareExchange(
-        host=host,
-        exchange_name=cfg.joiner_router_exchange("transactions"),
-        route_keys=[cfg.joiner_router_rk("transactions", shard)],
-    )
-    inputs[Opcodes.NEW_USERS] = MessageMiddlewareExchange(
-        host=host,
-        exchange_name=cfg.joiner_router_exchange("users"),
-        route_keys=[cfg.joiner_router_rk("users", shard)],
-    )
-    inputs[Opcodes.NEW_MENU_ITEMS] = MessageMiddlewareExchange(
-        host=host,
-        exchange_name=cfg.joiner_router_exchange("menu_items"),
-        route_keys=[cfg.joiner_router_rk("menu_items", shard)],
-    )
-    inputs[Opcodes.NEW_STORES] = MessageMiddlewareExchange(
-        host=host,
-        exchange_name=cfg.joiner_router_exchange("stores"),
-        route_keys=[cfg.joiner_router_rk("stores", shard)],
-    )
+    def make(table: str) -> MessageMiddlewareExchange:
+        rk = cfg.joiner_router_rk(table, shard)
+        qn = cfg.joiner_queue(table, shard)
+        ex = cfg.joiner_router_exchange(table)
+        return MessageMiddlewareExchange(
+            host=host,
+            exchange_name=ex,
+            route_keys=[rk],
+            consumer=True,
+            queue_name=qn,
+        )
+
+    inputs[Opcodes.NEW_TRANSACTION_ITEMS] = make("transaction_items")
+    inputs[Opcodes.NEW_TRANSACTION] = make("transactions")
+    inputs[Opcodes.NEW_USERS] = make("users")
+    inputs[Opcodes.NEW_MENU_ITEMS] = make("menu_items")
+    inputs[Opcodes.NEW_STORES] = make("stores")
 
     return inputs
 
@@ -160,6 +189,8 @@ def main(argv=None):
         shard,
         out_q_name,
     )
+    ensure_joiner_bindings(cfg, host, shard)
+    in_mw = build_inputs_for_shard(cfg, host, shard)
     worker.run()
 
 
