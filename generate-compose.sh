@@ -108,7 +108,7 @@ services:
 YAML
 
 # --- filter workers ---
-for i in $(seq 0 "$((FILTERS-1))"); do
+for i in $(seq 0 $((FILTERS-1))); do
 cat >> "$OUT_PATH" <<YAML
 
   filter-worker-${i}:
@@ -134,7 +134,7 @@ YAML
 done
 
 # --- aggregators (shardeados) ---
-for i in $(seq 0 "$((AGGS-1))"); do
+for i in $(seq 0 $((AGGS-1))); do
 cat >> "$OUT_PATH" <<YAML
 
   aggregator-${i}:
@@ -183,7 +183,7 @@ cat >> "$OUT_PATH" <<YAML
 YAML
 
 # --- joiner workers (shardeados) ---
-for i in $(seq 0 "$((JOINERS-1))"); do
+for i in $(seq 0 $((JOINERS-1))); do
 cat >> "$OUT_PATH" <<YAML
 
   joiner-worker-${i}:
