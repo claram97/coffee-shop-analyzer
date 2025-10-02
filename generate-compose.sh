@@ -106,7 +106,7 @@ services:
 YAML
 
 # --- filter workers ---
-for i in $(seq 1 "$FILTERS"); do
+for i in $(seq 0 "$FILTERS"); do
 cat >> "$OUT_PATH" <<YAML
 
   filter-worker-${i}:
@@ -132,7 +132,7 @@ YAML
 done
 
 # --- aggregators (shardeados) ---
-for i in $(seq 1 "$AGGS"); do
+for i in $(seq 0 "$AGGS"); do
 cat >> "$OUT_PATH" <<YAML
 
   aggregator-${i}:
@@ -167,7 +167,7 @@ cat >> "$OUT_PATH" <<YAML
       dockerfile: joiner/Dockerfile.router
     environment:
       - PYTHONUNBUFFERED=1
-      - LOG_LEVEL=INFO
+      - LOG_LEVEL=DEBUG
       - CONFIG_PATH=/config/config.ini
     networks:
       - testing_net
@@ -181,7 +181,7 @@ cat >> "$OUT_PATH" <<YAML
 YAML
 
 # --- joiner workers (shardeados) ---
-for i in $(seq 1 "$JOINERS"); do
+for i in $(seq 0 "$JOINERS"); do
 cat >> "$OUT_PATH" <<YAML
 
   joiner-worker-${i}:
