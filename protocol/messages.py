@@ -17,6 +17,11 @@ from .entities import (
     RawTransactionStore,
     RawTransactionStoreUser,
     RawUser,
+    ResultFilteredTransaction,
+    ResultProductMetrics,
+    ResultStoreTPV,
+    ResultTopCustomer,
+    ResultError
 )
 from .parsing import (
     BytesReader,
@@ -379,6 +384,68 @@ class NewTransactionStoresUsers(TableMessage):
             opcode=Opcodes.NEW_TRANSACTION_STORES_USERS,
             required_keys=required,
             row_factory=RawTransactionStoreUser,
+        )
+
+
+# --- Query Result Messages ---
+class QueryResult1(TableMessage):
+    """Result message for Query 1: Filtered transactions."""
+    
+    def __init__(self):
+        required = ("transaction_id", "final_amount")
+        super().__init__(
+            opcode=Opcodes.QUERY_RESULT_1,
+            required_keys=required,
+            row_factory=ResultFilteredTransaction
+        )
+
+
+class QueryResult2(TableMessage):
+    """Result message for Query 2: Product metrics ranked by sales and revenue."""
+    
+    def __init__(self):
+        required = ("month", "name")
+        # Optional fields: quantity, revenue (depending on metric type)
+        super().__init__(
+            opcode=Opcodes.QUERY_RESULT_2,
+            required_keys=required,
+            row_factory=ResultProductMetrics
+        )
+
+
+class QueryResult3(TableMessage):
+    """Result message for Query 3: TPV analysis by store and semester."""
+    
+    def __init__(self):
+        required = ("store_name", "period", "amount")
+        super().__init__(
+            opcode=Opcodes.QUERY_RESULT_3,
+            required_keys=required,
+            row_factory=ResultStoreTPV
+        )
+
+
+class QueryResult4(TableMessage):
+    """Result message for Query 4: Top customers by store."""
+    
+    def __init__(self):
+        required = ("store_name", "birthdate", "purchase_count")
+        super().__init__(
+            opcode=Opcodes.QUERY_RESULT_4,
+            required_keys=required,
+            row_factory=ResultTopCustomer
+        )
+
+
+class QueryResultError(TableMessage):
+    """Error result message for any query type."""
+    
+    def __init__(self):
+        required = ("query_id", "error_code", "error_message")
+        super().__init__(
+            opcode=Opcodes.QUERY_RESULT_ERROR,
+            required_keys=required,
+            row_factory=ResultError
         )
 
 

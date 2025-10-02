@@ -62,6 +62,8 @@ services:
     environment:
       - PYTHONUNBUFFERED=1
       - CLIENTS_AMOUNT=1
+      - RABBITMQ_HOST=rabbitmq
+      - RESULTS_QUEUE=orchestrator_results_queue
     networks:
       - testing_net
     volumes:

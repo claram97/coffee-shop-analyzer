@@ -1,7 +1,6 @@
 FROM python:3.9.7-slim
 
-# Install required dependencies
-RUN pip install pika
+# No additional requirements - using existing middleware
 
 # Copy orchestrator code
 COPY orchestrator /

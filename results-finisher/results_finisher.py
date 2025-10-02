@@ -1,4 +1,3 @@
-import json
 import logging
 import os
 import threading
@@ -8,6 +7,8 @@ from typing import Dict, Any, Set
 
 from middleware_client import MessageMiddlewareQueue
 from protocol import ProtocolError, Opcodes, BatchStatus, DataBatch
+from protocol import messages, entities
+from protocol.messages import TableMessage
 
 logging.basicConfig(
     level=logging.INFO,
@@ -219,12 +220,140 @@ class ResultsFinisher:
             logger.info(f"In-memory cleanup complete for query '{query_id}'.")
 
     def _send_result(self, query_id: str, status: str, result: Any = None, error_message: str = ""):
-        message = json.dumps({
-            "query_id": query_id, "status": status,
-            "result": result, "error": error_message
-        }, indent=2).encode('utf-8')
-        self.output_client.send(message)
-        logger.info(f"Sent final '{status}' result for query '{query_id}'.")
+        """Send query results using the appropriate protocol message type."""
+        try:
+            if status != "success" or result is None:
+                # For error cases, create an error message
+                error_result = messages.QueryResultError()
+                error_result.rows.append(entities.ResultError(
+                    query_id=query_id,
+                    error_code="EXECUTION_ERROR" if status == "error" else "NULL_RESULT",
+                    error_message=error_message or "Unknown error"
+                ))
+                
+                # Wrap the error in a DataBatch
+                batch = DataBatch(
+                    opcode=Opcodes.DATA_BATCH,
+                    query_ids=[int(query_id)] if query_id.isdigit() else [],
+                    meta={},
+                    table_ids=[error_result.opcode],
+                    batch_bytes=error_result.to_bytes(),
+                    batch_number=1,
+                    total_shards=1,
+                    shard_num=1
+                )
+                
+                self.output_client.send(batch.to_bytes())
+                logger.info(f"Sent error result for query '{query_id}' using protocol message")
+                return
+            
+            # For successful results, use the appropriate message type
+            query_type = QueryType(int(query_id))
+            result_message = self._create_result_message(query_type, result)
+            
+            # Wrap the result in a DataBatch for consistent protocol handling
+            batch = DataBatch(
+                opcode=Opcodes.DATA_BATCH,
+                query_ids=[int(query_id)],
+                meta={},
+                table_ids=[result_message.opcode],
+                batch_bytes=result_message.to_bytes(),
+                batch_number=1,
+                total_shards=1,
+                shard_num=1
+            )
+            
+            self.output_client.send(batch.to_bytes())
+            logger.info(f"Sent final result for query '{query_id}' using protocol message")
+        except Exception as e:
+            # Emergency error handling using minimal protocol message
+            # Even in case of internal errors, we still use the protocol
+            try:
+                emergency_error = messages.QueryResultError()
+                emergency_error.rows.append(entities.ResultError(
+                    query_id=query_id,
+                    error_code="INTERNAL_ERROR",
+                    error_message=f"Internal error while sending result: {str(e)}"
+                ))
+                
+                emergency_batch = DataBatch(
+                    opcode=Opcodes.DATA_BATCH,
+                    query_ids=[],  # May not have valid query ID at this point
+                    meta={},
+                    table_ids=[emergency_error.opcode],
+                    batch_bytes=emergency_error.to_bytes(),
+                    batch_number=1,
+                    total_shards=1,
+                    shard_num=1
+                )
+                
+                self.output_client.send(emergency_batch.to_bytes())
+            except Exception as fatal_e:
+                logger.critical(f"FATAL: Failed to send even emergency error message: {fatal_e}")
+            
+            logger.error(f"Failed to create normal protocol message for query {query_id}: {e}", exc_info=True)
+            
+    def _create_result_message(self, query_type: QueryType, result: Any) -> TableMessage:
+        """Create the appropriate result message for the query type."""
+        if query_type == QueryType.Q1:
+            # Q1: Filtered transactions
+            message = messages.QueryResult1()
+            for tx in result.get('transactions', []):
+                message.rows.append(entities.ResultFilteredTransaction(
+                    transaction_id=str(tx.get('transaction_id', '')),
+                    final_amount=str(tx.get('final_amount', 0))
+                ))
+            return message
+            
+        elif query_type == QueryType.Q2:
+            # Q2: Product metrics by month
+            message = messages.QueryResult2()
+            for month, data in result.items():
+                # Handle quantity metrics
+                for product in data.get('by_quantity', []):
+                    message.rows.append(entities.ResultProductMetrics(
+                        month=month,
+                        name=product.get('name', ''),
+                        quantity=str(product.get('quantity', 0)),
+                        revenue=None
+                    ))
+                # Handle revenue metrics
+                for product in data.get('by_revenue', []):
+                    message.rows.append(entities.ResultProductMetrics(
+                        month=month,
+                        name=product.get('name', ''),
+                        quantity=None,
+                        revenue=str(product.get('revenue', 0))
+                    ))
+            return message
+            
+        elif query_type == QueryType.Q3:
+            # Q3: TPV analysis by store and period
+            message = messages.QueryResult3()
+            for store_name, periods in result.items():
+                for period, amount in periods.items():
+                    message.rows.append(entities.ResultStoreTPV(
+                        store_name=store_name,
+                        period=period,
+                        amount=str(amount)
+                    ))
+            return message
+            
+        elif query_type == QueryType.Q4:
+            # Q4: Top customers by store
+            message = messages.QueryResult4()
+            for store_name, customers in result.items():
+                for customer in customers:
+                    message.rows.append(entities.ResultTopCustomer(
+                        store_name=store_name,
+                        birthdate=customer.get('birthdate', ''),
+                        purchase_count=str(customer.get('purchase_count', 0))
+                    ))
+            return message
+            
+        else:
+            raise ValueError(f"No result message type defined for query type {query_type}")
+
 
     def start(self):
         logger.info("ResultsFinisher is starting...")

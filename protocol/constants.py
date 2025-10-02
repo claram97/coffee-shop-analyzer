@@ -72,6 +72,22 @@ class Opcodes:
     # A data message containing transactions joined with store and user information.
     NEW_TRANSACTION_STORES_USERS = 12
 
+    # --- Query Result Messages ---
+    # Result message for Query 1: Filtered transactions
+    QUERY_RESULT_1 = 20
+    
+    # Result message for Query 2: Product metrics ranked by sales and revenue
+    QUERY_RESULT_2 = 21
+    
+    # Result message for Query 3: TPV analysis by store and semester
+    QUERY_RESULT_3 = 22
+    
+    # Result message for Query 4: Top customers by store
+    QUERY_RESULT_4 = 23
+    
+    # Error result message for any query type
+    QUERY_RESULT_ERROR = 29
+
 
 class BatchStatus:
     """
