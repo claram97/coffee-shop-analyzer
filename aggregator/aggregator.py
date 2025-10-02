@@ -204,16 +204,15 @@ class Aggregator:
             rows = db.batch_msg.rows or []
             query_id = db.query_ids[0] if db.query_ids else None
 
-            if query_id in (QueryId.FIRST_QUERY, QueryId.EOF, None):
-                # reenvío directo
+            if query_id == 1 or query_id is None:
                 self._forward_databatch(message)
-            elif query_id == QueryId.THIRD_QUERY:
+            elif query_id == 3:
                 processed = process_query_3(rows)
                 out = serialize_query3_results(
                     processed
                 )  # debe ser bytes de DataBatch con table_ids=[Opcodes.NEW_TRANSACTION]
                 self._forward_databatch(out)
-            elif query_id == QueryId.FOURTH_QUERY:
+            elif query_id == 4:
                 processed = process_query_4_transactions(rows)
                 out = serialize_query4_transaction_results(processed)  # idem arriba
                 self._forward_databatch(out)
