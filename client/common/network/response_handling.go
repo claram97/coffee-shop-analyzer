@@ -52,7 +52,38 @@ func (rh *ResponseHandler) handleResponseMessage(msg interface{}) {
 			rh.log.Debug("action: batch_enviado | result: success")
 		case protocol.BatchRecvFailOpCode:
 			rh.log.Error("action: batch_enviado | result: fail")
+		case protocol.OpCodeDataBatch:
+			// Try to cast to DataBatch to get inner message type
+			if dataBatch, ok := respMsg.(*protocol.DataBatch); ok {
+				rh.handleQueryResult(dataBatch)
+			} else {
+				rh.log.Warning("action: response_received | result: unexpected_format | type: databatch")
+			}
 		}
+	}
+}
+
+// handleQueryResult processes a query result message
+func (rh *ResponseHandler) handleQueryResult(dataBatch *protocol.DataBatch) {
+	// Log based on the inner message opcode
+	switch dataBatch.OpCode {
+	case protocol.OpCodeQueryResult1:
+		rh.log.Info("action: query_result_received | result: success | type: filtered_transactions")
+		rh.log.Debug("Query 1 result: Morning high-value transactions")
+	case protocol.OpCodeQueryResult2:
+		rh.log.Info("action: query_result_received | result: success | type: product_metrics")
+		rh.log.Debug("Query 2 result: Product ranking by sales quantity and revenue")
+	case protocol.OpCodeQueryResult3:
+		rh.log.Info("action: query_result_received | result: success | type: tpv_analysis")
+		rh.log.Debug("Query 3 result: Total Processing Volume by store and semester")
+	case protocol.OpCodeQueryResult4:
+		rh.log.Info("action: query_result_received | result: success | type: top_customers")
+		rh.log.Debug("Query 4 result: Top 3 customers by purchase count per store")
+	case protocol.OpCodeQueryResultError:
+		rh.log.Error("action: query_result_received | result: error | type: query_error")
+		rh.log.Debug("Query execution failed with an error")
+	default:
+		rh.log.Warning("action: query_result_received | result: unknown_type | opcode: %d", dataBatch.OpCode)
 	}
 }
 

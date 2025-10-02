@@ -3,6 +3,7 @@ from __future__ import annotations
 import copy
 import hashlib
 import logging
+import threading
 from typing import Any, Callable, Dict, List, Optional, Set, Tuple
 
 from app_config.config_loader import Config
@@ -66,25 +67,30 @@ def _shard_key_for_row(table_id: int, row, queries: List[int]) -> Optional[str]:
 
 
 def is_broadcast_table(table_id: int, queries: List[int]) -> bool:
-    q = set(queries)
-    if 2 in q and table_id == Opcodes.NEW_MENU_ITEMS:
-        return True
-    if (3 in q or 4 in q) and table_id == Opcodes.NEW_STORES:
-        return True
-    return False
+    return table_id in (Opcodes.NEW_MENU_ITEMS, Opcodes.NEW_STORES)
 
 
 class ExchangePublisherPool:
     def __init__(self, factory: Callable[[str, str], "MessageMiddleware"]):
         self._factory = factory
-        self._pool: Dict[Tuple[str, str], "MessageMiddleware"] = {}
+        self._pool: Dict[Tuple[str, str, int], "MessageMiddleware"] = {}
+        self._lock = threading.Lock()
 
     def get_pub(self, exchange_name: str, routing_key: str) -> "MessageMiddleware":
-        k = (exchange_name, routing_key)
-        pub = self._pool.get(k)
-        if pub is None:
-            pub = self._factory(exchange_name, routing_key)
-            self._pool[k] = pub
+        # clave incluye el id del hilo
+        k = (exchange_name, routing_key, threading.get_ident())
+        with self._lock:
+            pub = self._pool.get(k)
+            # Si el canal se cerró, recrearlo
+            if pub is None or getattr(pub, "is_closed", lambda: False)():
+                log.debug(
+                    "create publisher exchange=%s rk=%s (thread=%s)",
+                    exchange_name,
+                    routing_key,
+                    k[2],
+                )
+                pub = self._factory(exchange_name, routing_key)
+                self._pool[k] = pub
         return pub
 
 
@@ -92,8 +98,7 @@ class JoinerRouter:
     """
     - Recibe DataBatch y TABLE_EOF (desde Aggregators por cola).
     - DataBatch: broadcast (livianas) o sharding por clave (Q2/Q3/Q4) y publish por shard.
-    - TABLE_EOF: cuenta por tabla como si vinieran de particiones de aggregator; al completar `agg_shards`
-      re-emite TABLE_EOF a TODOS los `joiner_shards`.
+    - TABLE_EOF: cuenta por tabla; al completar `agg_shards` re-emite TABLE_EOF a TODOS los `joiner_shards`.
     """
 
     def __init__(
@@ -107,8 +112,20 @@ class JoinerRouter:
         self._cfg = route_cfg
         self._pending_eofs: Dict[int, Set[int]] = {}
         self._part_counter: Dict[int, int] = {}
+        log.info(
+            "JoinerRouter init: tables=%s",
+            {
+                ID_TO_NAME[k]: {
+                    "ex": v.exchange_name,
+                    "agg": v.agg_shards,
+                    "join": v.joiner_shards,
+                }
+                for k, v in route_cfg.items()
+            },
+        )
 
     def run(self):
+        log.info("JoinerRouter consuming…")
         self._in.start_consuming(self._on_raw)
 
     def _try_parse_eof(self, body: bytes) -> Optional[EOFMessage]:
@@ -116,7 +133,8 @@ class JoinerRouter:
             return None
         try:
             return EOFMessage.deserialize_from_bytes(body)
-        except Exception:
+        except Exception as e:
+            log.error("EOF parse error: %s", e)
             return None
 
     def _try_parse_databatch(self, body: bytes) -> Optional[DataBatch]:
@@ -124,7 +142,8 @@ class JoinerRouter:
             return None
         try:
             return DataBatch.deserialize_from_bytes(body)
-        except Exception:
+        except Exception as e:
+            log.error("DataBatch parse error: %s", e)
             return None
 
     @staticmethod
@@ -142,14 +161,13 @@ class JoinerRouter:
 
         s = str(raw).strip().lower()
 
-        # 1) nombre → id
+        # nombre → id
         if s in NAME_TO_ID:
             return NAME_TO_ID[s]
 
-        # 2) numérico → id
+        # numérico → id
         try:
             num = int(s)
-            # validar que sea un opcode conocido
             return num if num in ID_TO_NAME else None
         except ValueError:
             return None
@@ -161,35 +179,54 @@ class JoinerRouter:
             return
 
         db = self._try_parse_databatch(raw)
-        if db is None or not db.table_ids:
+        if db is None:
+            log.warning("skip message: not DataBatch")
             return
 
-        table_id = int(getattr(db.batch_msg, "opcode", db.table_ids[0]))
+        table_id = int(db.batch_msg.opcode)
+        tname = ID_TO_NAME.get(table_id, f"#{table_id}")
         queries: List[int] = list(getattr(db, "query_ids", []) or [])
         cfg = self._cfg.get(table_id)
         if cfg is None:
-            return
-
-        if is_broadcast_table(table_id, queries):
-            self._broadcast(cfg, raw)
+            log.warning("no route cfg for table=%s (%s)", tname, table_id)
             return
 
         inner = getattr(db, "batch_msg", None)
-        if inner is None or not hasattr(inner, "rows"):
-            self._publish(cfg, shard=0, raw=raw)
+        rows = (inner.rows or []) if (inner and hasattr(inner, "rows")) else []
+        log.info(
+            "recv DataBatch table=%s queries=%s rows=%d", tname, queries, len(rows)
+        )
+        if log.isEnabledFor(logging.DEBUG) and rows:
+            sample = rows[0]
+            keys = (
+                [k for k in dir(sample) if not k.startswith("_")]
+                if not isinstance(sample, dict)
+                else list(sample.keys())
+            )
+            log.debug("sample keys: %s", keys[:8])
+
+        if is_broadcast_table(table_id, queries):
+            log.info("broadcast table=%s shards=%d", tname, cfg.joiner_shards)
+            self._broadcast(cfg, raw)
             return
 
-        rows = inner.rows or []
         if not rows:
+            log.debug("empty rows → shard=0 (metadata-only) table=%s", tname)
             self._publish(cfg, shard=0, raw=raw)
             return
 
+        # Bucket por shard
         buckets: Dict[int, List[Any]] = {}
         for r in rows:
             k = _shard_key_for_row(table_id, r, queries)
             shard = 0 if k is None else _hash_to_shard(k, cfg.joiner_shards)
             buckets.setdefault(shard, []).append(r)
 
+        if log.isEnabledFor(logging.INFO):
+            sizes = {sh: len(rs) for sh, rs in buckets.items()}
+            log.info("shard plan table=%s -> %s", tname, sizes)
+
+        # Emitir por shard
         for shard, shard_rows in buckets.items():
             if not shard_rows:
                 continue
@@ -203,17 +240,27 @@ class JoinerRouter:
     def _handle_partition_eof_like(self, eof: EOFMessage, raw_eof: bytes) -> None:
         table_id = self._eof_table_id(eof)
         if table_id is None:
+            log.warning("EOF without valid table_type; ignoring")
             return
         cfg = self._cfg.get(table_id)
         if cfg is None:
+            log.warning("EOF for unknown table_id=%s; ignoring", table_id)
             return
 
+        tname = ID_TO_NAME.get(table_id, f"#{table_id}")
         recvd = self._pending_eofs.setdefault(table_id, set())
         next_idx = self._part_counter.get(table_id, 0) + 1
         self._part_counter[table_id] = next_idx
         recvd.add(next_idx)
 
+        log.info("EOF recv table=%s progress=%d/%d", tname, len(recvd), cfg.agg_shards)
+
         if len(recvd) >= cfg.agg_shards:
+            log.info(
+                "EOF threshold reached for table=%s → broadcast to %d shards",
+                tname,
+                cfg.joiner_shards,
+            )
             self._broadcast(cfg, raw_eof, shards=cfg.joiner_shards)
             self._pending_eofs[table_id] = set()
             self._part_counter[table_id] = 0
@@ -221,29 +268,39 @@ class JoinerRouter:
     def _rk(self, cfg: TableRouteCfg, shard: int) -> str:
         return cfg.key_pattern.format(shard=int(shard))
 
+    def _safe_send(self, pub, raw, ex, rk):
+        try:
+            pub.send(raw)
+        except Exception as e:
+            log.warning(
+                "send failed once ex=%s rk=%s: %s; recreating pub and retrying",
+                ex,
+                rk,
+                e,
+            )
+            # recreate per-thread publisher and retry 1 vez
+            pub2 = self._pool.get_pub(ex, rk)
+            pub2.send(raw)
+
     def _publish(self, cfg: TableRouteCfg, shard: int, raw: bytes):
         rk = self._rk(cfg, shard)
-        pub = self._pool.get_pub(cfg.exchange_name, rk)
-        pub.send(raw)
+        ex = cfg.exchange_name
+        pub = self._pool.get_pub(ex, rk)
+        log.debug("publish ex=%s rk=%s size=%d", ex, rk, len(raw))
+        self._safe_send(pub, raw, ex, rk)
 
     def _broadcast(self, cfg: TableRouteCfg, raw: bytes, shards: Optional[int] = None):
         if shards is None:
             shards = cfg.joiner_shards
         for shard in range(int(shards)):
             rk = self._rk(cfg, shard)
-            pub = self._pool.get_pub(cfg.exchange_name, rk)
-            pub.send(raw)
+            ex = cfg.exchange_name
+            pub = self._pool.get_pub(ex, rk)
+            log.debug("broadcast ex=%s rk=%s size=%d", ex, rk, len(raw))
+            self._safe_send(pub, raw, ex, rk)
 
 
 def build_route_cfg_from_config(cfg: "Config") -> Dict[int, TableRouteCfg]:
-    """
-    Construye el mapa {table_id: TableRouteCfg} usando:
-      - names.joiner_router_exchange_fmt (ej: "jx.{table}")
-      - names.joiner_router_rk_fmt      (ej: "join.{table}.shard.{shard:02d}")
-      - agg_shards[table]               (particiones de salida del aggregator)
-      - joiner_shards[table]            (shards de joiners por tabla)
-      - workers.joiners como default para livianas si no hay entrada en joiner_shards
-    """
     ex_fmt = cfg.names.joiner_router_exchange_fmt
     rk_fmt = cfg.names.joiner_router_rk_fmt
 
@@ -251,6 +308,7 @@ def build_route_cfg_from_config(cfg: "Config") -> Dict[int, TableRouteCfg]:
         return ex_fmt.format(table=table)
 
     def _rk_pattern(table: str) -> str:
+        # dejamos {shard:02d} para .format(shard=..)
         return rk_fmt.replace("{table}", table)
 
     route: Dict[int, TableRouteCfg] = {}
@@ -271,19 +329,36 @@ def build_route_cfg_from_config(cfg: "Config") -> Dict[int, TableRouteCfg]:
             key_pattern=_rk_pattern(tname),
         )
 
+    log.info(
+        "Route cfg: %s",
+        {
+            ID_TO_NAME[k]: {
+                "ex": v.exchange_name,
+                "agg": v.agg_shards,
+                "join": v.joiner_shards,
+                "rk_pat": v.key_pattern,
+            }
+            for k, v in route.items()
+        },
+    )
+
     return route
 
 
 def build_publisher_pool_from_config(cfg: "Config") -> ExchangePublisherPool:
     def factory(exchange_name: str, routing_key: str) -> "MessageMiddleware":
         return MessageMiddlewareExchange(
-            host=cfg.broker.host, exchange_name=exchange_name, route_keys=[routing_key]
+            host=cfg.broker.host,
+            exchange_name=exchange_name,
+            route_keys=[routing_key],
         )
 
+    log.info("Publisher pool factory using host=%s", cfg.broker.host)
     return ExchangePublisherPool(factory)
 
 
 def build_joiner_router_from_config(cfg: "Config", in_queue: str) -> JoinerRouter:
+    log.info("Build JoinerRouter from queue=%s host=%s", in_queue, cfg.broker.host)
     in_mw = MessageMiddlewareQueue(cfg.broker.host, in_queue)
     pool = build_publisher_pool_from_config(cfg)
     route_cfg = build_route_cfg_from_config(cfg)

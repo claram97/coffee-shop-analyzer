@@ -312,7 +312,7 @@ class FilterRouter:
             inner = getattr(b, "batch_msg", None)
             if inner is not None and hasattr(inner, "rows"):
                 inner.rows = subrows
-            self._log.debug(
+            self._log.info(
                 "→ aggregator part=%d table=%s rows=%d", int(pid), table, len(subrows)
             )
             self._p.send_to_aggregator_partition(int(pid), b)
@@ -338,7 +338,7 @@ class FilterRouter:
         eof = self._pending_eof.get(table)
         if eof is None or pending > 0:
             if eof is not None:
-                self._log.debug(
+                self._log.info(
                     "TABLE_EOF deferred: table=%s pending=%d", table, pending
                 )
             return
@@ -383,10 +383,14 @@ class ExchangeBusProducer:
         key = (ex, rk)
         pub = self._pub_cache.get(key)
         if pub is None:
-            self._log.debug(
+            self._log.info(
                 "create publisher exchange=%s rk=%s host=%s", ex, rk, self._host
             )
-            pub = MessageMiddlewareExchange(self._host, ex, [rk])
+            pub = MessageMiddlewareExchange(
+                host=self._host,
+                exchange_name=ex,
+                route_keys=[rk]
+            )
             self._pub_cache[key] = pub
         return pub
 
@@ -477,7 +481,6 @@ class RouterServer:
                 else:
                     self._log.warning(f"Unwanted message opcode: {opcode}")
             except Exception as e:
-                # no romper el hilo de consumo
                 self._log.exception("Error in router callback: %s", e)
 
         try:

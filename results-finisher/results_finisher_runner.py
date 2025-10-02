@@ -3,7 +3,7 @@ import signal
 import threading
 import logging
 from results_finisher import ResultsFinisher
-from middleware_client import MessageMiddlewareQueue, MessageMiddlewareDisconnectedError
+from middleware.middleware_client import MessageMiddlewareQueue, MessageMiddlewareDisconnectedError
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - [Main] - %(message)s')
 

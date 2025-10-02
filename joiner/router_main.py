@@ -9,49 +9,18 @@ import sys
 import threading
 from typing import Dict, Tuple
 
-from config.config_loader import Config
-
-from joiner.router import ExchangePublisherPool, JoinerRouter, TableRouteCfg
+from app_config.config_loader import Config
+from joiner.router import (
+    ExchangePublisherPool,
+    JoinerRouter,
+    TableRouteCfg,
+    build_route_cfg_from_config,
+)
 from middleware.middleware_client import (
     MessageMiddlewareExchange,
     MessageMiddlewareQueue,
 )
 from protocol import Opcodes
-
-
-def _build_route_cfg(cfg: Config) -> Dict[int, TableRouteCfg]:
-    """
-    Crea el mapping table_id -> TableRouteCfg usando:
-      - joiner_router_exchange_fmt
-      - joiner_router_rk_fmt (solo para chequear/dep; el patrón per-table lo arma el Router)
-      - agg_shards (cuántas particiones salen del Aggregator por tabla)
-      - joiner_shards (cuántos workers/joiner shards recibe esa tabla)
-    """
-
-    def ex(table: str) -> str:
-        return cfg.joiner_router_exchange(table)
-
-    def key_pattern_for_table(table: str) -> str:
-        pat = cfg.names.joiner_router_rk_fmt
-        return pat.replace("{table}", table)
-
-    tables: Dict[int, str] = {
-        Opcodes.NEW_TRANSACTION: "transactions",
-        Opcodes.NEW_TRANSACTION_ITEMS: "transaction_items",
-        Opcodes.NEW_USERS: "users",
-        Opcodes.NEW_MENU_ITEMS: "menu_items",
-        Opcodes.NEW_STORES: "stores",
-    }
-
-    route: Dict[int, TableRouteCfg] = {}
-    for tid, tname in tables.items():
-        route[tid] = TableRouteCfg(
-            exchange_name=ex(tname),
-            agg_shards=cfg.agg_partitions(tname),
-            joiner_shards=cfg.joiner_partitions(tname),
-            key_pattern=key_pattern_for_table(tname),
-        )
-    return route
 
 
 def _rabbit_exchange_factory(host: str):
@@ -99,10 +68,56 @@ class _FanInServer:
         stop_evt.wait()
 
 
+def resolve_config_path(cli_value: str | None) -> str:
+    candidates = []
+    if cli_value:
+        candidates.append(cli_value)
+    env_cfg_path = os.getenv("CONFIG_PATH")
+    if env_cfg_path:
+        candidates.append(env_cfg_path)
+    env_cfg = os.getenv("CFG")
+    if env_cfg:
+        candidates.append(env_cfg)
+    candidates.extend(("/config/config.ini", "./config.ini", "/app_config/config.ini"))
+
+    for path in candidates:
+        if path and os.path.exists(path):
+            return os.path.abspath(path)
+
+    return os.path.abspath(candidates[0])
+
+
+def _ensure_all_joiner_bindings(cfg: Config, host: str):
+    from middleware.middleware_client import MessageMiddlewareExchange
+
+    tables = ["menu_items", "stores", "transactions", "transaction_items", "users"]
+    for t in tables:
+        ex = cfg.joiner_router_exchange(t)
+        shards = cfg.joiner_partitions(t)
+        if t in ("menu_items", "stores") and shards <= 1:
+            shards = max(1, int(cfg.workers.joiners))
+        for sh in range(shards):
+            rk = cfg.joiner_router_rk(t, sh)
+            qn = cfg.joiner_queue(t, sh)
+            # Consumidor efímero para forzar binding ex↔rk→queue
+            tmp = MessageMiddlewareExchange(
+                host=host,
+                exchange_name=ex,
+                route_keys=[rk],
+                consumer=True,
+                queue_name=qn,
+            )
+            try:
+                tmp.stop_consuming()
+                tmp.close()
+            except Exception:
+                pass
+
+
 def main():
-    ap = argparse.ArgumentParser(description="Joiner Router main")
-    ap.add_argument("-c", "--config", default="config.ini", help="Ruta al config.ini")
-    ap.add_argument("--log-level", default=os.getenv("LOG_LEVEL", "INFO"))
+    ap = argparse.ArgumentParser()
+    ap.add_argument("-c", "--config", help="Ruta al config.ini")
+    ap.add_argument("--log-level", default=os.environ.get("LOG_LEVEL", "INFO"))
     args = ap.parse_args()
 
     logging.basicConfig(
@@ -111,8 +126,15 @@ def main():
     )
     log = logging.getLogger("joiner-router-main")
 
+    cfg_path = resolve_config_path(args.config)
+    if not os.path.exists(cfg_path):
+        print(f"[filter-router] config no encontrado: {cfg_path}", file=sys.stderr)
+        sys.exit(2)
+
+    log.info(f"Usando config: {cfg_path}")
+
     try:
-        cfg = Config(args.config)
+        cfg = Config(cfg_path)
     except Exception as e:
         log.error(f"No pude cargar config: {e}")
         sys.exit(2)
@@ -121,7 +143,7 @@ def main():
 
     pool = ExchangePublisherPool(factory=_rabbit_exchange_factory(broker_host))
 
-    route_cfg = _build_route_cfg(cfg)
+    route_cfg = build_route_cfg_from_config(cfg)
 
     router = JoinerRouter(
         in_mw=None,
@@ -146,6 +168,7 @@ def main():
     log.info("Entradas (N=%d): %s", len(in_queues), ", ".join(in_queues))
 
     server = _FanInServer(broker_host, in_queues, router, log)
+    _ensure_all_joiner_bindings(cfg, broker_host)
     server.run()
 
 

@@ -11,6 +11,14 @@ const (
 	OpCodeNewTransaction      byte = 7
 	OpCodeNewUsers            byte = 8
 	OpCodeEOF                 byte = 9
+	
+	// Query Result Message Opcodes
+	OpCodeDataBatch           byte = 0   // Wrapper opcode
+	OpCodeQueryResult1        byte = 20  // Q1: Filtered transactions
+	OpCodeQueryResult2        byte = 21  // Q2: Product metrics
+	OpCodeQueryResult3        byte = 22  // Q3: TPV analysis
+	OpCodeQueryResult4        byte = 23  // Q4: Top customers
+	OpCodeQueryResultError    byte = 29  // Error result
 )
 
 // BatchStatus defines the status of a batch being sent

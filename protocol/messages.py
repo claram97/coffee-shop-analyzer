@@ -17,6 +17,11 @@ from .entities import (
     RawTransactionStore,
     RawTransactionStoreUser,
     RawUser,
+    ResultFilteredTransaction,
+    ResultProductMetrics,
+    ResultStoreTPV,
+    ResultTopCustomer,
+    ResultError
 )
 from .parsing import (
     BytesReader,
@@ -382,6 +387,68 @@ class NewTransactionStoresUsers(TableMessage):
         )
 
 
+# --- Query Result Messages ---
+class QueryResult1(TableMessage):
+    """Result message for Query 1: Filtered transactions."""
+    
+    def __init__(self):
+        required = ("transaction_id", "final_amount")
+        super().__init__(
+            opcode=Opcodes.QUERY_RESULT_1,
+            required_keys=required,
+            row_factory=ResultFilteredTransaction
+        )
+
+
+class QueryResult2(TableMessage):
+    """Result message for Query 2: Product metrics ranked by sales and revenue."""
+    
+    def __init__(self):
+        required = ("month", "name")
+        # Optional fields: quantity, revenue (depending on metric type)
+        super().__init__(
+            opcode=Opcodes.QUERY_RESULT_2,
+            required_keys=required,
+            row_factory=ResultProductMetrics
+        )
+
+
+class QueryResult3(TableMessage):
+    """Result message for Query 3: TPV analysis by store and semester."""
+    
+    def __init__(self):
+        required = ("store_name", "period", "amount")
+        super().__init__(
+            opcode=Opcodes.QUERY_RESULT_3,
+            required_keys=required,
+            row_factory=ResultStoreTPV
+        )
+
+
+class QueryResult4(TableMessage):
+    """Result message for Query 4: Top customers by store."""
+    
+    def __init__(self):
+        required = ("store_name", "birthdate", "purchase_count")
+        super().__init__(
+            opcode=Opcodes.QUERY_RESULT_4,
+            required_keys=required,
+            row_factory=ResultTopCustomer
+        )
+
+
+class QueryResultError(TableMessage):
+    """Error result message for any query type."""
+    
+    def __init__(self):
+        required = ("query_id", "error_code", "error_message")
+        super().__init__(
+            opcode=Opcodes.QUERY_RESULT_ERROR,
+            required_keys=required,
+            row_factory=ResultError
+        )
+
+
 class EOFMessage(TableMessage):
     """EOF message that inherits from TableMessage and specifies table type."""
 
@@ -511,11 +578,24 @@ class Finished:
         self.agency_id = None
         self._length = 4
 
-    def read_from(self, sock: socket.socket, length: int):
-        """Validate fixed body length (4) and read agency_id."""
+    def read_from(self, data, length: int):
+        """Validate fixed body length (4) and read agency_id.
+        
+        Args:
+            data: Either a socket object or bytes buffer
+            length: Expected body length (should be 4)
+        """
         if length != self._length:
             raise ProtocolError("invalid length", self.opcode)
-        (agency_id, _) = read_i32(sock, length, self.opcode)
+        
+        # Handle different input types
+        if isinstance(data, bytes):
+            reader = BytesReader(data)
+            (agency_id, _) = read_i32(reader, length, self.opcode)
+        else:
+            from .socket_parsing import read_i32 as socket_read_i32
+            (agency_id, _) = socket_read_i32(data, length, self.opcode)
+        
         self.agency_id = agency_id
 
 

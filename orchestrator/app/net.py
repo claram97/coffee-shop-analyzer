@@ -1,12 +1,14 @@
 """
-Refactored orchestrator using modular architecture.
+Refactored Orchestrator using modular architecture.
 """
 
 import logging
+import os
 from common.network import ServerManager, MessageHandler, ResponseHandler
 from common.processing import create_filtered_data_batch, message_logger
 from protocol.constants import Opcodes
-from middleware import MessageMiddlewareQueue
+from middleware.middleware_client import MessageMiddlewareQueue
+from app.results_consumer import ResultsConsumer
 
 class Orchestrator:
     """Orchestrator using modular network and processing components."""
@@ -19,8 +21,19 @@ class Orchestrator:
             listen_backlog: Maximum pending connections
         """
         self.message_handler = MessageHandler()
-        self._filter_router_queue = MessageMiddlewareQueue("rabbitmq", "filter_router_queue")
+        
+        # Setup middleware connections
+        rabbitmq_host = os.getenv("RABBITMQ_HOST", "rabbitmq")
+        self._filter_router_queue = MessageMiddlewareQueue(rabbitmq_host, "filter.router.in")
+        
+        # Setup the results consumer
+        results_queue = os.getenv("RESULTS_QUEUE", "orchestrator_results_queue")
+        self.results_consumer = ResultsConsumer(results_queue, rabbitmq_host)
+        
+        # Setup network server
         self.server_manager = ServerManager(port, listen_backlog, self._handle_message)
+        
+        # Register message processors
         self._setup_message_processors()
         
     def _setup_message_processors(self):
@@ -33,6 +46,10 @@ class Orchestrator:
             
         # Register processor for EOF messages
         self.message_handler.register_processor(Opcodes.EOF, self._process_eof_message)
+        
+        # Register processor for query messages
+        for opcode in range(1, 5):  # Query types 1-4
+            self.message_handler.register_processor(opcode, self._process_query_request)
             
         # FINISHED message is handled by default (returns False to close connection)
         
@@ -79,7 +96,46 @@ class Orchestrator:
             
         except Exception as e:
             return ResponseHandler.handle_processing_error(msg, client_sock, e)
+    
+    def register_client_for_query(self, query_id, client_sock):
+        """Register a client to receive results for a specific query.
+        
+        Args:
+            query_id: The ID of the query to get results for
+            client_sock: The client socket to send results to
+        """
+        self.results_consumer.register_client_for_query(query_id, client_sock)
+        logging.info(f"action: client_registered_for_query | query_id: {query_id}")
+        
+    def _process_query_request(self, msg, client_sock) -> bool:
+        """Process a query request message from a client.
+        
+        This registers the client to receive the results of the specified query.
+        
+        Args:
+            msg: Query request message to process
+            client_sock: Client socket for responses
             
+        Returns:
+            True to continue connection
+        """
+        try:
+            # Extract query ID from the opcode (1-4 map to QueryType.Q1-Q4)
+            query_id = str(msg.opcode)
+            
+            # Register the client to receive results for this query
+            self.register_client_for_query(query_id, client_sock)
+            
+            # Send a success response to the client
+            ResponseHandler.send_success(client_sock)
+            
+            logging.info(f"action: query_request_received | query_id: {query_id}")
+            return True
+            
+        except Exception as e:
+            logging.error(f"action: query_request_processing | result: fail | error: {e}")
+            return ResponseHandler.handle_processing_error(msg, client_sock, e)
+        
     def _process_filtered_batch(self, msg, status_text: str):
         """Process and log filtered batch."""
         try:
@@ -145,8 +201,16 @@ class Orchestrator:
             return ResponseHandler.handle_processing_error(msg, client_sock, e)
             
     def run(self):
-        """Start the orchestrator server."""
-        self.server_manager.run()
+        """Start the orchestrator server and results consumer."""
+        # Start the results consumer first
+        self.results_consumer.start()
+        
+        # Then start the server
+        try:
+            self.server_manager.run()
+        finally:
+            # Ensure we shut down the results consumer
+            self.results_consumer.stop()
 
 
 class MockFilterRouterQueue:

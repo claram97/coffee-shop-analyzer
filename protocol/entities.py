@@ -228,3 +228,49 @@ class RawTransactionStoreUser:
         self.birthdate = birthdate
         self.created_at = created_at
 
+
+# --- Query Result Entities ---
+
+class ResultFilteredTransaction:
+    """Represents a filtered transaction for Query 1 result."""
+
+    def __init__(self, transaction_id: str, final_amount: str):
+        self.transaction_id = transaction_id
+        self.final_amount = final_amount
+
+
+class ResultProductMetrics:
+    """Represents a product metric entry for Query 2 result."""
+
+    def __init__(self, month: str, name: str, quantity: str = None, revenue: str = None):
+        self.month = month
+        self.name = name
+        self.quantity = quantity
+        self.revenue = revenue
+
+
+class ResultStoreTPV:
+    """Represents a store TPV metric for Query 3 result."""
+
+    def __init__(self, store_name: str, period: str, amount: str):
+        self.store_name = store_name
+        self.period = period
+        self.amount = amount
+
+
+class ResultTopCustomer:
+    """Represents a top customer entry for Query 4 result."""
+
+    def __init__(self, store_name: str, birthdate: str, purchase_count: str):
+        self.store_name = store_name
+        self.birthdate = birthdate
+        self.purchase_count = purchase_count
+
+
+class ResultError:
+    """Represents an error result for any query."""
+
+    def __init__(self, query_id: str, error_code: str = "EXECUTION_ERROR", error_message: str = ""):
+        self.query_id = query_id
+        self.error_code = error_code
+        self.error_message = error_message

@@ -22,7 +22,7 @@ def resolve_config_path(cli_value: str | None) -> str:
     env_cfg = os.getenv("CFG")
     if env_cfg:
         candidates.append(env_cfg)
-    candidates.extend(("/config/config.ini", "./config.ini"))
+    candidates.extend(("/config/config.ini", "./config.ini", "/app_config/config.ini"))
 
     for path in candidates:
         if path and os.path.exists(path):
