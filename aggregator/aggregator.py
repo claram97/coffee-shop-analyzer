@@ -20,6 +20,26 @@ from middleware.middleware_client import MessageMiddlewareExchange, MessageMiddl
 # Para transactions y query 3: procesamiento en esta instancia
 # Para transactions y query 4: procesamiento en esta instancia
 
+# Connection pool for sharing connections
+class ExchangePublisherPool:
+    def __init__(self, host):
+        self._host = host
+        self._pool = {}
+        logging.info(f"Created exchange publisher pool for host: {host}")
+        
+    def get_exchange(self, exchange_name, route_keys):
+        key = (exchange_name, tuple(route_keys) if isinstance(route_keys, list) else (route_keys,))
+        if key not in self._pool:
+            logging.info(f"Creating new exchange in pool: {exchange_name} with keys {route_keys}")
+            self._pool[key] = MessageMiddlewareExchange(
+                host=self._host, 
+                exchange_name=exchange_name, 
+                route_keys=route_keys
+            )
+        else:
+            logging.debug(f"Reusing existing exchange from pool: {exchange_name}")
+        return self._pool[key]
+
 class Aggregator:
     """Main aggregator class for coffee shop data analysis."""
     
@@ -36,6 +56,10 @@ class Aggregator:
         self.config = Config(self.config_path)
         self.host = self.config.broker.host
         
+        # Create a shared connection pool
+        self._exchange_pool = ExchangePublisherPool(host=self.host)
+        logging.info(f"Initialized exchange pool for aggregator {id}")
+        
         # Setup input exchanges for different data types
         tables = ["menu_items", "stores", "transactions", "transaction_items", "users"]
         self._exchanges = {}
@@ -46,10 +70,10 @@ class Aggregator:
             routing_key = self.config.filter_router_rk(table, self.id)
             queue_name = self.config.aggregator_queue(table, self.id)
 
-            self._exchanges[table] = MessageMiddlewareExchange(
-                host=self.host,
+            # Get exchange from the pool instead of creating a new one each time
+            self._exchanges[table] = self._exchange_pool.get_exchange(
                 exchange_name=exchange_name,
-                route_keys=[routing_key],
+                route_keys=[routing_key]
             )
             logging.info(f"Created exchange connection for {table}: {exchange_name} -> {routing_key} with queue {queue_name}")
             
@@ -81,11 +105,13 @@ class Aggregator:
         for exchange in self._exchanges.values():
             exchange.stop_consuming()
         
-        # Close all connections
-        for exchange in self._exchanges.values():
-            exchange.close()
+        # Since we're using a pool, we don't close individual exchanges
+        # as they might share connections
         
+        # Close the joiner queue
         self.joiner_queue.close()
+        
+        logging.info("Aggregator server stopped")
     
     def _handle_menu_item(self, message: bytes) -> bool:
         """Process incoming menu item messages."""
