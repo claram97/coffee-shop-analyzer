@@ -390,9 +390,7 @@ class ExchangeBusProducer:
             pub = MessageMiddlewareExchange(
                 host=self._host, 
                 exchange_name=ex, 
-                route_keys=[rk],
-                is_consumer=False,
-                queue_name=None
+                route_keys=[rk]
             )
             self._pub_cache[key] = pub
         return pub
