@@ -1,12 +1,10 @@
 from collections import defaultdict
-from datetime import datetime
-import logging
 from typing import Dict, Tuple, List
 
-from aggregator.utils.aggregationUtils import create_query2_aggregation, create_query3_aggregation, log_query4_transactions, log_query4_users
-from aggregator.utils.datetimeUtils import calculate_semester, extract_year, parse_datetime
-from aggregator.utils.debug import log_query2_results, log_query3_results
-from aggregator.utils.filterUtils import VALID_YEARS, filter_transaction_by_datetime, is_valid_year
+from utils.aggregationUtils import create_query2_aggregation, create_query3_aggregation, log_query4_transactions, log_query4_users
+from utils.datetimeUtils import calculate_semester, extract_year, parse_datetime
+from utils.debug import log_query2_results, log_query3_results
+from utils.filterUtils import filter_transaction_by_datetime, is_valid_year
 from protocol.databatch import DataBatch
 from protocol.entities import RawTransaction, RawTransactionItem, RawUser
 

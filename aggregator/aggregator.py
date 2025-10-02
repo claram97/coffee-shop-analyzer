@@ -8,12 +8,10 @@ processing and analyzing coffee shop data from multiple clients.
 import logging
 import os
 
-from aggregator.mock import mock_process
-from aggregator.processing import process_query_2, process_query_3, process_query_4_transactions, serialize_query2_results, serialize_query3_results, serialize_query4_transaction_results
-from aggregator.queryid import QueryId
+from processing import process_query_2, process_query_3, process_query_4_transactions, serialize_query2_results, serialize_query3_results, serialize_query4_transaction_results
+from queryid import QueryId
 from protocol.constants import Opcodes
 from protocol.databatch import DataBatch
-from protocol.messages import EOFMessage
 from app_config.config_loader import Config
 from middleware.middleware_client import MessageMiddlewareExchange, MessageMiddlewareQueue
 

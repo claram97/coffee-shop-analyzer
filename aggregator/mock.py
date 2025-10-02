@@ -1,7 +1,7 @@
 from enum import Enum
 import logging
-from aggregator.processing import process_query_2, process_query_3, process_query_4_transactions, serialize_query2_results, serialize_query3_results, serialize_query4_transaction_results, update_databatch_with_results
-from aggregator.queryid import QueryId
+from processing import process_query_2, process_query_3, process_query_4_transactions, serialize_query2_results, serialize_query3_results, serialize_query4_transaction_results, update_databatch_with_results
+from queryid import QueryId
 from protocol.constants import Opcodes
 from protocol.databatch import DataBatch
 from protocol.entities import RawMenuItems, RawStore, RawTransaction, RawTransactionItem, RawUser

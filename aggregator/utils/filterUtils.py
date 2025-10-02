@@ -1,5 +1,5 @@
-from aggregator.constants import MAX_HOUR, MIN_HOUR, VALID_YEARS
-from aggregator.utils.datetimeUtils import parse_datetime
+from constants import MAX_HOUR, MIN_HOUR, VALID_YEARS
+from utils.datetimeUtils import parse_datetime
 from protocol.entities import RawTransaction
 
 

@@ -7,7 +7,7 @@ from collections import defaultdict
 import logging
 from typing import Dict, List
 
-from aggregator.constants import VALID_YEARS
+from constants import VALID_YEARS
 from protocol.entities import RawUser
 
 

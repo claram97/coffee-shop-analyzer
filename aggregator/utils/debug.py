@@ -5,7 +5,7 @@
 import logging
 from typing import Dict
 
-from aggregator.utils.filterUtils import MAX_HOUR, MIN_HOUR, VALID_YEARS
+from utils.filterUtils import MAX_HOUR, MIN_HOUR, VALID_YEARS
 
 
 def log_query2_results(aggregated_data: Dict) -> None:

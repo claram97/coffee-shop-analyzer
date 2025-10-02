@@ -22,4 +22,4 @@ WORKDIR /aggregator
 # Make the entry point executable
 RUN chmod +x main.py
 
-ENTRYPOINT ["python3", "/aggregator/main.py"]
+ENTRYPOINT ["python3", "main.py"]

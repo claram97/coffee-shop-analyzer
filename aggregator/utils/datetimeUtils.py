@@ -5,7 +5,7 @@
 
 from datetime import datetime
 
-from aggregator.constants import DATETIME_FORMAT, FIRST_SEMESTER, FIRST_SEMESTER_MONTHS, SECOND_SEMESTER
+from constants import DATETIME_FORMAT, FIRST_SEMESTER, FIRST_SEMESTER_MONTHS, SECOND_SEMESTER
 
 
 def parse_datetime(date_string: str) -> datetime:
