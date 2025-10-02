@@ -78,14 +78,14 @@ func (c *Client) SendBatch() {
 	if lastErr == nil {
 		finishedSender := network.NewFinishedMessageSender(conn, c.config.ID, log)
 		finishedSender.SendFinished()
-		
+
 		// Wait a bit for the server to process finished message
 		time.Sleep(1 * time.Second)
-		
+
 		// Request query results
 		log.Info("action: query_phase | result: start | message: Requesting query results")
-		c.queryHandler.RequestAllQueries()
-		
+		// c.queryHandler.RequestAllQueries()
+
 		// Wait longer to receive query results
 		time.Sleep(5 * time.Second)
 	}
