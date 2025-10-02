@@ -1,6 +1,6 @@
 from enum import Enum
 import logging
-from aggregator.processing import process_query_2, process_query_3, process_query_4_transactions, process_query_4_users
+from aggregator.processing import process_query_2, process_query_3, process_query_4_transactions, serialize_query2_results, serialize_query3_results, serialize_query4_transaction_results, update_databatch_with_results
 from aggregator.queryid import QueryId
 from protocol.constants import Opcodes
 from protocol.databatch import DataBatch
@@ -294,22 +294,42 @@ def obtain_table_message(databatch: DataBatch):
     return table_message.rows
 
 def mock_process(id):
-    logging.debug('Processing query 2')
+    #############################################################################################
+    # Query 2
     transactions_items_databatch = create_mock_transaction_items_databatch(id)
+    logging.info(f"Created mock DataBatch for Query 2 with {len(transactions_items_databatch.batch_msg.rows)} rows")
     transaction_items = obtain_table_message(transactions_items_databatch)
-    process_query_2(transaction_items)
     
-    logging.debug('Processing query 3')
-    transactions_databatch = create_mock_transactions_databatch(id)
-    transactions = obtain_table_message(transactions_databatch)
-    process_query_3(transactions)
-
-    # Query 4 parte 1: transactions
-    transactions_databatch = create_mock_transactions_databatch(id)
-    transactions = obtain_table_message(transactions_databatch)
-    process_query_4_transactions(transactions)
+    # Procesar y serializar
+    query_result = process_query_2(transaction_items)
+    result_rows = serialize_query2_results(query_result)
     
-    # Query 4 parte 1: users
-    users_databatch = create_mock_users_databatch(id)
-    users = obtain_table_message(users_databatch)
-    process_query_4_users(users)
+    # Actualizar databatch
+    query2_databatch = update_databatch_with_results(transactions_items_databatch, result_rows)
+    logging.info(f"Updated databatch with {len(query2_databatch.batch_msg.rows)} rows")
+    #############################################################################################
+    # Query 3
+    transactions_databatch = create_mock_transactions_databatch(id)
+    logging.info(f"Created mock DataBatch for Query 3 with {len(transactions_databatch.batch_msg.rows)} rows")
+    transactions = obtain_table_message(transactions_databatch)
+    
+    # Procesar y serializar
+    query_result = process_query_3(transactions)
+    result_rows = serialize_query3_results(query_result)
+    
+    # Actualizar databatch
+    query3_databatch = update_databatch_with_results(transactions_databatch, result_rows)
+    logging.info(f"Updated databatch with {len(query3_databatch.batch_msg.rows)} rows")
+    #############################################################################################
+    # Query 4 - Transactions
+    transactions_databatch = create_mock_transactions_databatch(id)
+    logging.info(f"Created mock DataBatch for Query 4 with {len(transactions_databatch.batch_msg.rows)} rows")
+    transactions = obtain_table_message(transactions_databatch)
+    
+    # Procesar y serializar
+    query_result = process_query_4_transactions(transactions)
+    result_rows = serialize_query4_transaction_results(query_result)
+    
+    # Actualizar databatch
+    query4_databatch = update_databatch_with_results(transactions_databatch, result_rows)
+    logging.info(f"Updated databatch with {len(query4_databatch.batch_msg.rows)} rows")

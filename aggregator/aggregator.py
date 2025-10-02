@@ -7,10 +7,8 @@ processing and analyzing coffee shop data from multiple clients.
 """
 import logging
 
-from aggregator.mock import QueryId, mock_process
-from aggregator.processing import process_query_2, process_query_2, process_query_3, process_query_4_transactions, process_query_4_transactions, process_query_4_users, process_query_4_users
-from protocol.constants import Opcodes
-from protocol.databatch import DataBatch
+from aggregator.mock import mock_process
+
 
 # from middleware.middleware_client import MessageMiddlewareExchange, MessageMiddlewareQueue
 
@@ -111,11 +109,11 @@ class Aggregator:
     #             if query_id == QueryId.FIRST_QUERY or query_id == QueryId.EOF:
     #                 self.joiner_queue.send(message)
     #             elif query_id == QueryId.THIRD_QUERY:
-    #                 process_query_3(transactions)
+    #                 processed_data = process_query_3(transactions)
     #                 ## Falta devolver el mensaje en formato data batch para poder volver a mandarlo
     #                 self.joiner_queue.send(message)
     #             elif query_id == QueryId.FOURTH_QUERY:
-    #                 process_query_4_transactions(transactions)
+    #                 processed_data = process_query_4_transactions(transactions)
     #                 ## Falta devolver el mensaje en formato data batch para poder volver a mandarlo
     #                 self.joiner_queue.send(message)
     #             else:
@@ -136,7 +134,7 @@ class Aggregator:
             
     #         if table_id == Opcodes.NEW_TRANSACTION_ITEMS and query_id == QueryId.SECOND_QUERY:
     #             logging.debug(f"Transaction belongs to table {table_id} and query {query_id}")
-    #             process_query_2(transaction_items)
+    #             processed_data = process_query_2(transaction_items)
     #             ## Falta devolver el mensaje en formato data batch para poder volver a mandarlo
     #             self.joiner_queue.send(message)
     #         elif table_id == Opcodes.EOF:
@@ -150,21 +148,10 @@ class Aggregator:
     # def _handle_user(self, message: bytes):
     #     """Process incoming user messages."""
     #     try:
-    #         logging.info(f"Received user")
-    #         user_databatch = DataBatch.deserialize_from_bytes(message)
-    #         users = user_databatch.batch_msg.rows
-    #         query_id = user_databatch.query_ids[0]
-    #         table_id = user_databatch.table_ids[0]
-            
-    #         if table_id == Opcodes.NEW_USERS and query_id == QueryId.FOURTH_QUERY:
-    #             logging.debug(f"User belongs to table {table_id} and query {query_id}")
-    #             process_query_4_users(users)
-    #             ## Falta devolver el mensaje en formato data batch para poder volver a mandarlo
-    #             self.joiner_queue.send(message)
-    #         elif table_id == Opcodes.EOF:
-    #             logging.debug(f"EOF message received for user.")
-    #             self.joiner_queue.send(message)
-    #         else:
-    #             logging.error(f"User message with unexpected table_id {table_id} or query_id {query_id}")
+    #         logging.info(f"Received user.  Passing to joiner.")
+    #         self.joiner_queue.send(message)
+    #         return True
     #     except:
     #         logging.error(f"Failed to decode user message")
+    #         return False
+    

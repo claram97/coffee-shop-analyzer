@@ -37,7 +37,6 @@ def log_query4_transactions(transaction_counts: Dict, filtered_count: int, total
         logging.debug(f'{store_id:8s} | {user_id:7s} | {total_purchases:15d}')
 
     logging.debug(f'Total customer-store combinations: {len(transaction_counts)}')
-    logging.info('')
 
 
 def log_query4_users(users: List[RawUser]) -> None:
@@ -50,4 +49,3 @@ def log_query4_users(users: List[RawUser]) -> None:
         logging.debug(f'{user.user_id:7s} | {user.birthdate}')
 
     logging.debug(f'Total users: {len(users)}')
-    logging.info('')
