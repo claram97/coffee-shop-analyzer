@@ -164,7 +164,7 @@ class MessageMiddlewareQueue(RabbitMQBase):
 
     def _setup_queue(self):
         # durable=True makes sure the queue survives broker restarts.
-        self._channel.queue_declare(queue=self.queue_name, durable=True)
+        self._channel.queue_declare(queue=self.queue_name)
         # Amount of unacknowledged messages a consumer can have.
         self._channel.basic_qos(prefetch_count=3)
 
@@ -204,7 +204,7 @@ class MessageMiddlewareExchange(RabbitMQBase):
         self._setup_exchange()
 
     def _setup_exchange(self):
-        self._channel.exchange_declare(exchange=self.exchange_name, exchange_type='topic', durable=True)
+        self._channel.exchange_declare(exchange=self.exchange_name, exchange_type='topic')
         result = self._channel.queue_declare(queue='', exclusive=True)
         self.queue_name = result.method.queue
         for key in self.route_keys:

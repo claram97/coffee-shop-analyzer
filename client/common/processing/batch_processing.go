@@ -70,10 +70,19 @@ func (bp *BatchProcessor) handleCancellation(batchBuff *bytes.Buffer, counter *i
 }
 
 // handleEOF handles end of file and sends pending batch if there's data
-func (bp *BatchProcessor) handleEOF(batchBuff *bytes.Buffer, counter *int32, currentBatchNumber *int64) error {
+// isLastFile indicates whether this is the last file for this table type
+func (bp *BatchProcessor) handleEOF(batchBuff *bytes.Buffer, counter *int32, currentBatchNumber *int64, isLastFile bool) error {
 	if *counter > 0 {
 		(*currentBatchNumber)++ // Increment only when we actually send a batch
-		if err := protocol.FlushBatch(batchBuff, bp.conn, *counter, bp.opCode, *currentBatchNumber, protocol.BatchEOF); err != nil {
+		
+		// Choose the appropriate status - EOF only if this is the last file
+		batchStatus := protocol.BatchContinue
+		if isLastFile {
+			batchStatus = protocol.BatchEOF
+			bp.log.Infof("action: send_last_batch | result: setting_eof_status | batch_number: %d", *currentBatchNumber)
+		}
+		
+		if err := protocol.FlushBatch(batchBuff, bp.conn, *counter, bp.opCode, *currentBatchNumber, batchStatus); err != nil {
 			return err
 		}
 	}
@@ -81,7 +90,7 @@ func (bp *BatchProcessor) handleEOF(batchBuff *bytes.Buffer, counter *int32, cur
 }
 
 // processCSVLoop processes the main CSV reading loop
-func (bp *BatchProcessor) processCSVLoop(ctx context.Context, reader *csv.Reader, batchBuff *bytes.Buffer, counter *int32, currentBatchNumber *int64) error {
+func (bp *BatchProcessor) processCSVLoop(ctx context.Context, reader *csv.Reader, batchBuff *bytes.Buffer, counter *int32, currentBatchNumber *int64, isLastFile bool) error {
 	for {
 		// Check for cancellation
 		select {
@@ -94,7 +103,7 @@ func (bp *BatchProcessor) processCSVLoop(ctx context.Context, reader *csv.Reader
 		// Read and process the next CSV line
 		if err := bp.processNextRow(reader, batchBuff, counter, currentBatchNumber); err != nil {
 			if errors.Is(err, io.EOF) {
-				return bp.handleEOF(batchBuff, counter, currentBatchNumber)
+				return bp.handleEOF(batchBuff, counter, currentBatchNumber, isLastFile)
 			}
 			// Any other error (malformed CSV, I/O, etc.)
 			return err
@@ -107,12 +116,15 @@ func (bp *BatchProcessor) processCSVLoop(ctx context.Context, reader *csv.Reader
 // On context cancellation, it flushes any partial batch and returns the
 // context error. On clean EOF, it flushes a final partial batch (if any)
 // and returns nil. Any serialization or socket error is returned.
-func (bp *BatchProcessor) BuildAndSendBatches(ctx context.Context, reader *csv.Reader, batchNumber int64) error {
+//
+// isLastFile indicates if this is the last file for this table type, which
+// determines whether the final batch should have BatchStatus=EOF
+func (bp *BatchProcessor) BuildAndSendBatches(ctx context.Context, reader *csv.Reader, batchNumber int64, isLastFile bool) error {
 	var batchBuff bytes.Buffer
 	var counter int32 = 0
 	currentBatchNumber := batchNumber // Current batch number (not incremented per line)
 
-	return bp.processCSVLoop(ctx, reader, &batchBuff, &counter, &currentBatchNumber)
+	return bp.processCSVLoop(ctx, reader, &batchBuff, &counter, &currentBatchNumber, isLastFile)
 }
 
 // GetConnection returns the network connection used by this processor

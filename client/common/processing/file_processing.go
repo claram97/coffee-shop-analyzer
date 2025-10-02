@@ -91,10 +91,10 @@ func (fp *FileProcessor) setupCSVReader(file *os.File) (*csv.Reader, error) {
 }
 
 // processFileAsync processes the file asynchronously and handles the results
-func (fp *FileProcessor) processFileAsync(ctx context.Context, reader *csv.Reader, fileName string, processor *BatchProcessor) error {
+func (fp *FileProcessor) processFileAsync(ctx context.Context, reader *csv.Reader, fileName string, processor *BatchProcessor, isLastFile bool) error {
 	writeDone := make(chan error, 1)
 	go func() {
-		writeDone <- processor.BuildAndSendBatches(ctx, reader, 0) // batchNumber reset on each file
+		writeDone <- processor.BuildAndSendBatches(ctx, reader, 0, isLastFile) // batchNumber reset on each file
 	}()
 
 	if err := <-writeDone; err != nil && !errors.Is(err, context.Canceled) {
@@ -107,7 +107,7 @@ func (fp *FileProcessor) processFileAsync(ctx context.Context, reader *csv.Reade
 }
 
 // ProcessFile processes a single CSV file
-func (fp *FileProcessor) ProcessFile(ctx context.Context, dir, fileName string, processor *BatchProcessor) error {
+func (fp *FileProcessor) ProcessFile(ctx context.Context, dir, fileName string, processor *BatchProcessor, isLastFile bool) error {
 	filePath := filepath.Join(dir, fileName)
 
 	file, err := fp.openAndPrepareFile(filePath)
@@ -121,7 +121,7 @@ func (fp *FileProcessor) ProcessFile(ctx context.Context, dir, fileName string, 
 		return err
 	}
 
-	return fp.processFileAsync(ctx, reader, fileName, processor)
+	return fp.processFileAsync(ctx, reader, fileName, processor, isLastFile)
 }
 
 // ProcessTableType processes all CSV files in a table type directory
@@ -140,19 +140,34 @@ func (fp *FileProcessor) ProcessTableType(ctx context.Context, dataDir, tableTyp
 	// Create processor for this table type
 	processor := processorFactory(handler, opCode)
 
+	// Get all CSV files
 	files, err := os.ReadDir(subDirPath)
 	if err != nil {
 		fp.log.Errorf("Error reading subdirectory %s: %v", subDirPath, err)
 		return err
 	}
-
-	for _, fileEntry := range files {
-		if !fileEntry.IsDir() && filepath.Ext(fileEntry.Name()) == ".csv" {
-			if err := fp.ProcessFile(ctx, subDirPath, fileEntry.Name(), processor); err != nil {
-				return err
-			}
-			time.Sleep(1 * time.Second) // delay between files
+	
+	// Filter to only CSV files
+	var csvFiles []os.DirEntry
+	for _, entry := range files {
+		if !entry.IsDir() && filepath.Ext(entry.Name()) == ".csv" {
+			csvFiles = append(csvFiles, entry)
 		}
+	}
+	
+	// Process each file
+	for i, fileEntry := range csvFiles {
+		// Check if this is the last CSV file for this table type
+		isLastFile := (i == len(csvFiles)-1)
+		
+		if isLastFile {
+			fp.log.Infof("action: processing_file | file: %s | is_last_file: true", fileEntry.Name())
+		}
+		
+		if err := fp.ProcessFile(ctx, subDirPath, fileEntry.Name(), processor, isLastFile); err != nil {
+			return err
+		}
+		time.Sleep(1 * time.Second) // delay between files
 	}
 	
 	// Send EOF message after processing all files of this table type
