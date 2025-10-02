@@ -233,19 +233,17 @@ class MessageMiddlewareExchange(MessageMiddleware):
     
     def start_consuming(self, on_message_callback):
         with self._consume_lock:
-            # If already consuming, do nothing
+            logging.info("====================> STARTING CONSUMER ====================")
             if self._consuming_thread and self._consuming_thread.is_alive():
                 return
             
-            # Create a queue for consuming if not already done
+            logging.info("====================> CONSUMER STARTED ====================")
             if not self.queue_name:
                 logging.info(f"Creating consumer queue for exchange '{self.exchange_name}'")
-                # Use server-generated name for the queue
                 result = self._channel.queue_declare(queue='', exclusive=True)
                 self.queue_name = result.method.queue
                 logging.info(f"Created queue: {self.queue_name}")
                 
-                # Bind the queue to each routing key
                 for key in self.route_keys:
                     self._channel.queue_bind(
                         exchange=self.exchange_name,
@@ -254,15 +252,13 @@ class MessageMiddlewareExchange(MessageMiddleware):
                     )
                     logging.info(f"Bound queue {self.queue_name} to exchange {self.exchange_name} with routing key {key}")
                 
-                # Set QoS for consumer
                 self._channel.basic_qos(prefetch_count=3)
             
-            # Start the consumer thread
             self._stop_event.clear()
             callback_wrapper = self._create_callback_wrapper(on_message_callback)
             
             try:
-                logging.info(f"Starting consumer thread for queue {self.queue_name}")
+                logging.info(f"==================> Starting consumer thread for queue {self.queue_name}")
                 self._consuming_thread = threading.Thread(
                     target=self._consume_loop, 
                     args=(callback_wrapper,), 
