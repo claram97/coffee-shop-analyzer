@@ -108,7 +108,7 @@ services:
 YAML
 
 # --- filter workers ---
-for i in $(seq 0 "$FILTERS"); do
+for i in $(seq 0 "$((FILTERS-1))"); do
 cat >> "$OUT_PATH" <<YAML
 
   filter-worker-${i}:
@@ -134,7 +134,7 @@ YAML
 done
 
 # --- aggregators (shardeados) ---
-for i in $(seq 0 "$AGGS"); do
+for i in $(seq 0 "$((AGGS-1))"); do
 cat >> "$OUT_PATH" <<YAML
 
   aggregator-${i}:
@@ -169,7 +169,7 @@ cat >> "$OUT_PATH" <<YAML
       dockerfile: joiner/Dockerfile.router
     environment:
       - PYTHONUNBUFFERED=1
-      - LOG_LEVEL=DEBUG
+      - LOG_LEVEL=INFO
       - CONFIG_PATH=/config/config.ini
     networks:
       - testing_net
@@ -178,12 +178,12 @@ cat >> "$OUT_PATH" <<YAML
     depends_on:
       rabbitmq:
         condition: service_healthy
-      aggregator-1:
+      aggregator-0:
         condition: service_started
 YAML
 
 # --- joiner workers (shardeados) ---
-for i in $(seq 0 "$JOINERS"); do
+for i in $(seq 0 "$((JOINERS-1))"); do
 cat >> "$OUT_PATH" <<YAML
 
   joiner-worker-${i}:
