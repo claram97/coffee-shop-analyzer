@@ -23,13 +23,23 @@ from middleware.middleware_client import (
     MessageMiddlewareExchange,
     MessageMiddlewareQueue,
 )
-from protocol.constants import Opcodes, BatchStatus
+from protocol.constants import BatchStatus, Opcodes
 from protocol.databatch import DataBatch
+from protocol.messages import EOFMessage
 
 # Para transactions y query 1: re-enviar
 # Para transaction_items y query 2: procesamiento en esta instancia
 # Para transactions y query 3: procesamiento en esta instancia
 # Para transactions y query 4: procesamiento en esta instancia
+
+TID_TO_NAME = {
+    Opcodes.NEW_MENU_ITEMS: "menu_items",
+    Opcodes.NEW_STORES: "stores",
+    Opcodes.NEW_TRANSACTION: "transactions",
+    Opcodes.NEW_TRANSACTION_ITEMS: "transaction_items",
+    Opcodes.NEW_USERS: "users",
+}
+
 
 # Connection pool for sharing connections
 class ExchangePublisherPool:
@@ -37,19 +47,23 @@ class ExchangePublisherPool:
         self._host = host
         self._pool = {}
         logging.info(f"Created exchange publisher pool for host: {host}")
-        
+
     def get_exchange(self, exchange_name, route_keys):
-        key = (exchange_name, tuple(route_keys) if isinstance(route_keys, list) else (route_keys,))
+        key = (
+            exchange_name,
+            tuple(route_keys) if isinstance(route_keys, list) else (route_keys,),
+        )
         if key not in self._pool:
-            logging.info(f"Creating new exchange in pool: {exchange_name} with keys {route_keys}")
+            logging.info(
+                f"Creating new exchange in pool: {exchange_name} with keys {route_keys}"
+            )
             self._pool[key] = MessageMiddlewareExchange(
-                host=self._host, 
-                exchange_name=exchange_name, 
-                route_keys=route_keys
+                host=self._host, exchange_name=exchange_name, route_keys=route_keys
             )
         else:
             logging.debug(f"Reusing existing exchange from pool: {exchange_name}")
         return self._pool[key]
+
 
 class Aggregator:
     """Main aggregator class for coffee shop data analysis."""
@@ -66,11 +80,11 @@ class Aggregator:
         self.config_path = os.getenv("CONFIG_PATH", "/config/config.ini")
         self.config = Config(self.config_path)
         self.host = self.config.broker.host
-        
+
         # Create a shared connection pool
         self._exchange_pool = ExchangePublisherPool(host=self.host)
         logging.info(f"Initialized exchange pool for aggregator {id}")
-        
+
         # Setup input exchanges for different data types
         tables = ["menu_items", "stores", "transactions", "transaction_items", "users"]
         self._exchanges = {}
@@ -83,17 +97,41 @@ class Aggregator:
 
             # Get exchange from the pool instead of creating a new one each time
             self._exchanges[table] = self._exchange_pool.get_exchange(
-                exchange_name=exchange_name,
-                route_keys=[routing_key]
+                exchange_name=exchange_name, route_keys=[routing_key]
             )
-            logging.info(f"Created exchange connection for {table}: {exchange_name} -> {routing_key} with queue {queue_name}")
-            
-        self.joiner_queue = MessageMiddlewareQueue(
-            host=self.host,
-            queue_name=self.config.aggregator_to_joiner_router_queue(
-                tables[0], self.id
-            ),
-        )
+            logging.info(
+                f"Created exchange connection for {table}: {exchange_name} -> {routing_key} with queue {queue_name}"
+            )
+
+        self._out_queues = {}
+        for table in tables:
+            out_q = self.config.aggregator_to_joiner_router_queue(table, self.id)
+            self._out_queues[table] = MessageMiddlewareQueue(
+                host=self.host, queue_name=out_q
+            )
+
+    def _send_to_joiner_by_table(self, table: str, raw_bytes: bytes):
+        q = self._out_queues.get(table)
+        if not q:
+            logging.error("No out queue configured for table=%s", table)
+            return
+        q.send(raw_bytes)
+
+    def _forward_databatch(self, raw: bytes):
+        """Detecta tabla desde DataBatch y reenvía a la cola correcta."""
+        db = DataBatch.deserialize_from_bytes(raw)
+        table_id = int(db.batch_msg.opcode)
+        table = TID_TO_NAME.get(table_id)
+        if not table:
+            logging.error("Unknown table_id=%s in DataBatch", table_id)
+            return
+        self._send_to_joiner_by_table(table, raw)
+
+    def _forward_eof(self, raw: bytes):
+        """Detecta tabla desde EOFMessage y reenvía a la cola correcta."""
+        eof = EOFMessage.deserialize_from_bytes(raw)
+        table = eof.table_type  # p.ej. "transactions"
+        self._send_to_joiner_by_table(table, raw)
 
     def run(self):
         """Start the aggregator server."""
@@ -119,128 +157,109 @@ class Aggregator:
         # Stop consuming from all queues
         for exchange in self._exchanges.values():
             exchange.stop_consuming()
-        
+
         # Since we're using a pool, we don't close individual exchanges
         # as they might share connections
 
-        self.joiner_queue.close()
-        
+        for queue in self._out_queues:
+            queue.close()
+
         logging.info("Aggregator server stopped")
-    
+
     def _handle_menu_item(self, message: bytes) -> bool:
-        """Process incoming menu item messages."""
         try:
-            logging.info(f"Received menu item.  Passing to joiner.")
-            self.joiner_queue.send(message)
+            if not message:
+                return False
+            if message[0] == Opcodes.EOF:
+                self._forward_eof(message)
+            else:
+                self._forward_databatch(message)
             return True
-        except:
-            logging.error(f"Failed to decode menu item message")
+        except Exception:
+            logging.exception("Failed to handle menu item")
             return False
 
     def _handle_store(self, message: bytes) -> bool:
-        """Process incoming store messages."""
         try:
-            logging.info(f"Received store. Passing to joiner.")
-            self.joiner_queue.send(message)
+            if not message:
+                return False
+            if message[0] == Opcodes.EOF:
+                self._forward_eof(message)
+            else:
+                self._forward_databatch(message)
             return True
-        except:
-            logging.error(f"Failed to decode store message")
+        except Exception:
+            logging.exception("Failed to handle store")
             return False
 
     def _handle_transaction(self, message: bytes):
-        """Process incoming transaction messages."""
         try:
-            logging.info(f"Received transaction")
-            transactions_databatch = DataBatch.deserialize_from_bytes(message)
-            transactions = transactions_databatch.batch_msg.rows
-            query_id = transactions_databatch.query_ids[0]
-            table_id = transactions_databatch.batch_msg.opcode
-            logging.debug(
-                f"Transaction belongs to table {table_id} and query {query_id}"
-            )
+            if not message:
+                return False
+            if message[0] == Opcodes.EOF:
+                self._forward_eof(message)
+                return True
 
-            if table_id == Opcodes.NEW_TRANSACTION:
-                if query_id == QueryId.FIRST_QUERY or transactions_databatch.batch_msg.batch_status == BatchStatus.EOF:
-                    self.joiner_queue.send(message)
-                elif query_id == QueryId.THIRD_QUERY:
-                    processed_data = process_query_3(transactions)
-                    serialized_data = serialize_query3_results(processed_data)
-                    transactions_databatch.batch_msg.rows = serialized_data
-                    transactions_databatch.batch_msg.amount = len(serialized_data)
-                    transactions_databatch.batch_bytes = transactions_databatch.batch_msg.to_bytes()
-                    serialized_databatch = transactions_databatch.to_bytes()
-                    self.joiner_queue.send(serialized_databatch)
-                elif query_id == QueryId.FOURTH_QUERY:
-                    processed_data = process_query_4_transactions(transactions)
-                    serialized_data = serialize_query4_transaction_results(
-                        processed_data
-                    )
-                    transactions_databatch.batch_msg.rows = serialized_data
-                    transactions_databatch.batch_msg.amount = len(serialized_data)
-                    transactions_databatch.batch_bytes = transactions_databatch.batch_msg.to_bytes()
-                    serialized_databatch = transactions_databatch.to_bytes()
-                    self.joiner_queue.send(serialized_databatch)
-                else:
-                    logging.error(
-                        f"Transaction message with unexpected query_id {query_id}"
-                    )
+            db = DataBatch.deserialize_from_bytes(message)
+            rows = db.batch_msg.rows or []
+            query_id = db.query_ids[0] if db.query_ids else None
+
+            if query_id in (QueryId.FIRST_QUERY, QueryId.EOF, None):
+                # reenvío directo
+                self._forward_databatch(message)
+            elif query_id == QueryId.THIRD_QUERY:
+                processed = process_query_3(rows)
+                out = serialize_query3_results(
+                    processed
+                )  # debe ser bytes de DataBatch con table_ids=[Opcodes.NEW_TRANSACTION]
+                self._forward_databatch(out)
+            elif query_id == QueryId.FOURTH_QUERY:
+                processed = process_query_4_transactions(rows)
+                out = serialize_query4_transaction_results(processed)  # idem arriba
+                self._forward_databatch(out)
             else:
-                logging.error(
-                    f"Transaction message with unexpected table_id {table_id}"
-                )
-        except:
-            logging.error(f"Failed to decode transaction item message")
+                logging.warning("TX unexpected query_id=%s, forwarding", query_id)
+                self._forward_databatch(message)
+            return True
+        except Exception:
+            logging.exception("Failed to handle transaction")
+            return False
 
     def _handle_transaction_item(self, message: bytes):
-        """Process incoming transaction item messages."""
         try:
-            logging.info(f"Received transaction item")
-            transaction_items_databatch = DataBatch.deserialize_from_bytes(message)
-            transaction_items = transaction_items_databatch.batch_msg.rows
-            query_id = transaction_items_databatch.query_ids[0]
-            table_id = transaction_items_databatch.batch_msg.opcode
+            if not message:
+                return False
+            if message[0] == Opcodes.EOF:
+                self._forward_eof(message)
+                return True
 
-            if transaction_items_databatch.batch_msg.batch_status == BatchStatus.EOF:
-                logging.info(f"EOF message received for transaction items.")
-                self.joiner_queue.send(message)
+            db = DataBatch.deserialize_from_bytes(message)
+            rows = db.batch_msg.rows or []
+            query_id = db.query_ids[0] if db.query_ids else None
+
+            if query_id == QueryId.SECOND_QUERY:
+                processed = process_query_2(rows)
+                out = serialize_query2_results(
+                    processed
+                )  # DataBatch bytes con table_ids=[Opcodes.NEW_TRANSACTION_ITEMS]
+                self._forward_databatch(out)
             else:
-                logging.debug(
-                    f"Transaction belongs to table {table_id} and query {query_id}"
-                )
-                processed_data = process_query_2(transaction_items)
-                serialized_data = serialize_query2_results(processed_data)
-                transaction_items_databatch.batch_msg.rows = serialized_data
-                transaction_items_databatch.batch_msg.amount = len(serialized_data)
-                transaction_items_databatch.batch_bytes = transaction_items_databatch.batch_msg.to_bytes()
-                serialized_databatch = transaction_items_databatch.to_bytes()
-                self.joiner_queue.send(serialized_databatch)
-
-            # if (
-            #     Opcodes.NEW_TRANSACTION_ITEMS == table_id
-            #     and QueryId.SECOND_QUERY in transaction_items_databatch.query_ids 
-            # ):
-            #     logging.debug(
-            #         f"Transaction belongs to table {table_id} and query {query_id}"
-            #     )
-            #     processed_data = process_query_2(transaction_items)
-            #     serialized_data = serialize_query2_results(processed_data)
-            #     self.joiner_queue.send(serialized_data)
-            # elif transaction_items_databatch.batch_msg.batch_status == BatchStatus.EOF:
-            #     logging.info(f"EOF message received for transaction items.")
-            #     self.joiner_queue.send(message)
-            # else:
-            #     logging.error(
-            #         f"Transaction item message with unexpected opcode {table_id} or query_id {query_id}"
-            #     )
-        except Exception as e:
-            logging.error("Failed to decode transaction item message: %s", e)
+                # reenvío directo para otras queries
+                self._forward_databatch(message)
+            return True
+        except Exception:
+            logging.exception("Failed to handle transaction item")
+            return False
 
     def _handle_user(self, message: bytes):
-        """Process incoming user messages."""
         try:
-            logging.info(f"Received user.  Passing to joiner.")
-            self.joiner_queue.send(message)
+            if not message:
+                return False
+            if message[0] == Opcodes.EOF:
+                self._forward_eof(message)
+            else:
+                self._forward_databatch(message)
             return True
-        except:
-            logging.error(f"Failed to decode user message")
+        except Exception:
+            logging.exception("Failed to handle user")
             return False
