@@ -19,7 +19,7 @@ class Orchestrator:
             listen_backlog: Maximum pending connections
         """
         self.message_handler = MessageHandler()
-        self._filter_router_queue = MessageMiddlewareQueue("rabbitmq", "filter_router_queue")
+        self._filter_router_queue = MessageMiddlewareQueue("rabbitmq", "filter.router.in")
         self.server_manager = ServerManager(port, listen_backlog, self._handle_message)
         self._setup_message_processors()
         
