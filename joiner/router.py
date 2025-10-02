@@ -67,7 +67,10 @@ def _shard_key_for_row(table_id: int, row, queries: List[int]) -> Optional[str]:
 
 
 def is_broadcast_table(table_id: int, queries: List[int]) -> bool:
-    q = set(queries)
+    if table_id == Opcodes.NEW_MENU_ITEMS or table_id == Opcodes.NEW_STORES:
+        return True
+    # Keep existing query-specific logic if needed
+    q = set(queries or [])
     if 2 in q and table_id == Opcodes.NEW_MENU_ITEMS:
         return True
     if (3 in q or 4 in q) and table_id == Opcodes.NEW_STORES:
