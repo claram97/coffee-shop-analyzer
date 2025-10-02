@@ -92,6 +92,69 @@ services:
       filter-router:
         condition: service_started
 
+  results-router:
+    container_name: results-router
+    build:
+      context: .
+      dockerfile: results-finisher/Dockerfile.router
+    environment:
+      - PYTHONUNBUFFERED=1
+      - RABBITMQ_HOST=rabbitmq
+      - LOG_LEVEL=INFO
+      - INPUT_QUEUE=joiner_output_queue
+      - OUTPUT_QUEUES=finisher_input_queue_1,finisher_input_queue_2
+    networks:
+      - testing_net
+    volumes:
+      - ./results-finisher:/app/results-finisher:ro
+    depends_on:
+      rabbitmq:
+        condition: service_healthy
+
+  results-finisher-1:
+    container_name: results-finisher-1
+    build:
+      context: .
+      dockerfile: results-finisher/Dockerfile
+    environment:
+      - PYTHONUNBUFFERED=1
+      - RABBITMQ_HOST=rabbitmq
+      - LOG_LEVEL=INFO
+      - STRATEGY_MODE=append_only  # Can be 'append_only' or 'incremental'
+      - INPUT_QUEUE=finisher_input_queue_1
+      - OUTPUT_QUEUE=orchestrator_results_queue
+    networks:
+      - testing_net
+    volumes:
+      - ./results-finisher:/app/results-finisher:ro
+    depends_on:
+      rabbitmq:
+        condition: service_healthy
+      results-router:
+        condition: service_started
+        
+  results-finisher-2:
+    container_name: results-finisher-2
+    build:
+      context: .
+      dockerfile: results-finisher/Dockerfile
+    environment:
+      - PYTHONUNBUFFERED=1
+      - RABBITMQ_HOST=rabbitmq
+      - LOG_LEVEL=INFO
+      - STRATEGY_MODE=append_only  # Can be 'append_only' or 'incremental'
+      - INPUT_QUEUE=finisher_input_queue_2
+      - OUTPUT_QUEUE=orchestrator_results_queue
+    networks:
+      - testing_net
+    volumes:
+      - ./results-finisher:/app/results-finisher:ro
+    depends_on:
+      rabbitmq:
+        condition: service_healthy
+      results-router:
+        condition: service_started
+
 networks:
   testing_net:
     ipam:

@@ -93,8 +93,6 @@ def create_data_batch(query_id, TableMsgClass, rows, batch_num, is_eof=False, ta
     if table_ids is None:
         table_ids = [table_msg.opcode]
     
-    # Use the joiner's meta format: {total_copies: copy_num}
-    # The key is the total number of copies, and the value is the copy index
     meta = {total_copies: copy_num} if total_copies > 0 else {}
 
     batch = DataBatch(

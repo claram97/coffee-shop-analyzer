@@ -206,6 +206,57 @@ done
 # YAML
 # done
 
+# --- results-router ---
+cat >> "$OUT_PATH" <<YAML
+
+  results-router:
+    container_name: results-router
+    build:
+      context: .
+      dockerfile: results-finisher/Dockerfile.router
+    environment:
+      - PYTHONUNBUFFERED=1
+      - RABBITMQ_HOST=rabbitmq
+      - LOG_LEVEL=INFO
+      - INPUT_QUEUE=joiner_output_queue
+      - OUTPUT_QUEUES=finisher_input_queue_1,finisher_input_queue_2
+    networks:
+      - testing_net
+    volumes:
+      - ./results-finisher:/app/results-finisher:ro
+    depends_on:
+      rabbitmq:
+        condition: service_healthy
+YAML
+
+# --- results-finishers (multiple instances) ---
+for i in 1 2; do
+cat >> "$OUT_PATH" <<YAML
+
+  results-finisher-${i}:
+    container_name: results-finisher-${i}
+    build:
+      context: .
+      dockerfile: results-finisher/Dockerfile
+    environment:
+      - PYTHONUNBUFFERED=1
+      - RABBITMQ_HOST=rabbitmq
+      - LOG_LEVEL=INFO
+      - STRATEGY_MODE=append_only  # Can be 'append_only' or 'incremental'
+      - INPUT_QUEUE=finisher_input_queue_${i}
+      - OUTPUT_QUEUE=orchestrator_results_queue
+    networks:
+      - testing_net
+    volumes:
+      - ./results-finisher:/app/results-finisher:ro
+    depends_on:
+      rabbitmq:
+        condition: service_healthy
+      results-router:
+        condition: service_started
+YAML
+done
+
 # --- networks ---
 cat >> "$OUT_PATH" <<'YAML'
 

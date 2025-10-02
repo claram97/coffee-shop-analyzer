@@ -1,4 +1,4 @@
-# results-finisher/Dockerfile
+# results-finisher/Dockerfile.router
 FROM python:3.11-slim
 
 WORKDIR /app
@@ -20,4 +20,4 @@ COPY results-finisher .
 RUN touch protocol/__init__.py || true
 
 # Set the entry point for the container
-CMD ["python", "results_finisher_runner.py"]
+CMD ["python", "results_router.py"]
