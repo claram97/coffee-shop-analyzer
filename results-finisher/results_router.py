@@ -107,8 +107,8 @@ def main():
     try:
         # Load configuration from environment variables with sensible defaults.
         rabbitmq_host = os.getenv("RABBITMQ_HOST", "localhost")
-        input_queue = os.getenv("INPUT_QUEUE", "results_router_input")
-        output_queues_csv = os.getenv("OUTPUT_QUEUES", "results_finisher_1,results_finisher_2")
+        input_queue = os.getenv("INPUT_QUEUE", "results.controller.in")
+        output_queues_csv = os.getenv("OUTPUT_QUEUES", "finisher_input_queue_1,finisher_input_queue_2")
         output_queues = sorted([q.strip() for q in output_queues_csv.split(',') if q.strip()])
 
         if not output_queues:
