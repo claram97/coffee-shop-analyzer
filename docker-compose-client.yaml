@@ -1,0 +1,22 @@
+version: "3.8"
+services:
+  client1:
+    container_name: client1
+    build:
+      context: .
+      dockerfile: client/Dockerfile
+    entrypoint: /client
+    environment:
+      - CLI_ID=1
+    networks:
+      - testing_net
+    volumes:
+      - ./client/config.yaml:/config.yaml:ro
+      - ./.data:/data:ro
+
+networks:
+  testing_net:
+    ipam:
+      driver: default
+      config:
+        - subnet: 172.25.125.0/24

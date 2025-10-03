@@ -72,22 +72,6 @@ services:
       rabbitmq:
         condition: service_healthy
 
-  client1:
-    container_name: client1
-    build:
-      context: .
-      dockerfile: client/Dockerfile
-    entrypoint: /client
-    environment:
-      - CLI_ID=1
-    networks:
-      - testing_net
-    depends_on:
-      - orchestrator
-    volumes:
-      - ./client/config.yaml:/config.yaml:ro
-      - ./.data:/data:ro
-
   filter-router:
     container_name: filter-router
     build:
