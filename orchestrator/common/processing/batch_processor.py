@@ -65,8 +65,8 @@ class BatchProcessor:
                 4,
             ],  # Transaction: query 1, query 3, query 4
             Opcodes.NEW_TRANSACTION_ITEMS: [2],  # TransactionItem: query 2
-            Opcodes.NEW_MENU_ITEMS: [2],  # MenuItem: query 2
-            Opcodes.NEW_STORES: [3],  # Store: query 3
+            Opcodes.NEW_MENU_ITEMS: [],  # MenuItem: query 2
+            Opcodes.NEW_STORES: [],  # Store: query 3
             Opcodes.NEW_USERS: [4],  # User: query 4
         }
 
@@ -116,9 +116,9 @@ class BatchProcessor:
             opcode: The opcode of the message.
 
         Returns:
-            A list of integer query IDs. Defaults to [1] if not found.
+            A list of integer query IDs. Defaults to [] if not found.
         """
-        return self._query_mappings.get(opcode, [1])
+        return self._query_mappings.get(opcode, [])
 
     def get_serialize_function_for_opcode(self, opcode: int) -> Callable:
         """
@@ -310,4 +310,3 @@ def create_filtered_data_batch(original_msg) -> DataBatch:
         A fully processed `DataBatch` object.
     """
     return batch_processor.create_filtered_data_batch(original_msg)
-
