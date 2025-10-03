@@ -145,8 +145,6 @@ class QueryPolicyResolver:
                 return False
             if len(batch_queries) == 1 and batch_queries[0] == 1:
                 return steps_done == 2
-        if batch_table_name == "users":
-            return steps_done == 0
         if batch_table_name == "transaction_items":
             return steps_done == 0
         return False
@@ -172,8 +170,6 @@ class QueryPolicyResolver:
                 return 2
             if batch_queries == [1] or batch_queries == [3] or batch_queries == [4]:
                 return 1
-        if batch_table_name in ("users", "transaction_items"):
-            return 1
         return 1
 
 
@@ -290,6 +286,9 @@ class FilterRouter:
     def _send_sharded_to_aggregators(
         self, batch: DataBatch, table: str, queries: List[int]
     ) -> None:
+        if table in ["stores", "menu_items"]:
+            self._p.send_to_aggregator_partition(0, batch)
+            return
         rows = rows_of(batch)
         num_parts = max(1, int(self._cfg.num_aggregator_partitions(table)))
         self._log.debug(
@@ -387,9 +386,7 @@ class ExchangeBusProducer:
                 "create publisher exchange=%s rk=%s host=%s", ex, rk, self._host
             )
             pub = MessageMiddlewareExchange(
-                host=self._host,
-                exchange_name=ex,
-                route_keys=[rk]
+                host=self._host, exchange_name=ex, route_keys=[rk]
             )
             self._pub_cache[key] = pub
         return pub
@@ -406,7 +403,9 @@ class ExchangeBusProducer:
         table = table_name_of(batch)
         try:
             self._log.debug(
-                "publish → aggregator table=%s part=%d", table, int(partition_id)
+                "publish → aggregator table=%s part=%d",
+                table,
+                int(partition_id),
             )
             batch.batch_bytes = batch.batch_msg.to_bytes()
             self._get_pub(table, partition_id).send(batch.to_bytes())
@@ -440,6 +439,7 @@ class ExchangeBusProducer:
     def requeue_to_router(self, batch: DataBatch) -> None:
         try:
             self._log.debug("requeue → router_input")
+            batch.batch_bytes = batch.batch_msg.to_bytes()
             self._router_pub.send(batch.to_bytes())
         except Exception as e:
             self._log.error("router_input send failed: %s", e)

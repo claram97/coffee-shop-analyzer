@@ -300,7 +300,7 @@ class JoinerWorker:
             self._cache_menu or self._store.get("menu_items", "full", default=None)
         )
         if not menu_idx:
-            self._log.debug("Menu cache no disponible aún; drop batch TI")
+            self._log.warning("Menu cache no disponible aún; drop batch TI")
             return
 
         ti_rows: List[RawTransactionItem] = (

@@ -36,7 +36,7 @@ def initialize_config():
             "LOGGING_LEVEL", config["DEFAULT"]["LOGGING_LEVEL"]
         )
         config_params["clients_amount"] = os.getenv("CLIENTS_AMOUNT")
-        
+
     except KeyError as e:
         raise KeyError("Key was not found. Error: {} .Aborting server".format(e))
     except ValueError as e:
@@ -85,3 +85,4 @@ def initialize_log(logging_level):
 
 if __name__ == "__main__":
     main()
+

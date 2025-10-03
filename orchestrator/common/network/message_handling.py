@@ -4,10 +4,12 @@ standardized responses within a network communication protocol.
 """
 
 import logging
-from typing import Dict, Any
+from typing import Any, Dict
+
+from common.processing import create_filtered_data_batch
 
 from protocol.constants import Opcodes
-from protocol.messages import BatchRecvSuccess, BatchRecvFail
+from protocol.messages import BatchRecvFail, BatchRecvSuccess
 
 
 class MessageHandler:
@@ -16,9 +18,10 @@ class MessageHandler:
     based on their opcode.
     """
 
-    def __init__(self):
+    def __init__(self, fr_q):
         """Initializes the MessageHandler, setting up a registry for message processors."""
         self.message_processors: Dict[int, Any] = {}
+        self._fr_q = fr_q
 
     def register_processor(self, opcode: int, processor_func: Any):
         """
@@ -57,9 +60,11 @@ class MessageHandler:
         Returns:
             True if the message is considered a data message, False otherwise.
         """
-        return (msg.opcode != Opcodes.FINISHED and
-                msg.opcode != Opcodes.BATCH_RECV_SUCCESS and
-                msg.opcode != Opcodes.BATCH_RECV_FAIL)
+        return (
+            msg.opcode != Opcodes.FINISHED
+            and msg.opcode != Opcodes.BATCH_RECV_SUCCESS
+            and msg.opcode != Opcodes.BATCH_RECV_FAIL
+        )
 
     def handle_message(self, msg: Any, client_sock: Any) -> bool:
         """
@@ -75,18 +80,41 @@ class MessageHandler:
         Returns:
             True to keep the connection open, or False to close it.
         """
-        # Check if a specific processor is registered for this opcode
+        # 1) Fast-path: tablas livianas SIEMPRE se reenvían (no dependen de registro)
+        if msg.opcode in (Opcodes.NEW_MENU_ITEMS, Opcodes.NEW_STORES):
+            try:
+                db = create_filtered_data_batch(msg)
+                raw = db.to_bytes()
+                tname = (
+                    "menu_items" if msg.opcode == Opcodes.NEW_MENU_ITEMS else "stores"
+                )
+                logging.info(
+                    "action: orch_forward_light | table=%s | batch_number=%d | bytes=%d",
+                    tname,
+                    db.batch_number,
+                    len(raw),
+                )
+                self._fr_q.send(raw)
+                self.send_success_response(client_sock)
+            except Exception as e:
+                logging.exception("forward_light_failed")
+                self.send_failure_response(client_sock)
+            return True
+
+        # 2) Camino normal (procesadores registrados)
         if msg.opcode in self.message_processors:
+            logging.info("mensaje con opcode %d está en message_processors", msg.opcode)
             return self.message_processors[msg.opcode](msg, client_sock)
 
-        # Apply default handling for common message types
+        # 3) Fallback por defecto (logs + ACK)
         if self.is_data_message(msg):
             return self._handle_data_message(msg, client_sock)
         elif msg.opcode == Opcodes.FINISHED:
-            return False  # Signal to close the connection
+            return False
 
-        # Log a warning for unhandled message types but keep the connection open
-        logging.warning(f"action: handle_message | result: unknown_opcode | opcode: {msg.opcode}")
+        logging.warning(
+            "action: handle_message | result: unknown_opcode | opcode: %d", msg.opcode
+        )
         return True
 
     def _handle_data_message(self, msg: Any, client_sock: Any) -> bool:
@@ -104,10 +132,12 @@ class MessageHandler:
             Always returns True to keep the connection open.
         """
         try:
-            status_text = self.get_status_text(getattr(msg, 'batch_status', 0))
+            status_text = self.get_status_text(getattr(msg, "batch_status", 0))
             logging.info(
                 "action: data_message_received | opcode: %d | amount: %d | status: %s",
-                msg.opcode, getattr(msg, 'amount', 0), status_text
+                msg.opcode,
+                getattr(msg, "amount", 0),
+                status_text,
             )
             self.send_success_response(client_sock)
             return True
@@ -136,7 +166,7 @@ class MessageHandler:
             status_text: The human-readable status of the batch.
         """
         try:
-            if hasattr(msg, 'rows') and msg.rows and len(msg.rows) > 0:
+            if hasattr(msg, "rows") and msg.rows and len(msg.rows) > 0:
                 sample_rows = msg.rows[:2]  # First 2 rows as sample
                 all_keys = set()
                 for row in sample_rows:
@@ -146,10 +176,18 @@ class MessageHandler:
 
                 logging.debug(
                     "action: batch_preview | batch_number: %d | status: %s | opcode: %d | keys: %s | sample_count: %d | sample: %s",
-                    getattr(msg, 'batch_number', 0), status_text, msg.opcode, sorted(list(all_keys)), len(sample_rows), sample_data
+                    getattr(msg, "batch_number", 0),
+                    status_text,
+                    msg.opcode,
+                    sorted(list(all_keys)),
+                    len(sample_rows),
+                    sample_data,
                 )
         except Exception:
-            logging.debug("action: batch_preview | batch_number: %d | result: skip", getattr(msg, 'batch_number', 0))
+            logging.debug(
+                "action: batch_preview | batch_number: %d | result: skip",
+                getattr(msg, "batch_number", 0),
+            )
 
 
 class ResponseHandler:
@@ -184,6 +222,9 @@ class ResponseHandler:
         ResponseHandler.send_failure(client_sock)
         logging.error(
             "action: message_processing | result: fail | batch_number: %d | amount: %d | error: %s",
-            getattr(msg, 'batch_number', 0), getattr(msg, 'amount', 0), str(error)
+            getattr(msg, "batch_number", 0),
+            getattr(msg, "amount", 0),
+            str(error),
         )
         return True
+
