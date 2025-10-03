@@ -1,0 +1,10 @@
+syntax = "proto3";
+
+package protocol;
+option go_package = "github.com/fede/coffee-shop-analyzer/protos;protocol";
+
+import "table_data.proto";
+
+message EOFMessage {
+  TableName table = 1;
+}

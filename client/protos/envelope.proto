@@ -1,0 +1,25 @@
+syntax = "proto3";
+
+package protocol;
+option go_package = "github.com/fede/coffee-shop-analyzer/protos;protocol";
+
+import "eof_message.proto";
+import "table_data.proto";
+
+message Envelope {
+  enum Opcode {
+    UNKNOWN = 0;
+    EOF = 1;
+    FINISHED = 2;
+    TABLE_DATA = 3;
+    BATCH_RECV_SUrCESS = 4;
+    BATCH_RECV_FAIL = 5;
+  }
+
+  Opcode type = 1;
+
+  oneof payload {
+    EOFMessage eof = 2;
+    TableData table_data = 3;
+  }
+}
