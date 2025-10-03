@@ -1,0 +1,27 @@
+syntax = "proto3";
+
+package protocol;
+
+import "databatch.proto";
+import "eof_message.proto";
+import "table_data.proto";
+
+message Envelope {
+  enum Opcode {
+    UNKNOWN = 0;
+    DATA_BATCH = 1;
+    EOF = 2;
+    FINISHED = 3;
+    TABLE_DATA = 4;
+    BATCH_RECV_SUCCESS = 5;
+    BATCH_RECV_FAIL = 6;
+  }
+
+  Opcode type = 1;
+
+  oneof payload {
+    DataBatch data_batch = 2;
+    EOFMessage eof = 3;
+    TableData table_data = 4;
+  }
+}

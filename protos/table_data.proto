@@ -1,0 +1,37 @@
+syntax = "proto3";
+
+package protocol;
+
+message TableSchema {
+  repeated string columns = 1;
+}
+
+message Row {
+  repeated string values = 1;
+}
+
+enum TableName {
+  MENU_ITEMS = 0;
+  STORES = 1;
+  TRANSACTION_ITEMS = 2;
+  TRANSACTIONS = 3;
+  USERS = 4;
+  QUERY_RESULTS_1 = 5;
+  QUERY_RESULTS_2 = 6;
+  QUERY_RESULTS_3 = 7;
+  QUERY_RESULTS_4 = 8;
+}
+
+enum BatchStatus {
+  CONTINUE = 0;
+  EOF = 1;
+  CANCEL = 2;
+}
+
+message TableData {
+  TableName name = 1;
+  TableSchema schema = 2;
+  repeated Row rows = 3;
+  uint64 batch_number = 4;
+  BatchStatus status = 5;
+}
