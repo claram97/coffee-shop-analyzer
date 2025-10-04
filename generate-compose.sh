@@ -204,7 +204,7 @@ cat >> "$OUT_PATH" <<YAML
       - PYTHONUNBUFFERED=1
       - RABBITMQ_HOST=rabbitmq
       - LOG_LEVEL=INFO
-      - INPUT_QUEUE=joiner_output_queue
+      - INPUT_QUEUE=results.controller.in
       - OUTPUT_QUEUES=finisher_input_queue_1,finisher_input_queue_2
     networks:
       - testing_net

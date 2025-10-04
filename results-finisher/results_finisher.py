@@ -82,6 +82,7 @@ class ResultsFinisher:
     def _process_message(self, body: bytes):
         try:
             if not body or body[0] != Opcodes.DATA_BATCH:
+                logger.warning("Received non-DATA_BATCH message, ignoring.")
                 return
 
             batch = DataBatch.deserialize_from_bytes(body)
@@ -102,7 +103,7 @@ class ResultsFinisher:
 
         # If the batch's table type doesn't match the single one we expect for this query, ignore it.
         if not table_type or table_type != expected_table:
-            logger.warning(f"Query {query_id} received unexpected table type '{table_type}'. Expected '{expected_table}'. Ignoring.")
+            logging.warning(f"Query {query_id} received unexpected table type '{table_type}'. Expected '{expected_table}'. Ignoring.")
             return
 
         with self.global_lock:
@@ -130,6 +131,7 @@ class ResultsFinisher:
             except ValueError:
                 raise ValueError(f"Cannot determine a valid QueryType from query_id '{query_id}'")
         
+        logger.info(f"Retrieved state for query '{query_id}'.")
         return self.active_queries[query_id]
 
     def _update_batch_accounting(self, state: QueryState, table_type: str, batch: DataBatch):
@@ -152,19 +154,24 @@ class ResultsFinisher:
             "total_shards": total_shards,
             "shards": {}
         })
+
+        batch_query_id = batch.query_ids[0] if batch.query_ids else None
         
         batch_info["total_shards"] = total_shards
 
         shard_copies = batch_info["shards"].setdefault(shard_num, {
-            "received_copies": set(),
+            "received_copies": set(),   
             "total_copies": total_copies
         })
+
+        logger.info(f"Query '{batch_query_id}': Received batch {batch.batch_number} for table '{table_type}', shard {shard_num}, copy {copy_num}/{total_copies}.")
         
         shard_copies["total_copies"] = total_copies
         
         shard_copies["received_copies"].add(copy_num)
         
         if batch.batch_msg.batch_status == BatchStatus.EOF:
+            logging.info(f"Received EOF for query '{state.query_id}', table '{table_type}', batch {batch.batch_number}.")
             state.eof_received[table_type] = max(state.eof_received.get(table_type, 0), batch.batch_number)
 
         self._check_and_mark_table_as_complete(state, table_type)
@@ -184,7 +191,7 @@ class ResultsFinisher:
 
         for i in range(1, max_batch_num + 1):
             batch_info = all_batches_info.get(i)
-            if not batch_info: return # Batch 'i' has not arrived yet.
+            if not batch_info: return
 
             # Level 1 Check: Have all shards for this batch arrived?
             if len(batch_info["shards"]) != batch_info["total_shards"]:
@@ -197,7 +204,7 @@ class ResultsFinisher:
         
         # If all checks pass for all batches up to the EOF, the table is complete.
         state.completed_tables.add(table_type)
-        logger.info(f"Query '{state.query_id}': Table '{table_type}' is now complete.")
+        logging.info(f"Query '{state.query_id}': Table '{table_type}' is now complete.")
 
     def _is_query_complete(self, state: QueryState) -> bool:
         expected_table = QUERY_TYPE_TO_TABLE.get(state.query_type)
