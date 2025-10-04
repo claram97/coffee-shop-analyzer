@@ -4,10 +4,12 @@ standardized responses within a network communication protocol.
 """
 
 import logging
+import os
 from typing import Any, Dict
 
 from common.processing import create_filtered_data_batch
 
+from middleware.middleware_client import MessageMiddlewareExchange
 from protocol.constants import Opcodes
 from protocol.messages import BatchRecvFail, BatchRecvSuccess
 
@@ -18,48 +20,33 @@ class MessageHandler:
     based on their opcode.
     """
 
-    def __init__(self, fr_q):
-        """Initializes the MessageHandler, setting up a registry for message processors."""
+    def __init__(self):
+        """Initializes the MessageHandler, setting up publishers and registry."""
         self.message_processors: Dict[int, Any] = {}
-        self._fr_q = fr_q
+
+        # ---- Publisher hacia el FILTER ROUTER (exchange) ----
+        rabbitmq_host = os.getenv("RABBITMQ_HOST", "rabbitmq")
+        fr_exchange = os.getenv("ORCH_TO_FR_EXCHANGE", "fr.ex")
+        rk_fmt = os.getenv("ORCH_TO_FR_RK_FMT", "fr.{pid:02d}")
+        # Forzamos PID 0 para livianas
+        rk_fr0 = rk_fmt.format(pid=0)
+
+        # Publisher al exchange del Filter Router, con rk del router 0
+        self._fr_pub_ex = MessageMiddlewareExchange(
+            host=rabbitmq_host,
+            exchange_name=fr_exchange,
+            route_keys=[rk_fr0],
+        )
+        self._rk_fr0 = rk_fr0  # útil para logs
 
     def register_processor(self, opcode: int, processor_func: Any):
-        """
-        Registers a processor function to handle a specific message opcode.
-
-        Args:
-            opcode: The integer opcode of the message to handle.
-            processor_func: The function that will be called to process messages
-                            with the given opcode.
-        """
         self.message_processors[opcode] = processor_func
 
     def get_status_text(self, batch_status: int) -> str:
-        """
-        Converts a numeric batch status code into a human-readable string.
-
-        Args:
-            batch_status: The numeric status code (e.g., 0 for Continue, 1 for EOF).
-
-        Returns:
-            A string representation of the status (e.g., "Continue", "EOF").
-        """
         status_names = {0: "Continue", 1: "EOF", 2: "Cancel"}
         return status_names.get(batch_status, f"Unknown({batch_status})")
 
     def is_data_message(self, msg: Any) -> bool:
-        """
-        Determines if a given message is a data-carrying message.
-
-        This is identified by checking that the opcode is not a control signal
-        (like FINISHED) or a response message.
-
-        Args:
-            msg: The message object to check.
-
-        Returns:
-            True if the message is considered a data message, False otherwise.
-        """
         return (
             msg.opcode != Opcodes.FINISHED
             and msg.opcode != Opcodes.BATCH_RECV_SUCCESS
@@ -67,20 +54,7 @@ class MessageHandler:
         )
 
     def handle_message(self, msg: Any, client_sock: Any) -> bool:
-        """
-        Dispatches a received message to the appropriate processor.
-
-        It first checks for a specifically registered processor for the message's
-        opcode. If none is found, it uses default handlers for common message types.
-
-        Args:
-            msg: The received message object.
-            client_sock: The client's socket object, used for sending responses.
-
-        Returns:
-            True to keep the connection open, or False to close it.
-        """
-        # 1) Fast-path: tablas livianas SIEMPRE se reenvían (no dependen de registro)
+        # 1) Fast-path: tablas livianas → Filter Router 0 por exchange
         if msg.opcode in (Opcodes.NEW_MENU_ITEMS, Opcodes.NEW_STORES):
             try:
                 db = create_filtered_data_batch(msg)
@@ -89,14 +63,15 @@ class MessageHandler:
                     "menu_items" if msg.opcode == Opcodes.NEW_MENU_ITEMS else "stores"
                 )
                 logging.info(
-                    "action: orch_forward_light | table=%s | batch_number=%d | bytes=%d",
+                    "action=orch_forward_light table=%s bn=%d bytes=%d rk=%s",
                     tname,
-                    db.batch_number,
+                    getattr(db, "batch_number", 0),
                     len(raw),
+                    self._rk_fr0,
                 )
-                self._fr_q.send(raw)
+                self._fr_pub_ex.send(raw)
                 self.send_success_response(client_sock)
-            except Exception as e:
+            except Exception:
                 logging.exception("forward_light_failed")
                 self.send_failure_response(client_sock)
             return True
@@ -113,28 +88,15 @@ class MessageHandler:
             return False
 
         logging.warning(
-            "action: handle_message | result: unknown_opcode | opcode: %d", msg.opcode
+            "action=handle_message result=unknown_opcode opcode=%d", msg.opcode
         )
         return True
 
     def _handle_data_message(self, msg: Any, client_sock: Any) -> bool:
-        """
-        Provides a default handling mechanism for data messages.
-
-        This method acts as a fallback if no specific processor is registered. It logs
-        the reception of the data and sends a success response.
-
-        Args:
-            msg: The data message object.
-            client_sock: The client's socket for responding.
-
-        Returns:
-            Always returns True to keep the connection open.
-        """
         try:
             status_text = self.get_status_text(getattr(msg, "batch_status", 0))
             logging.info(
-                "action: data_message_received | opcode: %d | amount: %d | status: %s",
+                "action=data_message_received opcode=%d amount=%d status=%s",
                 msg.opcode,
                 getattr(msg, "amount", 0),
                 status_text,
@@ -142,16 +104,14 @@ class MessageHandler:
             self.send_success_response(client_sock)
             return True
         except Exception as e:
-            logging.error(f"action: handle_data_message | result: fail | error: {e}")
+            logging.error("action=handle_data_message result=fail error=%s", e)
             self.send_failure_response(client_sock)
             return True
 
     def send_success_response(self, client_sock: Any):
-        """Sends a predefined success (BATCH_RECV_SUCCESS) response to the client."""
         BatchRecvSuccess().write_to(client_sock)
 
     def send_failure_response(self, client_sock: Any):
-        """Sends a predefined failure (BATCH_RECV_FAIL) response to the client."""
         BatchRecvFail().write_to(client_sock)
 
     def log_batch_preview(self, msg: Any, status_text: str):
@@ -227,4 +187,3 @@ class ResponseHandler:
             str(error),
         )
         return True
-
