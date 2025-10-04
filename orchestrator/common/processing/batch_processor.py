@@ -223,8 +223,7 @@ class BatchProcessor:
             table_ids=[],
             query_ids=query_ids,
             meta={},
-            total_shards=0,
-            shard_num=0,
+            shards_info=[],
             batch_bytes=batch_bytes,
         )
         wrapper.batch_number = original_msg.batch_number

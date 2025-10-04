@@ -210,13 +210,12 @@ class FilterRouter:
             return
 
         self._log.debug(
-            "recv DataBatch table=%s queries=%s rows=%d mask=%s shard=%s/%s bn=%s",
+            "recv DataBatch table=%s queries=%s rows=%d mask=%s shards_info=%s bn=%s",
             table,
             queries,
             len(rows),
             bin(mask),
-            getattr(batch, "shard_num", 0),
-            getattr(batch, "total_shards", 0),
+            getattr(batch, "shards_info", []),
             bn,
         )
         if self._log.isEnabledFor(logging.DEBUG) and rows:
@@ -308,6 +307,7 @@ class FilterRouter:
             if not subrows:
                 continue
             b = copy.deepcopy(batch)
+            b.shards_info.append((num_parts, pid))
             inner = getattr(b, "batch_msg", None)
             if inner is not None and hasattr(inner, "rows"):
                 inner.rows = subrows

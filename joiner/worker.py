@@ -243,11 +243,15 @@ class JoinerWorker:
         kind, msg = self._decode_msg(raw)
         db = msg if kind == "db" else None
         batch_num = getattr(db, "batch_number", "?") if db else "?"
+        shards_info = getattr(db, "shards_info", "[]") if db else "?"
         shard_num = getattr(self, "_shard", "?")
         queries = list(getattr(db, "query_ids", []) or []) if db else []
         self._log.info(
-            "IN: menu_items batch_number=%s shard=%s queries=%s",
-            batch_num, shard_num, queries
+            "IN: menu_items batch_number=%s shard=%s shards_info=%s queries=%s",
+            batch_num,
+            shard_num,
+            shards_info,
+            queries,
         )
         kind, msg = self._decode_msg(raw)
         if kind == "eof":
@@ -255,6 +259,7 @@ class JoinerWorker:
             self._on_table_eof(int(_eof_table_id(eof)))
             self._stop_queue(Opcodes.NEW_MENU_ITEMS)
             self._maybe_enable_ti_phase()
+            self._maybe_enable_tx_phase()
             return
         if kind != "db":
             return
@@ -274,9 +279,13 @@ class JoinerWorker:
         batch_num = getattr(db, "batch_number", "?") if db else "?"
         shard_num = getattr(self, "_shard", "?")
         queries = list(getattr(db, "query_ids", []) or []) if db else []
+        shards_info = getattr(db, "shards_info", "[]") if db else "?"
         self._log.info(
-            "IN: stores batch_number=%s shard=%s queries=%s",
-            batch_num, shard_num, queries
+            "IN: stores batch_number=%s shard=%s shards_info=%s queries=%s",
+            batch_num,
+            shard_num,
+            shards_info,
+            queries,
         )
         kind, msg = self._decode_msg(raw)
         if kind == "eof":
@@ -284,6 +293,7 @@ class JoinerWorker:
             self._on_table_eof(_eof_table_id(eof))
             self._stop_queue(Opcodes.NEW_STORES)
             self._maybe_enable_ti_phase()
+            self._maybe_enable_tx_phase()
             return
         if kind != "db":
             return
@@ -303,16 +313,19 @@ class JoinerWorker:
         batch_num = getattr(db, "batch_number", "?") if db else "?"
         shard_num = getattr(self, "_shard", "?")
         queries = list(getattr(db, "query_ids", []) or []) if db else []
+        shards_info = getattr(db, "shards_info", "[]") if db else "?"
         self._log.info(
-            "IN: transaction_items batch_number=%s shard=%s queries=%s",
-            batch_num, shard_num, queries
+            "IN: transaction_items batch_number=%s shard=%s shards_info=%s queries=%s",
+            batch_num,
+            shard_num,
+            shards_info,
+            queries,
         )
         kind, msg = self._decode_msg(raw)
         if kind == "eof":
             eof: EOFMessage = msg
             self._on_table_eof(_eof_table_id(eof))
             self._stop_queue(Opcodes.NEW_TRANSACTION_ITEMS)
-            self._maybe_enable_tx_phase()
             return
         if kind != "db":
             return
@@ -363,9 +376,13 @@ class JoinerWorker:
         batch_num = getattr(db, "batch_number", "?") if db else "?"
         shard_num = getattr(self, "_shard", "?")
         queries = list(getattr(db, "query_ids", []) or []) if db else []
+        shards_info = getattr(db, "shards_info", "[]") if db else "?"
         self._log.info(
-            "IN: transactions batch_number=%s shard=%s queries=%s",
-            batch_num, shard_num, queries
+            "IN: transactions batch_number=%s shard=%s shards_info=%s queries=%s",
+            batch_num,
+            shard_num,
+            shards_info,
+            queries,
         )
         kind, msg = self._decode_msg(raw)
         if kind == "eof":
@@ -392,7 +409,7 @@ class JoinerWorker:
             self._cache_stores or self._store.get("stores", "full", default=None)
         )
         if not stores_idx:
-            self._log.debug("Stores cache no disponible aún; drop batch TX")
+            self._log.info("Stores cache no disponible aún; drop batch TX")
             return
 
         joined_tx_st: List[RawTransactionStore] = []
@@ -459,9 +476,13 @@ class JoinerWorker:
         batch_num = getattr(db, "batch_number", "?") if db else "?"
         shard_num = getattr(self, "_shard", "?")
         queries = list(getattr(db, "query_ids", []) or []) if db else []
+        shards_info = getattr(db, "shards_info", "[]") if db else "?"
         self._log.info(
-            "IN: users batch_number=%s shard=%s queries=%s",
-            batch_num, shard_num, queries
+            "IN: users batch_number=%s shard=%s shards_info=%s queries=%s",
+            batch_num,
+            shard_num,
+            shards_info,
+            queries,
         )
         kind, msg = self._decode_msg(raw)
         if kind == "eof":
@@ -529,7 +550,7 @@ class JoinerWorker:
             self._log.info("Activada fase TI")
 
     def _maybe_enable_tx_phase(self):
-        if Opcodes.NEW_TRANSACTION_ITEMS in self._eof:
+        if (Opcodes.NEW_MENU_ITEMS in self._eof) and (Opcodes.NEW_STORES in self._eof):
             self._start_queue(Opcodes.NEW_TRANSACTION, self._on_raw_tx)
             self._log.info("Activada fase TX")
 

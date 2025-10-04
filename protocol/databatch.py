@@ -4,7 +4,7 @@ table-specific data messages along with essential metadata for routing and proce
 """
 
 import logging
-from typing import Dict, List, Optional
+from typing import Dict, List, Optional, Tuple
 
 from .constants import Opcodes, ProtocolError
 from .messages import (
@@ -22,6 +22,7 @@ from .parsing import (
     BytesReader,
     read_i32,
     read_i64,
+    read_tuples_list,
     read_u8_list,
     read_u8_u8_dict,
     read_u8_with_remaining,
@@ -80,8 +81,7 @@ class DataBatch:
       [u16 reserved]      - Reserved for future flags.
       [i64 batch_number]  - The batch number from the original source message.
       [dict<u8,u8> meta]  - A dictionary for arbitrary metadata.
-      [u16 total_shards]  - The total number of shards for this data.
-      [u16 shard_num]     - The number of this specific shard.
+      [(u8, u8) list shards_info]  - List of (u8, u8) tuples, where a tuple has the format (total shards, shard number).
       [embedded message]  - The inner message, framed as [u8 opcode][i32 len][body].
     [-- BODY ENDS --]
     """
@@ -91,8 +91,7 @@ class DataBatch:
         table_ids: Optional[List[int]],
         query_ids: Optional[List[int]],
         meta: Optional[Dict[int, int]],
-        total_shards: Optional[int],
-        shard_num: Optional[int],
+        shards_info: Optional[List[Tuple[int, int]]],
         reserved_u16: int,
         batch_bytes: Optional[bytes],
     ):
@@ -105,8 +104,9 @@ class DataBatch:
         self.query_ids: List[int] = [] if query_ids is None else list(query_ids)
         self.reserved_u16: int = 0 if reserved_u16 is None else int(reserved_u16)
         self.meta: Dict[int, int] = {} if meta is None else dict(meta)
-        self.total_shards: int = 0 if total_shards is None else int(total_shards)
-        self.shard_num: int = 0 if shard_num is None else int(shard_num)
+        self.shards_info: List[Tuple[int, int]] = (
+            [] if shards_info is None else shards_info
+        )
 
         # The embedded content can be a parsed message object (after deserialization)
         # or raw bytes (before serialization).
@@ -148,8 +148,6 @@ class DataBatch:
             self._validate_u8_dict(self.meta)
 
         self._validate_u16_field(self.reserved_u16, "reserved_u16")
-        self._validate_u16_field(self.total_shards, "total_shards")
-        self._validate_u16_field(self.shard_num, "shard_num")
 
     def __init__(
         self,
@@ -157,8 +155,7 @@ class DataBatch:
         table_ids: Optional[List[int]] = None,
         query_ids: Optional[List[int]] = None,
         meta: Optional[Dict[int, int]] = None,
-        total_shards: Optional[int] = None,
-        shard_num: Optional[int] = None,
+        shards_info: Optional[List[Tuple[int, int]]] = None,
         reserved_u16: int = 0,
         batch_bytes: Optional[bytes] = None,
     ):
@@ -170,8 +167,7 @@ class DataBatch:
             table_ids,
             query_ids,
             meta,
-            total_shards,
-            shard_num,
+            shards_info,
             reserved_u16,
             batch_bytes,
         )
@@ -207,8 +203,7 @@ class DataBatch:
         self.reserved_u16, remaining = read_u16(reader, remaining, self.opcode)
         self.batch_number, remaining = read_i64(reader, remaining, self.opcode)
         self.meta, remaining = read_u8_u8_dict(reader, remaining, self.opcode)
-        self.total_shards, remaining = read_u16(reader, remaining, self.opcode)
-        self.shard_num, remaining = read_u16(reader, remaining, self.opcode)
+        self.shards_info, remaining = read_tuples_list(reader, remaining, self.opcode)
         return remaining
 
     def _read_embedded_message(self, reader: BytesReader, remaining: int) -> int:
@@ -221,12 +216,10 @@ class DataBatch:
                 "indicated length doesn't match body length", self.opcode
             )
 
-        # Read the embedded message body into a separate bytes object
         embedded_body_bytes = reader.read(inner_len)
 
         inner_msg = instantiate_message_for_opcode(inner_opcode)
 
-        # Pass the raw bytes of the body to the message's read_from method
         inner_msg.read_from(embedded_body_bytes)
         self.batch_msg = inner_msg
 
@@ -290,6 +283,39 @@ class DataBatch:
             result.extend([int(k), int(v)])
         return result
 
+    def _serialize_tuples_list(self, pairs: List[Tuple[int, int]]) -> bytearray:
+        """
+        Serializes a list of (u8, u8) tuples into a bytearray with a u8-prefixed length.
+
+        Binary format:
+            [u8 count]          - Number of tuples in the list
+            [u8 a0][u8 b0]      - First tuple
+            [u8 a1][u8 b1]      - Second tuple
+            ...
+            [u8 a{count-1}][u8 b{count-1}] - Last tuple
+
+        Args:
+            pairs: A list of (int, int) tuples, where each element must fit within u8 (0-255).
+
+        Returns:
+            A bytearray containing the serialized representation of the tuple list.
+
+        Raises:
+            ValueError: If the list contains more than 255 tuples or if any element is outside
+                        the valid u8 range (0-255).
+        """
+        if len(pairs) > 255:
+            raise ValueError("tuples list must have at most 255 items")
+
+        for a, b in pairs:
+            if not (0 <= int(a) <= 255 and 0 <= int(b) <= 255):
+                raise ValueError("tuple elements must be u8 (0-255)")
+
+        out = bytearray([len(pairs)])
+        for a, b in pairs:
+            out.extend([int(a), int(b)])
+        return out
+
     def _serialize_data_batch_body(self) -> bytearray:
         """Assembles the complete body of the DataBatch message for serialization."""
         body = bytearray()
@@ -300,8 +326,7 @@ class DataBatch:
             int(getattr(self, "batch_number", 0)).to_bytes(8, "little", signed=True)
         )
         body.extend(self._serialize_u8_dict(self.meta))
-        body.extend(int(self.total_shards).to_bytes(2, "little", signed=False))
-        body.extend(int(self.shard_num).to_bytes(2, "little", signed=False))
+        body.extend(self._serialize_tuples_list(self.shards_info))
         body.extend(self.batch_bytes)
         return body
 
@@ -316,13 +341,12 @@ class DataBatch:
         """Logs details of the serialization process for debugging."""
         logging.debug(
             "action: data_batch_to_bytes | batch_number: %d | "
-            "table_ids: %s | query_ids: %s | total_shards: %d | shard_num: %d | "
+            "table_ids: %s | query_ids: %s | shards_info: %s | "
             "body_size: %d bytes | final_size: %d bytes",
             getattr(self, "batch_number", 0),
             self.table_ids,
             self.query_ids,
-            self.total_shards,
-            self.shard_num,
+            self.shards_info,
             len(body),
             len(result_bytes),
         )
@@ -380,4 +404,3 @@ class DataBatch:
         msg.read_from(message_body)
 
         return msg
-
