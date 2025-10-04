@@ -106,12 +106,14 @@ class JoinerRouter:
         in_mw: "MessageMiddleware",
         publisher_pool: ExchangePublisherPool,
         route_cfg: Dict[int, TableRouteCfg],
+        fr_replicas: int,
     ):
         self._in = in_mw
         self._pool = publisher_pool
         self._cfg = route_cfg
         self._pending_eofs: Dict[int, Set[int]] = {}
         self._part_counter: Dict[int, int] = {}
+        self._fr_replicas = fr_replicas
         log.info(
             "JoinerRouter init: tables=%s",
             {
@@ -231,6 +233,7 @@ class JoinerRouter:
             if not shard_rows:
                 continue
             db_sh = copy.deepcopy(db)
+            db_sh.shards_info.append((cfg.joiner_shards, shard))
             if getattr(db_sh, "batch_msg", None) and hasattr(db_sh.batch_msg, "rows"):
                 db_sh.batch_msg.rows = shard_rows
             db_sh.batch_bytes = db_sh.batch_msg.to_bytes()
@@ -255,7 +258,7 @@ class JoinerRouter:
 
         log.info("EOF recv table=%s progress=%d/%d", tname, len(recvd), cfg.agg_shards)
 
-        if len(recvd) >= cfg.agg_shards:
+        if len(recvd) >= cfg.agg_shards * self._fr_replicas:
             log.info(
                 "EOF threshold reached for table=%s → broadcast to %d shards",
                 tname,
