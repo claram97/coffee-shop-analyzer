@@ -241,6 +241,15 @@ class JoinerWorker:
     # ---------- handlers ----------
     def _on_raw_menu(self, raw: bytes):
         kind, msg = self._decode_msg(raw)
+        db = msg if kind == "db" else None
+        batch_num = getattr(db, "batch_number", "?") if db else "?"
+        shard_num = getattr(self, "_shard", "?")
+        queries = list(getattr(db, "query_ids", []) or []) if db else []
+        self._log.info(
+            "IN: menu_items batch_number=%s shard=%s queries=%s",
+            batch_num, shard_num, queries
+        )
+        kind, msg = self._decode_msg(raw)
         if kind == "eof":
             eof: EOFMessage = msg
             self._on_table_eof(int(_eof_table_id(eof)))
@@ -261,6 +270,15 @@ class JoinerWorker:
 
     def _on_raw_stores(self, raw: bytes):
         kind, msg = self._decode_msg(raw)
+        db = msg if kind == "db" else None
+        batch_num = getattr(db, "batch_number", "?") if db else "?"
+        shard_num = getattr(self, "_shard", "?")
+        queries = list(getattr(db, "query_ids", []) or []) if db else []
+        self._log.info(
+            "IN: stores batch_number=%s shard=%s queries=%s",
+            batch_num, shard_num, queries
+        )
+        kind, msg = self._decode_msg(raw)
         if kind == "eof":
             eof: EOFMessage = msg
             self._on_table_eof(_eof_table_id(eof))
@@ -280,6 +298,15 @@ class JoinerWorker:
         self._log.info("Cache stores idx_size=%d", len(idx))
 
     def _on_raw_ti(self, raw: bytes):
+        kind, msg = self._decode_msg(raw)
+        db = msg if kind == "db" else None
+        batch_num = getattr(db, "batch_number", "?") if db else "?"
+        shard_num = getattr(self, "_shard", "?")
+        queries = list(getattr(db, "query_ids", []) or []) if db else []
+        self._log.info(
+            "IN: transaction_items batch_number=%s shard=%s queries=%s",
+            batch_num, shard_num, queries
+        )
         kind, msg = self._decode_msg(raw)
         if kind == "eof":
             eof: EOFMessage = msg
@@ -331,6 +358,15 @@ class JoinerWorker:
         self._send(db)
 
     def _on_raw_tx(self, raw: bytes):
+        kind, msg = self._decode_msg(raw)
+        db = msg if kind == "db" else None
+        batch_num = getattr(db, "batch_number", "?") if db else "?"
+        shard_num = getattr(self, "_shard", "?")
+        queries = list(getattr(db, "query_ids", []) or []) if db else []
+        self._log.info(
+            "IN: transactions batch_number=%s shard=%s queries=%s",
+            batch_num, shard_num, queries
+        )
         kind, msg = self._decode_msg(raw)
         if kind == "eof":
             eof: EOFMessage = msg
@@ -418,6 +454,15 @@ class JoinerWorker:
         self._send(db)
 
     def _on_raw_users(self, raw: bytes):
+        kind, msg = self._decode_msg(raw)
+        db = msg if kind == "db" else None
+        batch_num = getattr(db, "batch_number", "?") if db else "?"
+        shard_num = getattr(self, "_shard", "?")
+        queries = list(getattr(db, "query_ids", []) or []) if db else []
+        self._log.info(
+            "IN: users batch_number=%s shard=%s queries=%s",
+            batch_num, shard_num, queries
+        )
         kind, msg = self._decode_msg(raw)
         if kind == "eof":
             eof: EOFMessage = msg
@@ -512,6 +557,17 @@ class JoinerWorker:
 
     # ---------- envío ----------
     def _send(self, db: DataBatch):
+        batch_num = getattr(db, "batch_number", "?")
+        shard_num = getattr(self, "_shard", "?")
+        queries = list(getattr(db, "query_ids", []) or [])
+        self._log.info(
+            "OUT: Sending batch table=%s batch_number=%s shard=%s queries=%s rows=%d",
+            getattr(db.batch_msg, "opcode", "?"),
+            batch_num,
+            shard_num,
+            queries,
+            len((db.batch_msg.rows or []) if getattr(db, "batch_msg", None) else []),
+        )
         if getattr(db, "batch_msg", None) and hasattr(db.batch_msg, "to_bytes"):
             db.batch_bytes = db.batch_msg.to_bytes()
         raw = db.to_bytes()

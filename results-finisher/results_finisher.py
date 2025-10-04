@@ -164,7 +164,7 @@ class ResultsFinisher:
             "total_copies": total_copies
         })
 
-        logger.info(f"Query '{batch_query_id}': Received batch {batch.batch_number} for table '{table_type}', shard {shard_num}, copy {copy_num}/{total_copies}.")
+        logger.info(f"Query '{batch_query_id}': Received batch {batch.batch_number} for table '{table_type}', shard {shard_num} total shards {total_shards}, copy {copy_num}/{total_copies}.")
         
         shard_copies["total_copies"] = total_copies
         
