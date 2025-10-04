@@ -31,7 +31,6 @@ class WorkersCfg:
 
 @dataclass(frozen=True)
 class NamesCfg:
-    orch_to_fr_queue: str
     filters_pool_queue: str
     filter_router_exchange_fmt: str
     filter_router_rk_fmt: str
@@ -43,12 +42,20 @@ class NamesCfg:
     rc_to_orch_queue: str
     orchestrator_input_queue: str
     joiner_queue_fmt: str
+    orch_to_fr_exchange: str
+    orch_to_fr_rk_fmt: str
+    orch_to_fr_queue_fmt: str
 
 
 @dataclass(frozen=True)
 class BatchesCfg:
     max_lines: int
     max_kB: int
+
+
+@dataclass(frozen=True)
+class RoutersCfg:
+    filter: int
 
 
 class ConfigError(Exception):
@@ -106,7 +113,6 @@ class Config:
 
         n = cp["names"]
         self.names = NamesCfg(
-            orch_to_fr_queue=n.get("orch_to_fr_queue"),
             filters_pool_queue=n.get("filters_pool_queue"),
             filter_router_exchange_fmt=n.get("filter_router_exchange_fmt"),
             filter_router_rk_fmt=n.get("filter_router_rk_fmt"),
@@ -120,6 +126,9 @@ class Config:
             rc_to_orch_queue=n.get("rc_to_orch_queue"),
             orchestrator_input_queue=n.get("orchestrator_input_queue"),
             joiner_queue_fmt=n.get("joiner_queue_fmt"),
+            orch_to_fr_exchange=n.get("orch_to_fr_exchange"),
+            orch_to_fr_rk_fmt=n.get("orch_to_fr_rk_fmt"),
+            orch_to_fr_queue_fmt=n.get("orch_to_fr_queue_fmt"),
         )
 
         batches = cp["batches"]
@@ -127,6 +136,9 @@ class Config:
             max_kB=batches.getint("max_kB", 1024),
             max_lines=batches.getint("max_lines", 1000),
         )
+
+        r_filters = cp.getint("filters", "routers", fallback=1)
+        self.routers = RoutersCfg(r_filters)
 
     def agg_partitions(self, table: str) -> int:
         """Particiones de salida del Filter Router para TABLE (consumen Aggregators)."""
@@ -160,3 +172,9 @@ class Config:
 
     def joiner_queue(self, table: str, shard: int) -> str:
         return self.names.joiner_queue_fmt.format(table=table, shard=int(shard))
+
+    def orchestrator_rk(self, pid: int) -> str:
+        return self.names.orch_to_fr_rk_fmt.format(pid=int(pid))
+
+    def filter_router_in_queue(self, pid: int) -> str:
+        return self.names.orch_to_fr_queue_fmt.format(pid=int(pid))
