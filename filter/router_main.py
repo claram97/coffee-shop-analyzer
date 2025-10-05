@@ -1,4 +1,3 @@
-#!/usr/bin/env python3
 from __future__ import annotations
 
 import argparse
@@ -10,6 +9,7 @@ import time
 from router import ExchangeBusProducer, QueryPolicyResolver, RouterServer, TableConfig
 
 from app_config.config_loader import Config, ConfigError
+from middleware.middleware_client import MessageMiddlewareExchange
 
 
 def resolve_config_path(cli_value: str | None) -> str:
@@ -35,15 +35,20 @@ def build_filter_router_from_config(cfg: Config) -> RouterServer:
     producer = ExchangeBusProducer(
         host=cfg.broker.host,
         filters_pool_queue=cfg.names.filters_pool_queue,
-        router_input_queue=cfg.names.orch_to_fr_queue,
         exchange_fmt=cfg.names.filter_router_exchange_fmt,
         rk_fmt=cfg.names.filter_router_rk_fmt,
     )
     table_cfg = TableConfig(cfg.agg_shards)
     policy = QueryPolicyResolver()
+    pid = int(os.environ["FILTER_ROUTER_INDEX"])
+    router_in = MessageMiddlewareExchange(
+        host=cfg.broker.host,
+        exchange_name=cfg.names.orch_to_fr_exchange,
+        route_keys=[cfg.orchestrator_rk(pid)],
+    )
     server = RouterServer(
         host=cfg.broker.host,
-        router_input_queue=cfg.names.orch_to_fr_queue,
+        router_in=router_in,
         producer=producer,
         policy=policy,
         table_cfg=table_cfg,
@@ -75,17 +80,6 @@ def main():
     except ConfigError as e:
         print(f"[filter-router] no pude cargar config: {e}", file=sys.stderr)
         sys.exit(2)
-
-    log.info(
-        "Broker host=%s port=%d vhost=%s filters_pool=%s router_in=%s ex_fmt=%s rk_fmt=%s",
-        cfg.broker.host,
-        cfg.broker.port,
-        cfg.broker.vhost,
-        cfg.names.filters_pool_queue,
-        cfg.names.orch_to_fr_queue,
-        cfg.names.filter_router_exchange_fmt,
-        cfg.names.filter_router_rk_fmt,
-    )
 
     server = build_filter_router_from_config(cfg)
     server.run()

@@ -205,6 +205,31 @@ class FilterRouter:
         mask = int(getattr(batch, "reserved_u16", 0))
         bn = int(getattr(batch, "batch_number", 0))
 
+        if batch.batch_msg.opcode == Opcodes.NEW_TRANSACTION:
+            try:
+                if len(rows) > 0:
+                    sample_rows = rows[:2]
+                    all_keys = set()
+                    for row in sample_rows:
+                        all_keys.update(row.__dict__.keys())
+
+                    sample_data = [row.__dict__ for row in sample_rows]
+
+                    logging.info(
+                        "action: batch_preview | batch_number: %d | opcode: %d | keys: %s | sample_count: %d | sample: %s",
+                        getattr(batch.batch_msg, "batch_number", 0),
+                        batch.batch_msg.opcode,
+                        sorted(list(all_keys)),
+                        len(sample_rows),
+                        sample_data,
+                    )
+            except Exception as e:
+                logging.exception(
+                    "action: batch_preview | batch_number: %d | result: skip | exception: %s",
+                    getattr(batch.batch_msg, "batch_number", 0),
+                    e,
+                )
+
         if not table:
             self._log.warning("Batch sin table_id válido. bn=%s", bn)
             return
@@ -266,9 +291,10 @@ class FilterRouter:
                     new_queries = self._pol.get_new_batch_queries(
                         table, queries, copy_number=i
                     ) or list(queries)
-                    b = copy.deepcopy(batch)
+                    b = copy.copy(batch)
                     b.query_ids = list(new_queries)
-                    self._p.requeue_to_router(b)
+                    b.reserved_u16 = 0
+                    self._handle_data(b)
                 except Exception as e:
                     self._log.error("requeue_to_router failed (copy=%d): %s", i, e)
             return
@@ -307,7 +333,7 @@ class FilterRouter:
             if not subrows:
                 continue
             b = copy.deepcopy(batch)
-            b.shards_info.append((num_parts, pid))
+            b.shards_info = getattr(batch, "shards_info", []) + [(num_parts, pid)]
             inner = getattr(b, "batch_msg", None)
             if inner is not None and hasattr(inner, "rows"):
                 inner.rows = subrows
@@ -364,14 +390,12 @@ class ExchangeBusProducer:
         self,
         host: str,
         filters_pool_queue: str,
-        router_input_queue: str,
         exchange_fmt: str = "ex.{table}",
         rk_fmt: str = "agg.{table}.{pid:02d}",
     ):
         self._log = logging.getLogger("filter-router.bus")
         self._host = host
         self._filters_pub = MessageMiddlewareQueue(host, filters_pool_queue)
-        self._router_pub = MessageMiddlewareQueue(host, router_input_queue)
         self._exchange_fmt = exchange_fmt
         self._rk_fmt = rk_fmt
         self._pub_cache: dict[tuple[str, str], MessageMiddlewareExchange] = {}
@@ -436,25 +460,17 @@ class ExchangeBusProducer:
                 e,
             )
 
-    def requeue_to_router(self, batch: DataBatch) -> None:
-        try:
-            self._log.debug("requeue → router_input")
-            batch.batch_bytes = batch.batch_msg.to_bytes()
-            self._router_pub.send(batch.to_bytes())
-        except Exception as e:
-            self._log.error("router_input send failed: %s", e)
-
 
 class RouterServer:
     def __init__(
         self,
         host: str,
-        router_input_queue: str,
+        router_in: MessageMiddlewareExchange,
         producer: ExchangeBusProducer,
         policy: QueryPolicyResolver,
         table_cfg: TableConfig,
     ):
-        self._mw_in = MessageMiddlewareQueue(host, router_input_queue)
+        self._mw_in = router_in
         self._router = FilterRouter(
             producer=producer, policy=policy, table_cfg=table_cfg
         )

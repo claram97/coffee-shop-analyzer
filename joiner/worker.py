@@ -166,7 +166,7 @@ class JoinerWorker:
             t = getattr(db.batch_msg, "opcode", None)
             q = list(getattr(db, "query_ids", []) or [])
             n = len((db.batch_msg.rows or []) if getattr(db, "batch_msg", None) else [])
-            self._log.info("%s: table=%s queries=%s rows=%s", where, t, q, n)
+            self._log.debug("%s: table=%s queries=%s rows=%s", where, t, q, n)
         except Exception as e:
             self._log.debug("log_db failed: %s", e)
 
@@ -246,7 +246,7 @@ class JoinerWorker:
         shards_info = getattr(db, "shards_info", "[]") if db else "?"
         shard_num = getattr(self, "_shard", "?")
         queries = list(getattr(db, "query_ids", []) or []) if db else []
-        self._log.info(
+        self._log.debug(
             "IN: menu_items batch_number=%s shard=%s shards_info=%s queries=%s",
             batch_num,
             shard_num,
@@ -280,7 +280,7 @@ class JoinerWorker:
         shard_num = getattr(self, "_shard", "?")
         queries = list(getattr(db, "query_ids", []) or []) if db else []
         shards_info = getattr(db, "shards_info", "[]") if db else "?"
-        self._log.info(
+        self._log.debug(
             "IN: stores batch_number=%s shard=%s shards_info=%s queries=%s",
             batch_num,
             shard_num,
@@ -314,7 +314,7 @@ class JoinerWorker:
         shard_num = getattr(self, "_shard", "?")
         queries = list(getattr(db, "query_ids", []) or []) if db else []
         shards_info = getattr(db, "shards_info", "[]") if db else "?"
-        self._log.info(
+        self._log.debug(
             "IN: transaction_items batch_number=%s shard=%s shards_info=%s queries=%s",
             batch_num,
             shard_num,
@@ -363,7 +363,7 @@ class JoinerWorker:
                 )
             )
 
-        self._log.info("JOIN Q2: in=%d matched=%d", len(ti_rows), len(out_rows))
+        self._log.debug("JOIN Q2: in=%d matched=%d", len(ti_rows), len(out_rows))
         joined_msg = NewTransactionItemsMenuItems()
         joined_msg.rows = out_rows
         db.table_ids = [Opcodes.NEW_MENU_ITEMS, Opcodes.NEW_TRANSACTION_ITEMS]
@@ -373,17 +373,9 @@ class JoinerWorker:
     def _on_raw_tx(self, raw: bytes):
         kind, msg = self._decode_msg(raw)
         db = msg if kind == "db" else None
-        batch_num = getattr(db, "batch_number", "?") if db else "?"
-        shard_num = getattr(self, "_shard", "?")
         queries = list(getattr(db, "query_ids", []) or []) if db else []
-        shards_info = getattr(db, "shards_info", "[]") if db else "?"
-        self._log.info(
-            "IN: transactions batch_number=%s shard=%s shards_info=%s queries=%s",
-            batch_num,
-            shard_num,
-            shards_info,
-            queries,
-        )
+        rows_qtty = len(db.batch_msg.rows)
+        self._log.debug("IN: transactions queries=%s rows_qtty=%d", queries, rows_qtty)
         kind, msg = self._decode_msg(raw)
         if kind == "eof":
             eof: EOFMessage = msg
@@ -477,7 +469,7 @@ class JoinerWorker:
         shard_num = getattr(self, "_shard", "?")
         queries = list(getattr(db, "query_ids", []) or []) if db else []
         shards_info = getattr(db, "shards_info", "[]") if db else "?"
-        self._log.info(
+        self._log.debug(
             "IN: users batch_number=%s shard=%s shards_info=%s queries=%s",
             batch_num,
             shard_num,
@@ -498,7 +490,7 @@ class JoinerWorker:
         users: List[RawUser] = (
             (db.batch_msg.rows or []) if getattr(db, "batch_msg", None) else []
         )
-        self._log.info("USERS recv rows=%d", len(users))
+        self._log.debug("USERS recv rows=%d", len(users))
 
         if Q4 in queries_set(db):
             uidx = index_by_attr(users, "user_id")
@@ -581,7 +573,7 @@ class JoinerWorker:
         batch_num = getattr(db, "batch_number", "?")
         shard_num = getattr(self, "_shard", "?")
         queries = list(getattr(db, "query_ids", []) or [])
-        self._log.info(
+        self._log.debug(
             "OUT: Sending batch table=%s batch_number=%s shard=%s queries=%s rows=%d",
             getattr(db.batch_msg, "opcode", "?"),
             batch_num,

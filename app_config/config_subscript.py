@@ -49,6 +49,11 @@ def _read_broker(cp: configparser.ConfigParser):
     }
 
 
+def _read_routers(cp: configparser.ConfigParser):
+    filter = cp.getint("filters", "routers", fallback=1)
+    return {"fr_routers": filter}
+
+
 def cmd_workers(cp: configparser.ConfigParser, fmt: str):
     w = _read_workers(cp)
     if fmt == "plain":
@@ -85,13 +90,25 @@ def cmd_broker(cp: configparser.ConfigParser, fmt: str):
         _die(f"unknown format: {fmt}")
 
 
+def cmd_routers(cp: configparser.ConfigParser, fmt: str):
+    w = _read_routers(cp)
+    if fmt == "plain":
+        print(w["fr_routers"])
+    elif fmt == "env":
+        print(f"FR_ROUTERS={w['fr_routers']}")
+    else:
+        _die(f"unknown format: {fmt}")
+
+
 def cmd_all_env(cp: configparser.ConfigParser):
     w = _read_workers(cp)
     b = _read_broker(cp)
+    r = _read_routers(cp)
     lines = [
         f"FILTERS={w['filters']}",
         f"AGGREGATORS={w['aggregators']}",
         f"JOINERS={w['joiners']}",
+        f"FR_ROUTERS={r['fr_routers']}",
         f"RABBIT_HOST={b['host']}",
         f"RABBIT_PORT={b['port']}",
         f"RABBIT_MGMT_PORT={b['management_port']}",
@@ -119,6 +136,9 @@ def main():
     )
     spw.add_argument("--format", choices=["plain", "env"], default="plain")
 
+    spr = sub.add_parser("routers", help="Print router counts (filter)")
+    spr.add_argument("--format", choices=["plain", "env"], default="env")
+
     spb = sub.add_parser("broker", help="Print RabbitMQ connection info")
     spb.add_argument("--format", choices=["plain", "env", "json"], default="env")
 
@@ -131,6 +151,8 @@ def main():
         cmd_workers(cp, args.format)
     elif args.cmd == "broker":
         cmd_broker(cp, args.format)
+    elif args.cmd == "routers":
+        cmd_routers(cp, args.format)
     elif args.cmd == "all-env":
         cmd_all_env(cp)
     else:
