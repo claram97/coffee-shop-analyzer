@@ -121,7 +121,7 @@ class Aggregator:
         """Reenvía DataBatch a la cola correcta usando el opcode provisto."""
         try:
             table = TID_TO_NAME.get(opcode)
-            
+            logging.info("Forwarding DataBatch with opcode=%s to table=%s", opcode, table)
             if not table:
                 logging.error("Unknown opcode=%s", opcode)
                 return
@@ -131,25 +131,13 @@ class Aggregator:
             logging.exception("Failed to forward databatch by opcode. Opcode: %s", opcode)
             return
 
-    def _forward_databatch(self, raw: bytes):
-        """Detecta tabla desde DataBatch y reenvía a la cola correcta."""
-        try:
-            db = DataBatch.deserialize_from_bytes(raw)
-            table_id = int(db.batch_msg.opcode)
-            table = TID_TO_NAME.get(table_id)
-
-            if not table:
-                logging.error("Unknown table_id=%s in DataBatch", table_id)
-                return
-            self._send_to_joiner_by_table(table, raw)
-        except Exception:
-            logging.exception("Raw could not be deserialized as DataBatch. Raw: %s", raw)
-            return
-
-    def _forward_eof(self, raw: bytes):
+    def _forward_eof(self, raw: bytes, opcode: int):
         """Detecta tabla desde EOFMessage y reenvía a la cola correcta."""
-        eof = EOFMessage.deserialize_from_bytes(raw)
-        table = eof.table_type  # p.ej. "transactions"
+        table = TID_TO_NAME.get(opcode)
+        if not table:
+            logging.error("Unknown opcode in EOF message: %s", opcode)
+            return
+        logging.info("Forwarding EOF for table=%s", table)
         self._send_to_joiner_by_table(table, raw)
 
     def run(self):
@@ -190,9 +178,9 @@ class Aggregator:
             if not message:
                 return False
             if message[0] == Opcodes.EOF:
-                self._forward_eof(message)
+                self._forward_eof(message, Opcodes.NEW_MENU_ITEMS)
             else:
-                self._forward_databatch_by_opcode(message, Opcodes.NEW_MENU_ITEM)
+                self._forward_databatch_by_opcode(message, Opcodes.NEW_MENU_ITEMS)
             return True
         except Exception:
             logging.exception("Failed to handle menu item")
@@ -203,7 +191,7 @@ class Aggregator:
             if not message:
                 return False
             if message[0] == Opcodes.EOF:
-                self._forward_eof(message)
+                self._forward_eof(message, Opcodes.NEW_STORES)
             else:
                 self._forward_databatch_by_opcode(message, Opcodes.NEW_STORES)
             return True
@@ -216,14 +204,12 @@ class Aggregator:
             if not message:
                 return False
             if message[0] == Opcodes.EOF:
-                self._forward_eof(message)
+                self._forward_eof(message, Opcodes.NEW_TRANSACTION)
                 return True
 
             db = DataBatch.deserialize_from_bytes(message)
             rows = db.batch_msg.rows or []
             query_id = db.query_ids[0] if db.query_ids else None
-
-            logging.info("Message arrived: %s", db)
 
             if query_id == 1 or query_id is None:
                 self._forward_databatch_by_opcode(message, Opcodes.NEW_TRANSACTION)
@@ -236,7 +222,6 @@ class Aggregator:
                 db.batch_bytes = db.batch_msg.to_bytes()
                 db.batch_msg.amount = len(out)
                 databatch = db.to_bytes()
-                # self._forward_databatch(databatch)
                 self._forward_databatch_by_opcode(databatch, Opcodes.NEW_TRANSACTION)
             elif query_id == 4:
                 processed = process_query_4_transactions(rows)
@@ -245,7 +230,6 @@ class Aggregator:
                 db.batch_bytes = db.batch_msg.to_bytes()
                 db.batch_msg.amount = len(out)
                 databatch = db.to_bytes()
-                # self._forward_databatch(databatch)
                 self._forward_databatch_by_opcode(databatch, Opcodes.NEW_TRANSACTION)
             else:
                 logging.error("Unexpected query_id=%s for transaction table", query_id)
@@ -260,14 +244,14 @@ class Aggregator:
             if not message:
                 return False
             if message[0] == Opcodes.EOF:
-                self._forward_eof(message)
+                self._forward_eof(message, Opcodes.NEW_TRANSACTION_ITEMS)
                 return True
 
             db = DataBatch.deserialize_from_bytes(message)
             rows = db.batch_msg.rows or []
             query_id = db.query_ids[0] if db.query_ids else None
 
-            if int(query_id) == QueryId.SECOND_QUERY:  # query_id=2 (int), QueryId.SECOND_QUERY=2 (int)
+            if int(query_id) == QueryId.SECOND_QUERY: 
                 logging.info("Processing transaction item with query 2")
                 processed = process_query_2(rows)
                 out = serialize_query2_results(
@@ -277,7 +261,6 @@ class Aggregator:
                 db.batch_bytes = db.batch_msg.to_bytes()
                 db.batch_msg.amount = len(out)
                 databatch = db.to_bytes()
-                # self._forward_databatch(databatch)
                 self._forward_databatch_by_opcode(databatch, Opcodes.NEW_TRANSACTION_ITEMS)
             else:
                 logging.error("Transaction item with query distinct from 2: %s", query_id)
@@ -290,11 +273,12 @@ class Aggregator:
     def _handle_user(self, message: bytes):
         try:
             if not message:
+                logging.error("Empty message received in user handler")
                 return False
             if message[0] == Opcodes.EOF:
-                self._forward_eof(message)
+                self._forward_eof(message, Opcodes.NEW_USERS)
             else:
-                self._forward_databatch_by_opcode(message, Opcodes.NEW_USER)
+                self._forward_databatch_by_opcode(message, Opcodes.NEW_USERS)
             return True
         except Exception:
             logging.exception("Failed to handle user")
