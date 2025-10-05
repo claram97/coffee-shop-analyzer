@@ -55,8 +55,9 @@ class QueryState:
     
     # Definitive Structure: 
     # {table: {batch_num: {
-    #     "total_shards": int,
-    #     "shards": {shard_num: {"received_copies": set(), "total_copies": int}}
+    #     "total_shards": int,  # First dimension's total shards (for backward compatibility)
+    #     "shards_info": [(total_shards, shard_num), ...],  # All sharding dimensions
+    #     "shards": {shard_key: {"received": bool, "shard_info": [(total_shards, shard_num), ...]}}
     # }}}
     completed_tables: Set[str] = field(default_factory=set)
     eof_received: Dict[str, int] = field(default_factory=dict)
@@ -135,46 +136,50 @@ class ResultsFinisher:
         return self.active_queries[query_id]
 
     def _update_batch_accounting(self, state: QueryState, table_type: str, batch: DataBatch):
-        if batch.meta:
-            total_copies_key = next(iter(batch.meta.keys()), 0)
-            copy_num = batch.meta.get(total_copies_key, 0)
-            total_copies = total_copies_key
-        else:
-            total_copies = 1
-            copy_num = 0
+        shards_info = batch.shards_info if batch.shards_info else [(1, 0)]
             
-        if total_copies <= 0:
-            total_copies = 1
+        # Create a unique shard key from all sharding dimensions
+        shard_key = "_".join([f"{total_shards}_{shard_num}" for total_shards, shard_num in shards_info])
         
-        total_shards = batch.total_shards if batch.total_shards > 0 else 1
-        shard_num = batch.shard_num if batch.total_shards > 0 else 1
-
+        # Extract the primary shard dimension for single-dimension use cases
+        primary_shard = shards_info[0]
+        total_shards, shard_num = primary_shard
+        
         table_batches = state.batch_counters.setdefault(table_type, {})
         batch_info = table_batches.setdefault(batch.batch_number, {
             "total_shards": total_shards,
-            "shards": {}
+            "shards": {},
+            "shards_info": shards_info  # Store the complete shards_info for verification
         })
 
         batch_query_id = batch.query_ids[0] if batch.query_ids else None
         
+        # Update the total_shards with the first dimension's total shards value
         batch_info["total_shards"] = total_shards
-
-        shard_copies = batch_info["shards"].setdefault(shard_num, {
-            "received_copies": set(),   
-            "total_copies": total_copies
+        
+        # Use the combined shard key for tracking
+        batch_info["shards"].setdefault(shard_key, {
+            "received": True,
+            "shard_info": shards_info  # Store which specific shard configuration this is
         })
 
-        logger.info(f"Query '{batch_query_id}': Received batch {batch.batch_number} for table '{table_type}', shard {shard_num} total shards {total_shards}, copy {copy_num}/{total_copies}.")
+        # Calculate the number of received vs expected shards for this batch
+        expected_total_shards = self._calculate_total_expected_shards(batch_info)
+        received_shard_keys = set(batch_info["shards"].keys())
         
-        shard_copies["total_copies"] = total_copies
+        logger.info(f"Query '{batch_query_id}': Received batch {batch.batch_number} for table '{table_type}', shard_info: {shards_info}. BATCH STATE: {len(received_shard_keys)}/{expected_total_shards} shards received.")
         
-        shard_copies["received_copies"].add(copy_num)
-        
+        # If this is an EOF batch, record it
         if batch.batch_msg.batch_status == BatchStatus.EOF:
             logging.info(f"Received EOF for query '{state.query_id}', table '{table_type}', batch {batch.batch_number}.")
             state.eof_received[table_type] = max(state.eof_received.get(table_type, 0), batch.batch_number)
-
-        self._check_and_mark_table_as_complete(state, table_type)
+        
+        # Check for completion if we have already received an EOF for this table
+        # This handles both: 
+        # 1. The current batch is an EOF
+        # 2. EOF arrived earlier but we're still receiving shard batches
+        if table_type in state.eof_received:
+            self._check_and_mark_table_as_complete(state, table_type)
     
     def _consolidate_batch_data(self, state: QueryState, table_type: str, batch: DataBatch):
         rows = getattr(batch.batch_msg, 'rows', [])
@@ -191,20 +196,45 @@ class ResultsFinisher:
 
         for i in range(1, max_batch_num + 1):
             batch_info = all_batches_info.get(i)
-            if not batch_info: return
-
-            # Level 1 Check: Have all shards for this batch arrived?
-            if len(batch_info["shards"]) != batch_info["total_shards"]:
+            if not batch_info: 
                 return
-
-            # Level 2 Check: For each shard, have all copies arrived?
-            for shard_num, shard_copies in batch_info["shards"].items():
-                if len(shard_copies["received_copies"]) != shard_copies["total_copies"]:
-                    return
+            
+            # Calculate the expected total number of shard combinations
+            expected_total_shards = self._calculate_total_expected_shards(batch_info)
+            
+            # Get the actual shard keys we've received
+            received_shard_keys = set(batch_info["shards"].keys())
+            
+            # Check if we've received all expected shard combinations
+            if len(received_shard_keys) < expected_total_shards:
+                logger.info(f"Query '{state.query_id}': Table '{table_type}' batch {i} has {len(received_shard_keys)} of {expected_total_shards} expected shards.")
+                return
         
         # If all checks pass for all batches up to the EOF, the table is complete.
         state.completed_tables.add(table_type)
         logging.info(f"Query '{state.query_id}': Table '{table_type}' is now complete.")
+    
+    def _calculate_total_expected_shards(self, batch_info):
+        """
+        Calculate the total number of expected shard combinations based on the shards_info.
+        
+        Instead of generating all combinations, we simply multiply the total_shards values
+        from all dimensions to get the total expected number of unique shard combinations.
+        
+        For example, if shards_info contains [(2, x), (3, y)], we expect 2*3 = 6 combinations total.
+        """
+        if not batch_info.get("shards"):
+            return 0
+        
+        # Get the shards_info from the batch_info
+        shards_info = batch_info.get("shards_info", [])
+        
+        # Simply multiply all total_shards values to get the total number of combinations
+        total = 1
+        for total_shards, _ in shards_info:
+            total *= total_shards
+            
+        return total
 
     def _is_query_complete(self, state: QueryState) -> bool:
         expected_table = QUERY_TYPE_TO_TABLE.get(state.query_type)
@@ -241,14 +271,11 @@ class ResultsFinisher:
                 
                 # Wrap the error in a DataBatch
                 batch = DataBatch(
-                    opcode=Opcodes.DATA_BATCH,
                     query_ids=[int(query_id)] if query_id.isdigit() else [],
                     meta={},
                     table_ids=[error_result.opcode],
                     batch_bytes=error_result.to_bytes(),
-                    batch_number=1,
-                    total_shards=1,
-                    shard_num=1
+                    shards_info=[(1, 0)]  # Standard format for no sharding
                 )
                 
                 self.output_client.send(batch.to_bytes())
@@ -261,14 +288,11 @@ class ResultsFinisher:
             
             # Wrap the result in a DataBatch for consistent protocol handling
             batch = DataBatch(
-                opcode=Opcodes.DATA_BATCH,
                 query_ids=[int(query_id)],
                 meta={},
                 table_ids=[result_message.opcode],
                 batch_bytes=result_message.to_bytes(),
-                batch_number=1,
-                total_shards=1,
-                shard_num=1
+                shards_info=[(1, 0)]  # Standard format for no sharding
             )
             
             self.output_client.send(batch.to_bytes())
@@ -285,14 +309,11 @@ class ResultsFinisher:
                 ))
                 
                 emergency_batch = DataBatch(
-                    opcode=Opcodes.DATA_BATCH,
                     query_ids=[],  # May not have valid query ID at this point
                     meta={},
                     table_ids=[emergency_error.opcode],
                     batch_bytes=emergency_error.to_bytes(),
-                    batch_number=1,
-                    total_shards=1,
-                    shard_num=1
+                    shards_info=[(1, 0)]  # Standard format for no sharding
                 )
                 
                 self.output_client.send(emergency_batch.to_bytes())
