@@ -23,10 +23,44 @@ def aggregate_query2_data(transaction_items: List[RawTransactionItem]) -> Dict:
 
     for item in transaction_items:
         created_at = parse_datetime(item.created_at)
-        key = (created_at.year, created_at.month, item.item_id)
+        # For Q2, we use item_name instead of item_id when joining menu items
+        # This handles both RawTransactionItem and RawTransactionItemMenuItem types
+        item_id = getattr(item, "item_id", None)
+        item_name = getattr(item, "item_name", None)
         
-        aggregated_data[key]['total_quantity'] += float(item.quantity)
-        aggregated_data[key]['total_revenue'] += float(item.subtotal)
+        # If we have RawTransactionItemMenuItem, use item_name as key
+        # Otherwise fall back to item_id for regular RawTransactionItem
+        key_id = item_name if item_name else item_id
+        
+        # Log the key elements for debugging
+        logging.debug(f"Q2 aggregation - year: {created_at.year}, month: {created_at.month}, " 
+                     f"key_id: {key_id}, item_id: {item_id}, item_name: {item_name}")
+        
+        key = (created_at.year, created_at.month, key_id)
+        
+        # Handle quantity - ensure it's a proper numeric value
+        try:
+            quantity = getattr(item, "quantity", "0")
+            if quantity and quantity.strip():
+                quantity_float = float(quantity)
+                logging.debug(f"Q2 aggregation - adding quantity {quantity_float} for {key}")
+                aggregated_data[key]['total_quantity'] += quantity_float
+            else:
+                logging.warning(f"Q2 aggregation - empty quantity for {key}")
+        except (ValueError, TypeError) as e:
+            logging.error(f"Q2 aggregation - invalid quantity '{quantity}': {e}")
+        
+        # Handle subtotal/revenue - ensure it's a proper numeric value
+        try:
+            subtotal = getattr(item, "subtotal", "0")
+            if subtotal and subtotal.strip():
+                subtotal_float = float(subtotal)
+                logging.debug(f"Q2 aggregation - adding revenue {subtotal_float} for {key}")
+                aggregated_data[key]['total_revenue'] += subtotal_float
+            else:
+                logging.warning(f"Q2 aggregation - empty subtotal for {key}")
+        except (ValueError, TypeError) as e:
+            logging.error(f"Q2 aggregation - invalid subtotal '{subtotal}': {e}")
 
     return aggregated_data
 
@@ -208,14 +242,29 @@ def serialize_query2_results(query_result: Dict) -> List[RawTransactionItem]:
     result = []
     for key, value in query_result.items():
         year, month, item_id = key
+        
+        # Ensure quantity is explicitly converted to string and not lost
+        quantity_str = str(value.get('total_quantity', 0))
+        revenue_str = str(value.get('total_revenue', 0))
+        
+        # Log serialized values for debugging
+        logging.debug(f"Q2 serializing: item_id={item_id}, quantity={quantity_str}, revenue={revenue_str}")
+        
         transaction_item = RawTransactionItem(
             transaction_id="",
             item_id=str(item_id),
-            quantity=str(value['total_quantity']),
+            quantity=quantity_str,  # Explicit quantity inclusion
             unit_price="",
-            subtotal=str(value['total_revenue']),
+            subtotal=revenue_str,
             created_at=f"{year}-{month:02d}-01 00:00:00"
         )
+        
+        # Verify the item was properly created
+        if not hasattr(transaction_item, 'quantity') or not transaction_item.quantity:
+            logging.warning(f"Q2 serialization issue: quantity missing for item_id={item_id}")
+            # Force set the quantity if needed
+            transaction_item.quantity = quantity_str
+        
         result.append(transaction_item)
     return result
 
@@ -266,6 +315,7 @@ def serialize_query3_results(query_result: Dict) -> List[RawTransaction]:
             transaction_id=str(value['transaction_count']),
             store_id=str(store_id),
             payment_method_id="",
+            voucher_id="",
             user_id="",
             original_amount=str(value['total_original_amount']),
             discount_applied=str(value['total_discount_applied']),
@@ -327,6 +377,7 @@ def serialize_query4_transaction_results(query_result: Dict) -> List[RawTransact
             transaction_id=str(count),
             store_id=str(store_id),
             payment_method_id="",
+            voucher_id="",
             user_id=str(user_id),
             original_amount="",
             discount_applied="",

@@ -367,15 +367,24 @@ class JoinerWorker:
             mi = menu_idx.get(item_id)
             if not mi:
                 continue
-            out_rows.append(
-                RawTransactionItemMenuItem(
-                    transaction_id=norm(getattr(r, "transaction_id", "")),
-                    item_name=norm(getattr(mi, "name", "")),
-                    quantity=norm(getattr(r, "quantity", "")),
-                    subtotal=norm(getattr(r, "subtotal", "")),
-                    created_at=norm(getattr(r, "created_at", "")),
-                )
+            
+            # Explicitly log the quantity value being passed for debugging
+            quantity_value = norm(getattr(r, "quantity", ""))
+            self._log.debug("Q2 item quantity for item_id=%s: %s", item_id, quantity_value)
+            
+            joined_item = RawTransactionItemMenuItem(
+                transaction_id=norm(getattr(r, "transaction_id", "")),
+                item_name=norm(getattr(mi, "name", "")),
+                quantity=quantity_value,  # Ensure this is explicitly passed from source
+                subtotal=norm(getattr(r, "subtotal", "")),
+                created_at=norm(getattr(r, "created_at", "")),
             )
+            
+            # Verify the quantity was properly set in the joined item
+            self._log.debug("Q2 joined item: transaction_id=%s, item_name=%s, quantity=%s", 
+                          joined_item.transaction_id, joined_item.item_name, joined_item.quantity)
+            
+            out_rows.append(joined_item)
 
         self._log.debug("JOIN Q2: in=%d matched=%d", len(ti_rows), len(out_rows))
         joined_msg = NewTransactionItemsMenuItems()

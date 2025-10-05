@@ -337,23 +337,35 @@ class ResultsFinisher:
         elif query_type == QueryType.Q2:
             # Q2: Product metrics by month
             message = messages.QueryResult2()
+            # Create a dictionary to merge quantity and revenue for each product
             for month, data in result.items():
-                # Handle quantity metrics
+                # Create a dictionary to store product metrics by name
+                product_metrics = {}
+                
+                # Process quantity metrics
                 for product in data.get('by_quantity', []):
-                    message.rows.append(entities.ResultProductMetrics(
-                        month=month,
-                        name=product.get('name', ''),
-                        quantity=str(product.get('quantity', 0)),
-                        revenue=None
-                    ))
-                # Handle revenue metrics
+                    name = product.get('name', '')
+                    quantity = product.get('quantity', 0)
+                    product_metrics[name] = product_metrics.get(name, {'quantity': 0, 'revenue': 0.0})
+                    product_metrics[name]['quantity'] = quantity
+                
+                # Process revenue metrics
                 for product in data.get('by_revenue', []):
-                    message.rows.append(entities.ResultProductMetrics(
-                        month=month,
-                        name=product.get('name', ''),
-                        quantity=None,
-                        revenue=str(product.get('revenue', 0))
-                    ))
+                    name = product.get('name', '')
+                    revenue = product.get('revenue', 0.0)
+                    product_metrics[name] = product_metrics.get(name, {'quantity': 0, 'revenue': 0.0})
+                    product_metrics[name]['revenue'] = revenue
+                
+                # Create result rows with both quantity and revenue
+                for name, metrics in product_metrics.items():
+                    # Only include products with either non-zero quantity or revenue
+                    if metrics['quantity'] != 0 or metrics['revenue'] != 0:
+                        message.rows.append(entities.ResultProductMetrics(
+                            month=month,
+                            name=name,
+                            quantity=str(metrics['quantity']),
+                            revenue=str(metrics['revenue'])
+                        ))
             return message
             
         elif query_type == QueryType.Q3:

@@ -206,9 +206,14 @@ class RawTransactionItemMenuItem:
     ):
         self.transaction_id = transaction_id
         self.item_name = item_name
-        self.quantity = quantity
+        # Ensure quantity is never empty/None
+        self.quantity = "0" if quantity is None or quantity == "" else quantity
         self.subtotal = subtotal
         self.created_at = created_at
+        
+    def __str__(self):
+        """String representation for debugging"""
+        return f"RawTransactionItemMenuItem(id={self.transaction_id}, name={self.item_name}, quantity={self.quantity}, subtotal={self.subtotal})"
 
 
 class RawTransactionStoreUser:
@@ -248,8 +253,12 @@ class ResultProductMetrics:
     def __init__(self, month: str, name: str, quantity: str = None, revenue: str = None):
         self.month = month
         self.name = name
-        self.quantity = quantity
-        self.revenue = revenue
+        self.quantity = "0" if quantity is None else quantity
+        self.revenue = revenue or "0"
+        
+    def __str__(self):
+        """String representation for debugging"""
+        return f"ResultProductMetrics(month={self.month}, name={self.name}, quantity={self.quantity}, revenue={self.revenue})"
 
 
 class ResultStoreTPV:
