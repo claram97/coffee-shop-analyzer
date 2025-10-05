@@ -134,7 +134,7 @@ class MessageHandler:
 
                 sample_data = [row.__dict__ for row in sample_rows]
 
-                logging.info(
+                logging.debug(
                     "action: batch_preview | batch_number: %d | status: %s | opcode: %d | keys: %s | sample_count: %d | sample: %s",
                     getattr(msg, "batch_number", 0),
                     status_text,
@@ -144,7 +144,7 @@ class MessageHandler:
                     sample_data,
                 )
         except Exception:
-            logging.info(
+            logging.debug(
                 "action: batch_preview | batch_number: %d | result: skip",
                 getattr(msg, "batch_number", 0),
             )
