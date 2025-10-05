@@ -1,4 +1,5 @@
 from collections import defaultdict
+import logging
 from typing import Dict, Tuple, List
 
 from utils.aggregationUtils import create_query2_aggregation, create_query3_aggregation, log_query4_transactions, log_query4_users
@@ -74,12 +75,33 @@ def aggregate_query3_data(transactions: List[RawTransaction]) -> Tuple[Dict, int
         key = (transaction.store_id, year, semester)
         
         aggregated_data[key]['transaction_count'] += 1
-        aggregated_data[key]['total_original_amount'] += float(transaction.original_amount)
-        aggregated_data[key]['total_discount_applied'] += float(transaction.discount_applied)
-        aggregated_data[key]['total_final_amount'] += float(transaction.final_amount)
+        
+        # Handle empty or invalid original_amount
+        try:
+            original_amount = float(transaction.original_amount) if transaction.original_amount else 0.0
+        except (ValueError, TypeError):
+            logging.error(f"Invalid original_amount '{transaction.original_amount}' for transaction, using 0.0")
+            original_amount = 0.0
+        
+        # Handle empty or invalid discount_applied
+        try:
+            discount_applied = float(transaction.discount_applied) if transaction.discount_applied else 0.0
+        except (ValueError, TypeError):
+            logging.error(f"Invalid discount_applied '{transaction.discount_applied}' for transaction, using 0.0")
+            discount_applied = 0.0
+        
+        # Handle empty or invalid final_amount
+        try:
+            final_amount = float(transaction.final_amount) if transaction.final_amount else 0.0
+        except (ValueError, TypeError):
+            logging.error(f"Invalid final_amount '{transaction.final_amount}' for transaction, using 0.0")
+            final_amount = 0.0
+        
+        aggregated_data[key]['total_original_amount'] += original_amount
+        aggregated_data[key]['total_discount_applied'] += discount_applied
+        aggregated_data[key]['total_final_amount'] += final_amount
 
     return aggregated_data, filtered_count, total_count
-
 
 def process_query_3(transactions: List[RawTransaction]) -> Dict:
     """

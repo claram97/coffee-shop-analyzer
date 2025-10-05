@@ -116,16 +116,35 @@ class Aggregator:
             logging.error("No out queue configured for table=%s", table)
             return
         q.send(raw_bytes)
+    
+    def _forward_databatch_by_opcode(self, raw: bytes, opcode: int):
+        """Reenvía DataBatch a la cola correcta usando el opcode provisto."""
+        try:
+            table = TID_TO_NAME.get(opcode)
+            
+            if not table:
+                logging.error("Unknown opcode=%s", opcode)
+                return
+            
+            self._send_to_joiner_by_table(table, raw)
+        except Exception:
+            logging.exception("Failed to forward databatch by opcode. Opcode: %s", opcode)
+            return
 
     def _forward_databatch(self, raw: bytes):
         """Detecta tabla desde DataBatch y reenvía a la cola correcta."""
-        db = DataBatch.deserialize_from_bytes(raw)
-        table_id = int(db.batch_msg.opcode)
-        table = TID_TO_NAME.get(table_id)
-        if not table:
-            logging.error("Unknown table_id=%s in DataBatch", table_id)
+        try:
+            db = DataBatch.deserialize_from_bytes(raw)
+            table_id = int(db.batch_msg.opcode)
+            table = TID_TO_NAME.get(table_id)
+
+            if not table:
+                logging.error("Unknown table_id=%s in DataBatch", table_id)
+                return
+            self._send_to_joiner_by_table(table, raw)
+        except Exception:
+            logging.exception("Raw could not be deserialized as DataBatch. Raw: %s", raw)
             return
-        self._send_to_joiner_by_table(table, raw)
 
     def _forward_eof(self, raw: bytes):
         """Detecta tabla desde EOFMessage y reenvía a la cola correcta."""
@@ -173,7 +192,7 @@ class Aggregator:
             if message[0] == Opcodes.EOF:
                 self._forward_eof(message)
             else:
-                self._forward_databatch(message)
+                self._forward_databatch_by_opcode(message, Opcodes.NEW_MENU_ITEM)
             return True
         except Exception:
             logging.exception("Failed to handle menu item")
@@ -186,7 +205,7 @@ class Aggregator:
             if message[0] == Opcodes.EOF:
                 self._forward_eof(message)
             else:
-                self._forward_databatch(message)
+                self._forward_databatch_by_opcode(message, Opcodes.NEW_STORES)
             return True
         except Exception:
             logging.exception("Failed to handle store")
@@ -204,21 +223,33 @@ class Aggregator:
             rows = db.batch_msg.rows or []
             query_id = db.query_ids[0] if db.query_ids else None
 
+            logging.info("Message arrived: %s", db)
+
             if query_id == 1 or query_id is None:
-                self._forward_databatch(message)
+                self._forward_databatch_by_opcode(message, Opcodes.NEW_TRANSACTION)
             elif query_id == 3:
                 processed = process_query_3(rows)
                 out = serialize_query3_results(
                     processed
-                )  # debe ser bytes de DataBatch con table_ids=[Opcodes.NEW_TRANSACTION]
-                self._forward_databatch(out)
+                ) 
+                db.batch_msg.rows = out
+                db.batch_bytes = db.batch_msg.to_bytes()
+                db.batch_msg.amount = len(out)
+                databatch = db.to_bytes()
+                # self._forward_databatch(databatch)
+                self._forward_databatch_by_opcode(databatch, Opcodes.NEW_TRANSACTION)
             elif query_id == 4:
                 processed = process_query_4_transactions(rows)
                 out = serialize_query4_transaction_results(processed)  # idem arriba
-                self._forward_databatch(out)
+                db.batch_msg.rows = out
+                db.batch_bytes = db.batch_msg.to_bytes()
+                db.batch_msg.amount = len(out)
+                databatch = db.to_bytes()
+                # self._forward_databatch(databatch)
+                self._forward_databatch_by_opcode(databatch, Opcodes.NEW_TRANSACTION)
             else:
-                logging.warning("TX unexpected query_id=%s, forwarding", query_id)
-                self._forward_databatch(message)
+                logging.error("Unexpected query_id=%s for transaction table", query_id)
+                return False
             return True
         except Exception:
             logging.exception("Failed to handle transaction")
@@ -236,15 +267,21 @@ class Aggregator:
             rows = db.batch_msg.rows or []
             query_id = db.query_ids[0] if db.query_ids else None
 
-            if query_id == QueryId.SECOND_QUERY:
+            if int(query_id) == QueryId.SECOND_QUERY:  # query_id=2 (int), QueryId.SECOND_QUERY=2 (int)
+                logging.info("Processing transaction item with query 2")
                 processed = process_query_2(rows)
                 out = serialize_query2_results(
                     processed
-                )  # DataBatch bytes con table_ids=[Opcodes.NEW_TRANSACTION_ITEMS]
-                self._forward_databatch(out)
+                )  
+                db.batch_msg.rows = out
+                db.batch_bytes = db.batch_msg.to_bytes()
+                db.batch_msg.amount = len(out)
+                databatch = db.to_bytes()
+                # self._forward_databatch(databatch)
+                self._forward_databatch_by_opcode(databatch, Opcodes.NEW_TRANSACTION_ITEMS)
             else:
-                # reenvío directo para otras queries
-                self._forward_databatch(message)
+                logging.error("Transaction item with query distinct from 2: %s", query_id)
+                return False
             return True
         except Exception:
             logging.exception("Failed to handle transaction item")
@@ -257,7 +294,7 @@ class Aggregator:
             if message[0] == Opcodes.EOF:
                 self._forward_eof(message)
             else:
-                self._forward_databatch(message)
+                self._forward_databatch_by_opcode(message, Opcodes.NEW_USER)
             return True
         except Exception:
             logging.exception("Failed to handle user")
