@@ -81,7 +81,7 @@ func (t TransactionHandler) ProcessRecord(record []string) (map[string]string, e
 	}, nil
 }
 
-func (t TransactionHandler) GetExpectedFields() int { return 8 }
+func (t TransactionHandler) GetExpectedFields() int { return 9 }
 
 // UserHandler handles users table processing
 type UserHandler struct{}

@@ -118,6 +118,7 @@ class RawTransaction:
         transaction_id: str,
         store_id: str,
         payment_method_id: str,
+        voucher_id: str,
         user_id: str,
         original_amount: str,
         discount_applied: str,
@@ -131,6 +132,7 @@ class RawTransaction:
             transaction_id: The unique identifier for the transaction.
             store_id: The identifier of the store where the transaction occurred.
             payment_method_id: The identifier for the payment method used.
+            voucher_id: The identifier for any voucher applied to the transaction.
             user_id: The identifier of the user who made the purchase.
             original_amount: The total amount before any discounts.
             discount_applied: The amount of discount applied to the transaction.
@@ -140,6 +142,7 @@ class RawTransaction:
         self.transaction_id = transaction_id
         self.store_id = store_id
         self.payment_method_id = payment_method_id
+        self.voucher_id = voucher_id
         self.user_id = user_id
         self.original_amount = original_amount
         self.discount_applied = discount_applied

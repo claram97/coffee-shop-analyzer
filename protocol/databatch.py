@@ -17,6 +17,11 @@ from .messages import (
     NewTransactionStores,
     NewTransactionStoresUsers,
     NewUsers,
+    QueryResult1,
+    QueryResult2,
+    QueryResult3,
+    QueryResult4,
+    QueryResultError,
 )
 from .parsing import (
     BytesReader,
@@ -47,6 +52,7 @@ def instantiate_message_for_opcode(opcode: int):
     """
     if opcode == Opcodes.FINISHED:
         return Finished()
+    # Raw data messages
     elif opcode == Opcodes.NEW_MENU_ITEMS:
         return NewMenuItems()
     elif opcode == Opcodes.NEW_STORES:
@@ -57,12 +63,24 @@ def instantiate_message_for_opcode(opcode: int):
         return NewTransactions()
     elif opcode == Opcodes.NEW_USERS:
         return NewUsers()
+    # Joined messages
     elif opcode == Opcodes.NEW_TRANSACTION_STORES:
         return NewTransactionStores()
     elif opcode == Opcodes.NEW_TRANSACTION_ITEMS_MENU_ITEMS:
         return NewTransactionItemsMenuItems()
     elif opcode == Opcodes.NEW_TRANSACTION_STORES_USERS:
         return NewTransactionStoresUsers()
+    # Query result messages
+    elif opcode == Opcodes.QUERY_RESULT_1:
+        return QueryResult1()
+    elif opcode == Opcodes.QUERY_RESULT_2:
+        return QueryResult2()
+    elif opcode == Opcodes.QUERY_RESULT_3:
+        return QueryResult3()
+    elif opcode == Opcodes.QUERY_RESULT_4:
+        return QueryResult4()
+    elif opcode == Opcodes.QUERY_RESULT_ERROR:
+        return QueryResultError()
     else:
         raise ProtocolError(f"invalid embedded opcode: {opcode}", Opcodes.DATA_BATCH)
 
