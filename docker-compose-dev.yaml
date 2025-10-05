@@ -31,6 +31,9 @@ services:
       - ORCH_TO_FR_EXCHANGE=fr.ex
       - ORCH_TO_FR_RK_FMT=fr.{pid:02d}
       - FILTER_ROUTER_COUNT=4
+      - ORCH_TO_FR_EXCHANGE=fr.ex
+      - ORCH_TO_FR_RK_FMT=fr.{pid:02d}
+      - FILTER_ROUTER_COUNT=4
     networks:
       - testing_net
     volumes:
@@ -39,6 +42,65 @@ services:
       rabbitmq:
         condition: service_healthy
 
+  filter-router-0:
+    container_name: filter-router-0
+    build:
+      context: .
+      dockerfile: filter/Dockerfile.router
+    environment:
+      - PYTHONUNBUFFERED=1
+      - RABBITMQ_HOST=rabbitmq
+      - LOG_LEVEL=INFO
+      - CONFIG_PATH=/config/config.ini
+      - FILTER_ROUTER_INDEX=0
+    networks:
+      - testing_net
+    volumes:
+      - ./app_config/config.ini:/config/config.ini:ro
+    depends_on:
+      rabbitmq:
+        condition: service_healthy
+
+  filter-router-1:
+    container_name: filter-router-1
+    build:
+      context: .
+      dockerfile: filter/Dockerfile.router
+    environment:
+      - PYTHONUNBUFFERED=1
+      - RABBITMQ_HOST=rabbitmq
+      - LOG_LEVEL=INFO
+      - CONFIG_PATH=/config/config.ini
+      - FILTER_ROUTER_INDEX=1
+    networks:
+      - testing_net
+    volumes:
+      - ./app_config/config.ini:/config/config.ini:ro
+    depends_on:
+      rabbitmq:
+        condition: service_healthy
+
+  filter-router-2:
+    container_name: filter-router-2
+    build:
+      context: .
+      dockerfile: filter/Dockerfile.router
+    environment:
+      - PYTHONUNBUFFERED=1
+      - RABBITMQ_HOST=rabbitmq
+      - LOG_LEVEL=INFO
+      - CONFIG_PATH=/config/config.ini
+      - FILTER_ROUTER_INDEX=2
+    networks:
+      - testing_net
+    volumes:
+      - ./app_config/config.ini:/config/config.ini:ro
+    depends_on:
+      rabbitmq:
+        condition: service_healthy
+
+  filter-router-3:
+    container_name: filter-router-3
   filter-router-0:
     container_name: filter-router-0
     build:
@@ -107,6 +169,7 @@ services:
       - LOG_LEVEL=INFO
       - CONFIG_PATH=/config/config.ini
       - FILTER_ROUTER_INDEX=3
+      - FILTER_ROUTER_INDEX=3
     networks:
       - testing_net
     volumes:
@@ -133,6 +196,7 @@ services:
       rabbitmq:
         condition: service_healthy
       filter-router-0:
+      filter-router-0:
         condition: service_started
 
   filter-worker-1:
@@ -152,6 +216,7 @@ services:
     depends_on:
       rabbitmq:
         condition: service_healthy
+      filter-router-0:
       filter-router-0:
         condition: service_started
 
@@ -173,6 +238,7 @@ services:
       rabbitmq:
         condition: service_healthy
       filter-router-0:
+      filter-router-0:
         condition: service_started
 
   filter-worker-3:
@@ -192,6 +258,7 @@ services:
     depends_on:
       rabbitmq:
         condition: service_healthy
+      filter-router-0:
       filter-router-0:
         condition: service_started
 
@@ -213,6 +280,7 @@ services:
       rabbitmq:
         condition: service_healthy
       filter-router-0:
+      filter-router-0:
         condition: service_started
 
   aggregator-1:
@@ -232,6 +300,7 @@ services:
     depends_on:
       rabbitmq:
         condition: service_healthy
+      filter-router-0:
       filter-router-0:
         condition: service_started
 
@@ -253,6 +322,7 @@ services:
       rabbitmq:
         condition: service_healthy
       filter-router-0:
+      filter-router-0:
         condition: service_started
 
   aggregator-3:
@@ -272,6 +342,7 @@ services:
     depends_on:
       rabbitmq:
         condition: service_healthy
+      filter-router-0:
       filter-router-0:
         condition: service_started
 
