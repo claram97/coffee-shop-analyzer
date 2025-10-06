@@ -5,6 +5,7 @@ Refactored Orchestrator using modular architecture.
 
 import logging
 import os
+import threading
 from typing import Optional
 
 from app.results_consumer import ResultsConsumer
@@ -31,6 +32,9 @@ class Orchestrator:
         self._num_routers = max(1, int(os.getenv("FILTER_ROUTER_COUNT", "1")))
 
         self._publishers: dict[str, MessageMiddlewareExchange] = {}
+        
+        # Lock for thread-safe RabbitMQ publishing
+        self._publish_lock = threading.Lock()
 
         self.message_handler = MessageHandler()
 
@@ -61,14 +65,16 @@ class Orchestrator:
         return pub
 
     def _send_to_filter_router_exchange(self, raw: bytes, batch_number: Optional[int]):
-        pid = 0 if batch_number is None else int(batch_number) % self._num_routers
-        rk = self._fr_rk_fmt.format(pid=pid)
-        self._publisher_for_rk(rk).send(raw)
-
-    def _broadcast_eof_to_all(self, raw: bytes):
-        for pid in range(self._num_routers):
+        with self._publish_lock:
+            pid = 0 if batch_number is None else int(batch_number) % self._num_routers
             rk = self._fr_rk_fmt.format(pid=pid)
             self._publisher_for_rk(rk).send(raw)
+
+    def _broadcast_eof_to_all(self, raw: bytes):
+        with self._publish_lock:
+            for pid in range(self._num_routers):
+                rk = self._fr_rk_fmt.format(pid=pid)
+                self._publisher_for_rk(rk).send(raw)
 
     def _setup_message_processors(self):
         """Setup message processors for different message types."""

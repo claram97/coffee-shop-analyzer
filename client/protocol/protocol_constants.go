@@ -30,7 +30,7 @@ const (
 
 // Protocol limits
 const (
-	MaxBatchSizeBytes int = 1024 * 1024 // 1MB - Límite máximo del tamaño de batch en bytes
+	MaxBatchSizeBytes int = 64 * 1024 // 64KB - Límite máximo del tamaño de batch en bytes
 )
 
 // Protocol frame overhead constants
