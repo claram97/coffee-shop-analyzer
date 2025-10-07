@@ -317,7 +317,7 @@ def build_route_cfg_from_config(cfg: "Config") -> Dict[int, TableRouteCfg]:
     route: Dict[int, TableRouteCfg] = {}
 
     for tname, tid in NAME_TO_ID.items():
-        agg_parts = cfg.agg_partitions(tname)
+        agg_parts = cfg.workers.aggregators
         if tname in LIGHT_TABLES:
             j_parts = cfg.joiner_partitions(tname)
             if j_parts <= 1:
@@ -358,14 +358,6 @@ def build_publisher_pool_from_config(cfg: "Config") -> ExchangePublisherPool:
 
     log.info("Publisher pool factory using host=%s", cfg.broker.host)
     return ExchangePublisherPool(factory)
-
-
-def build_joiner_router_from_config(cfg: "Config", in_queue: str) -> JoinerRouter:
-    log.info("Build JoinerRouter from queue=%s host=%s", in_queue, cfg.broker.host)
-    in_mw = MessageMiddlewareQueue(cfg.broker.host, in_queue)
-    pool = build_publisher_pool_from_config(cfg)
-    route_cfg = build_route_cfg_from_config(cfg)
-    return JoinerRouter(in_mw=in_mw, publisher_pool=pool, route_cfg=route_cfg)
 
 
 class JoinerRouterServer:
