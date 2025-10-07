@@ -60,7 +60,7 @@ def read_u16(sock: socket.socket, remaining: int, opcode: int) -> Tuple[int, int
         A tuple containing the parsed integer and the updated remaining byte count.
     """
     if remaining < 2:
-        raise ProtocolError("indicated length doesn't match body length", opcode)
+        raise ProtocolError("indicated length doesn't match body length in read_u16", opcode)
     remaining -= 2
     data = recv_exact(sock, 2)
     val = int.from_bytes(data, byteorder="little", signed=False)
@@ -80,7 +80,7 @@ def read_i32(sock: socket.socket, remaining: int, opcode: int) -> Tuple[int, int
         A tuple containing the parsed integer and the updated remaining byte count.
     """
     if remaining < 4:
-        raise ProtocolError("indicated length doesn't match body length", opcode)
+        raise ProtocolError("indicated length doesn't match body length in read_i32", opcode)
     remaining -= 4
     data = recv_exact(sock, 4)
     val = int.from_bytes(data, byteorder="little", signed=True)
@@ -100,7 +100,7 @@ def read_i64(sock: socket.socket, remaining: int, opcode: int) -> Tuple[int, int
         A tuple containing the parsed integer and the updated remaining byte count.
     """
     if remaining < 8:
-        raise ProtocolError("indicated length doesn't match body length", opcode)
+        raise ProtocolError("indicated length doesn't match body length in read_i64", opcode)
     remaining -= 8
     data = recv_exact(sock, 8)
     val = int.from_bytes(data, byteorder="little", signed=True)
@@ -127,7 +127,7 @@ def read_string(sock: socket.socket, remaining: int, opcode: int) -> Tuple[str, 
     if str_len == 0:
         return "", remaining
     if remaining < str_len:
-        raise ProtocolError("indicated length doesn't match body length", opcode)
+        raise ProtocolError("indicated length doesn't match body length in read_string for socket_parsing", opcode)
     
     data = recv_exact(sock, str_len)
     try:
@@ -175,7 +175,7 @@ def write_string(sock: socket.socket, s: str) -> None:
 def read_u8_with_remaining(sock: socket.socket, remaining: int, opcode: int) -> Tuple[int, int]:
     """Reads a u8 and decrements the remaining bytes counter."""
     if remaining < 1:
-        raise ProtocolError("indicated length doesn't match body length", opcode)
+        raise ProtocolError("indicated length doesn't match body length in read_u8_with_remaining", opcode)
     b = recv_exact(sock, 1)[0]
     return b, remaining - 1
 

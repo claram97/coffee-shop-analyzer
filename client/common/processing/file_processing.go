@@ -94,13 +94,13 @@ func (fp *FileProcessor) setupCSVReader(file *os.File) (*csv.Reader, error) {
 // Returns the last batch number used and any error
 func (fp *FileProcessor) processFileAsync(ctx context.Context, reader *csv.Reader, fileName string, processor *BatchProcessor, isLastFile bool, startingBatchNumber int64) (int64, error) {
 	type batchResult struct {
-		err        error
+		err         error
 		lastBatchNo int64
 	}
-	
+
 	writeDone := make(chan batchResult, 1)
 	go func() {
-		err, lastBatchNo := processor.BuildAndSendBatches(ctx, reader, startingBatchNumber, isLastFile)
+		lastBatchNo, err := processor.BuildAndSendBatches(ctx, reader, startingBatchNumber, isLastFile)
 		writeDone <- batchResult{err, lastBatchNo}
 	}()
 
@@ -154,7 +154,7 @@ func (fp *FileProcessor) ProcessTableType(ctx context.Context, dataDir, tableTyp
 		fp.log.Errorf("Error reading subdirectory %s: %v", subDirPath, err)
 		return err
 	}
-	
+
 	// Filter to only CSV files
 	var csvFiles []os.DirEntry
 	for _, entry := range files {
@@ -165,28 +165,28 @@ func (fp *FileProcessor) ProcessTableType(ctx context.Context, dataDir, tableTyp
 
 	// Initialize a table-wide batch counter
 	var tableBatchCounter int64 = 0
-	
+
 	// Process each file
 	for i, fileEntry := range csvFiles {
 		// Check if this is the last CSV file for this table type
 		isLastFile := (i == len(csvFiles)-1)
-		
+
 		if isLastFile {
 			fp.log.Infof("action: processing_file | file: %s | is_last_file: true | starting_batch: %d", fileEntry.Name(), tableBatchCounter)
 		} else {
 			fp.log.Infof("action: processing_file | file: %s | starting_batch: %d", fileEntry.Name(), tableBatchCounter)
 		}
-		
+
 		// Process the file with the current table batch counter
 		lastBatchNo, err := fp.ProcessFile(ctx, subDirPath, fileEntry.Name(), processor, isLastFile, tableBatchCounter)
 		if err != nil {
 			return err
 		}
-		
+
 		// Update the table batch counter for the next file
 		tableBatchCounter = lastBatchNo
 		fp.log.Infof("action: updated_batch_counter | table_type: %s | new_value: %d", tableType, tableBatchCounter)
-		
+
 		time.Sleep(1 * time.Second) // delay between files
 	}
 
@@ -254,12 +254,22 @@ func (fp *FileProcessor) sendEOFMessage(processor *BatchProcessor, tableType str
 func (fp *FileProcessor) buildEOFMessageBody(tableType string) []byte {
 	var body []byte
 
-	// TableMessage format: [nRows:i32][batchNumber:i64][status:u8][rows...]
+	// TableMessage format: [nRows:i32][clientNumber:i32][batchNumber:i64][status:u8][rows...]
 
 	// nRows = 1 (one virtual row with table_type info)
 	nRowsBytes := make([]byte, 4)
 	binary.LittleEndian.PutUint32(nRowsBytes, 1)
 	body = append(body, nRowsBytes...)
+
+	// clientNumber (nuevo campo) - extraer de fp.clientID o usar 0
+	clientNumber := 1
+	// Si fp.clientID contiene un número, podemos usarlo
+	// Ejemplo básico (mejóralo según tu lógica):
+	// fmt.Sscanf(fp.clientID, "client-%d", &clientNumber)
+
+	clientNumberBytes := make([]byte, 4)
+	binary.LittleEndian.PutUint32(clientNumberBytes, uint32(clientNumber))
+	body = append(body, clientNumberBytes...)
 
 	// batchNumber = 0 (EOF doesn't have a specific batch number)
 	batchNumberBytes := make([]byte, 8)

@@ -13,7 +13,7 @@ func writeOpCode(out io.Writer, opCode byte) error {
 
 // calculateMessageLength calculates the total message length including headers and body
 func calculateMessageLength(bodyLen int) int32 {
-	return int32(4 + 8 + 1 + bodyLen) // nLines + batchNumber + status + bodyLen
+	return int32(4 + 4 + 8 + 1 + bodyLen) // nLines + clientNumber + batchNumber + status + bodyLen
 }
 
 // writeMessageLength writes the message length field to the output
@@ -24,6 +24,11 @@ func writeMessageLength(out io.Writer, length int32) error {
 // writeLineCounter writes the number of lines field to the output
 func writeLineCounter(out io.Writer, counter int32) error {
 	return binary.Write(out, binary.LittleEndian, counter)
+}
+
+// writeClientNumber writes the client number field to the output
+func writeClientNumber(out io.Writer, clientNumber int32) error {
+	return binary.Write(out, binary.LittleEndian, clientNumber)
 }
 
 // writeBatchNumber writes the batch number field to the output
@@ -48,10 +53,10 @@ func writeMessageBody(out io.Writer, batch *bytes.Buffer) error {
 // FlushBatch frames and writes a message to `out` from the accumulated
 // body in `batch`. The wire format is:
 //
-//	[opcode:1][length=i32 LE (4 + 8 + 1 + bodyLen)][nLines=i32 LE][batchNumber=i64 LE][status=u8][body]
+//	[opcode:1][length=i32 LE (4 + 4 + 8 + 1 + bodyLen)][nLines=i32 LE][clientNumber=i32 LE][batchNumber=i64 LE][status=u8][body]
 //
 // After a successful write it resets the batch buffer. Any write error is returned.
-func FlushBatch(batch *bytes.Buffer, out io.Writer, counter int32, opCode byte, batchNumber int64, batchStatus byte) error {
+func FlushBatch(batch *bytes.Buffer, out io.Writer, counter int32, clientNumber int32, opCode byte, batchNumber int64, batchStatus byte) error {
 	// Write opcode
 	if err := writeOpCode(out, opCode); err != nil {
 		return err
@@ -65,6 +70,11 @@ func FlushBatch(batch *bytes.Buffer, out io.Writer, counter int32, opCode byte, 
 
 	// Write line counter
 	if err := writeLineCounter(out, counter); err != nil {
+		return err
+	}
+
+	// Write client number
+	if err := writeClientNumber(out, clientNumber); err != nil {
 		return err
 	}
 

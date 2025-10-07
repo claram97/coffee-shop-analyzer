@@ -23,7 +23,7 @@ func addRowToCurrentBatch(to *bytes.Buffer, rowBuffer *bytes.Buffer, counter *in
 // flushCurrentBatch flushes the current batch and increments the batch number
 func flushCurrentBatch(to *bytes.Buffer, finalOutput io.Writer, counter int32, opCode byte, batchNumber *int64) error {
 	*batchNumber++ // Incrementar el número de batch antes de enviarlo
-	return FlushBatch(to, finalOutput, counter, opCode, *batchNumber, BatchContinue)
+	return FlushBatch(to, finalOutput, counter, 1, opCode, *batchNumber, BatchContinue)
 }
 
 // startNewBatchWithRow starts a new batch with the given row

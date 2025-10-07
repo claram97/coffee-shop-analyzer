@@ -61,7 +61,7 @@ func (bp *BatchProcessor) processNextRow(reader *csv.Reader, batchBuff *bytes.Bu
 func (bp *BatchProcessor) handleCancellation(batchBuff *bytes.Buffer, counter *int32, currentBatchNumber *int64) error {
 	if *counter > 0 {
 		(*currentBatchNumber)++ // Increment only when we actually send a batch
-		if err := protocol.FlushBatch(batchBuff, bp.conn, *counter, bp.opCode, *currentBatchNumber, protocol.BatchCancel); err != nil {
+		if err := protocol.FlushBatch(batchBuff, bp.conn, *counter, 1, bp.opCode, *currentBatchNumber, protocol.BatchCancel); err != nil {
 			return err
 		}
 		*counter = 0
@@ -82,7 +82,7 @@ func (bp *BatchProcessor) handleEOF(batchBuff *bytes.Buffer, counter *int32, cur
 			bp.log.Infof("action: send_last_batch | result: setting_eof_status | batch_number: %d", *currentBatchNumber)
 		}
 
-		if err := protocol.FlushBatch(batchBuff, bp.conn, *counter, bp.opCode, *currentBatchNumber, batchStatus); err != nil {
+		if err := protocol.FlushBatch(batchBuff, bp.conn, *counter, 1, bp.opCode, *currentBatchNumber, batchStatus); err != nil {
 			return err
 		}
 	}
@@ -121,13 +121,13 @@ func (bp *BatchProcessor) processCSVLoop(ctx context.Context, reader *csv.Reader
 // determines whether the final batch should have BatchStatus=EOF
 //
 // Returns the error (if any) and the last batch number used
-func (bp *BatchProcessor) BuildAndSendBatches(ctx context.Context, reader *csv.Reader, batchNumber int64, isLastFile bool) (error, int64) {
+func (bp *BatchProcessor) BuildAndSendBatches(ctx context.Context, reader *csv.Reader, batchNumber int64, isLastFile bool) (int64, error) {
 	var batchBuff bytes.Buffer
 	var counter int32 = 0
 	currentBatchNumber := batchNumber // Current batch number (not incremented per line)
 
 	err := bp.processCSVLoop(ctx, reader, &batchBuff, &counter, &currentBatchNumber, isLastFile)
-	return err, currentBatchNumber
+	return currentBatchNumber, err
 }
 
 // GetConnection returns the network connection used by this processor

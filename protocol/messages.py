@@ -6,6 +6,7 @@ import inspect
 import socket
 import struct
 from typing import Any, Iterator, Tuple
+import logging
 
 from .constants import Opcodes, ProtocolError
 from .entities import (
@@ -48,6 +49,7 @@ class TableMessage:
         self.amount = 0
         self.batch_number = 0
         self.batch_status = 0
+        self.client_number = 0  # Nuevo campo
         self._row_factory = row_factory
 
     @staticmethod
@@ -101,7 +103,7 @@ class TableMessage:
         [opcode:u8][length:i32][body]
 
         body:
-          [nRows:i32][batchNumber:i64][status:u8]
+          [nRows:i32][clientNumber:i32][batchNumber:i64][status:u8]  # Modificado para incluir clientNumber
           repeated nRows:
             [n_pairs:i32]  (cantidad de pares key/value)
             n_pairs * ([key_len:i32][key][val_len:i32][val])
@@ -109,9 +111,11 @@ class TableMessage:
         n_rows = self._compute_amount_if_needed()
         batch_number = int(getattr(self, "batch_number", 0) or 0)
         batch_status = int(getattr(self, "batch_status", 0) or 0)
+        client_number = int(getattr(self, "client_number", 0) or 0)  # Obtener client_number
 
         parts = []
         parts.append(struct.pack("<I", n_rows))  # nRows
+        parts.append(struct.pack("<I", client_number))  # clientNumber (nuevo campo)
         parts.append(struct.pack("<Q", batch_number))  # batchNumber (u64 little-endian)
         parts.append(struct.pack("<B", batch_status))  # status (u8)
 
@@ -182,9 +186,14 @@ class TableMessage:
             self.rows.append(payload)
 
     def _read_table_header(self, reader: BytesReader, remaining: int) -> int:
-        """Read table header: number of rows, batch number and status."""
+        """Read table header: number of rows, client number, batch number and status."""
+
         (n_rows, remaining) = read_i32(reader, remaining, self.opcode)
         self.amount = n_rows
+
+        # Leer el nuevo campo client_number
+        (client_number, remaining) = read_i32(reader, remaining, self.opcode)
+        self.client_number = client_number
 
         (batch_number, remaining) = read_i64(reader, remaining, self.opcode)
         self.batch_number = batch_number
@@ -214,7 +223,7 @@ class TableMessage:
         """Validate that no bytes remain unprocessed."""
         if remaining != 0:
             raise ProtocolError(
-                "Indicated length doesn't match body length", self.opcode
+                "Indicated length doesn't match body length for table message", self.opcode
             )
 
     def read_from(self, body_bytes: bytes):

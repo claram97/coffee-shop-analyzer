@@ -67,7 +67,7 @@ def read_u16(reader: BytesReader, remaining: int, opcode: int) -> Tuple[int, int
         A tuple containing the parsed integer and the updated remaining byte count.
     """
     if remaining < 2:
-        raise ProtocolError("indicated length doesn't match body length", opcode)
+        raise ProtocolError("indicated length doesn't match body length in read_u16", opcode)
     remaining -= 2
     val = int.from_bytes(reader.read(2), byteorder="little", signed=False)
     return val, remaining
@@ -86,7 +86,7 @@ def read_i32(reader: BytesReader, remaining: int, opcode: int) -> Tuple[int, int
         A tuple containing the parsed integer and the updated remaining byte count.
     """
     if remaining < 4:
-        raise ProtocolError("indicated length doesn't match body length", opcode)
+        raise ProtocolError("indicated length doesn't match body length in read_i32", opcode)
     remaining -= 4
     val = int.from_bytes(reader.read(4), byteorder="little", signed=True)
     return val, remaining
@@ -105,7 +105,7 @@ def read_i64(reader: BytesReader, remaining: int, opcode: int) -> Tuple[int, int
         A tuple containing the parsed integer and the updated remaining byte count.
     """
     if remaining < 8:
-        raise ProtocolError("indicated length doesn't match body length", opcode)
+        raise ProtocolError("indicated length doesn't match body length in read_i64", opcode)
     remaining -= 8
     val = int.from_bytes(reader.read(8), byteorder="little", signed=True)
     return val, remaining
@@ -131,7 +131,7 @@ def read_string(reader: BytesReader, remaining: int, opcode: int) -> Tuple[str, 
     if str_len == 0:
         return "", remaining
     if remaining < str_len:
-        raise ProtocolError("indicated length doesn't match body length", opcode)
+        raise ProtocolError("indicated length doesn't match body length in read_string for bytes reader", opcode)
     try:
         s = reader.read(str_len).decode("utf-8")
     except UnicodeDecodeError as e:
@@ -176,7 +176,7 @@ def read_u8_with_remaining(
 ) -> Tuple[int, int]:
     """Reads a u8 and decrements the remaining bytes counter."""
     if remaining < 1:
-        raise ProtocolError("indicated length doesn't match body length", opcode)
+        raise ProtocolError("indicated length doesn't match body length in read_u8_with_remaining", opcode)
     b = reader.read(1)[0]
     return b, remaining - 1
 
