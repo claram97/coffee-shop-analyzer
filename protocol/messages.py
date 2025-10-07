@@ -285,6 +285,7 @@ class NewTransactions(TableMessage):
             "transaction_id",
             "store_id",
             "payment_method_id",
+            "voucher_id",
             "user_id",
             "original_amount",
             "discount_applied",

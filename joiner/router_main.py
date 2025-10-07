@@ -140,15 +140,14 @@ def main():
         sys.exit(2)
 
     broker_host = cfg.broker.host
+    fr_replicas = cfg.routers.filter
 
     pool = ExchangePublisherPool(factory=_rabbit_exchange_factory(broker_host))
 
     route_cfg = build_route_cfg_from_config(cfg)
 
     router = JoinerRouter(
-        in_mw=None,
-        publisher_pool=pool,
-        route_cfg=route_cfg,
+        in_mw=None, publisher_pool=pool, route_cfg=route_cfg, fr_replicas=fr_replicas
     )
 
     in_queues: list[str] = []

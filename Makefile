@@ -37,3 +37,16 @@ docker-compose-down:
 docker-compose-logs:
 	docker compose -f docker-compose-dev.yaml logs -f
 .PHONY: docker-compose-logs
+
+docker-compose-up-client: docker-image
+	docker compose -f docker-compose-client.yaml up -d --build
+.PHONY: docker-compose-up-client
+
+docker-compose-down-client:
+	docker compose -f docker-compose-client.yaml stop -t 1
+	docker compose -f docker-compose-client.yaml down
+.PHONY: docker-compose-down-client
+
+docker-compose-logs-client:
+	docker compose -f docker-compose-client.yaml logs -f
+.PHONY: docker-compose-logs-client

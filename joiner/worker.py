@@ -42,21 +42,35 @@ NAME_TO_ID = {
 
 
 def _eof_table_id(eof) -> Optional[int]:
+    # First try to get table_type directly from the EOF message
     raw = getattr(eof, "table_type", None)
+    # If that fails, try using get_table_type method if available
     if (raw is None or raw == "") and hasattr(eof, "get_table_type"):
         try:
             raw = eof.get_table_type()
         except Exception:
             raw = None
+    
     if raw is None:
+        # If we still don't have a table type, log the issue and return None
+        print(f"WARNING: EOF message missing table_type: {eof}")
         return None
+        
+    # Convert to lowercase string and normalize
     s = str(raw).strip().lower()
+    
+    # Try mapping by name first
     if s in NAME_TO_ID:
         return NAME_TO_ID[s]
+        
+    # Try parsing as an integer (opcode)
     try:
         num = int(s)
         return num if num in NAME_TO_ID.values() else None
     except ValueError:
+        # Not an integer, log and return None
+        print(f"WARNING: Invalid table_type in EOF message: {s}")
+        return None
         return None
 
 
@@ -166,7 +180,7 @@ class JoinerWorker:
             t = getattr(db.batch_msg, "opcode", None)
             q = list(getattr(db, "query_ids", []) or [])
             n = len((db.batch_msg.rows or []) if getattr(db, "batch_msg", None) else [])
-            self._log.info("%s: table=%s queries=%s rows=%s", where, t, q, n)
+            self._log.debug("%s: table=%s queries=%s rows=%s", where, t, q, n)
         except Exception as e:
             self._log.debug("log_db failed: %s", e)
 
@@ -241,11 +255,25 @@ class JoinerWorker:
     # ---------- handlers ----------
     def _on_raw_menu(self, raw: bytes):
         kind, msg = self._decode_msg(raw)
+        db = msg if kind == "db" else None
+        batch_num = getattr(db, "batch_number", "?") if db else "?"
+        shards_info = getattr(db, "shards_info", "[]") if db else "?"
+        shard_num = getattr(self, "_shard", "?")
+        queries = list(getattr(db, "query_ids", []) or []) if db else []
+        self._log.debug(
+            "IN: menu_items batch_number=%s shard=%s shards_info=%s queries=%s",
+            batch_num,
+            shard_num,
+            shards_info,
+            queries,
+        )
+        kind, msg = self._decode_msg(raw)
         if kind == "eof":
             eof: EOFMessage = msg
             self._on_table_eof(int(_eof_table_id(eof)))
             self._stop_queue(Opcodes.NEW_MENU_ITEMS)
             self._maybe_enable_ti_phase()
+            self._maybe_enable_tx_phase()
             return
         if kind != "db":
             return
@@ -261,11 +289,25 @@ class JoinerWorker:
 
     def _on_raw_stores(self, raw: bytes):
         kind, msg = self._decode_msg(raw)
+        db = msg if kind == "db" else None
+        batch_num = getattr(db, "batch_number", "?") if db else "?"
+        shard_num = getattr(self, "_shard", "?")
+        queries = list(getattr(db, "query_ids", []) or []) if db else []
+        shards_info = getattr(db, "shards_info", "[]") if db else "?"
+        self._log.debug(
+            "IN: stores batch_number=%s shard=%s shards_info=%s queries=%s",
+            batch_num,
+            shard_num,
+            shards_info,
+            queries,
+        )
+        kind, msg = self._decode_msg(raw)
         if kind == "eof":
             eof: EOFMessage = msg
             self._on_table_eof(_eof_table_id(eof))
             self._stop_queue(Opcodes.NEW_STORES)
             self._maybe_enable_ti_phase()
+            self._maybe_enable_tx_phase()
             return
         if kind != "db":
             return
@@ -281,11 +323,23 @@ class JoinerWorker:
 
     def _on_raw_ti(self, raw: bytes):
         kind, msg = self._decode_msg(raw)
+        db = msg if kind == "db" else None
+        batch_num = getattr(db, "batch_number", "?") if db else "?"
+        shard_num = getattr(self, "_shard", "?")
+        queries = list(getattr(db, "query_ids", []) or []) if db else []
+        shards_info = getattr(db, "shards_info", "[]") if db else "?"
+        self._log.debug(
+            "IN: transaction_items batch_number=%s shard=%s shards_info=%s queries=%s",
+            batch_num,
+            shard_num,
+            shards_info,
+            queries,
+        )
+        kind, msg = self._decode_msg(raw)
         if kind == "eof":
             eof: EOFMessage = msg
             self._on_table_eof(_eof_table_id(eof))
             self._stop_queue(Opcodes.NEW_TRANSACTION_ITEMS)
-            self._maybe_enable_tx_phase()
             return
         if kind != "db":
             return
@@ -313,28 +367,55 @@ class JoinerWorker:
             mi = menu_idx.get(item_id)
             if not mi:
                 continue
-            out_rows.append(
-                RawTransactionItemMenuItem(
-                    transaction_id=norm(getattr(r, "transaction_id", "")),
-                    item_name=norm(getattr(mi, "name", "")),
-                    quantity=norm(getattr(r, "quantity", "")),
-                    subtotal=norm(getattr(r, "subtotal", "")),
-                    created_at=norm(getattr(r, "created_at", "")),
-                )
+            
+            # Explicitly log the quantity value being passed for debugging
+            quantity_value = norm(getattr(r, "quantity", ""))
+            self._log.debug("Q2 item quantity for item_id=%s: %s", item_id, quantity_value)
+            
+            joined_item = RawTransactionItemMenuItem(
+                transaction_id=norm(getattr(r, "transaction_id", "")),
+                item_name=norm(getattr(mi, "name", "")),
+                quantity=quantity_value,  # Ensure this is explicitly passed from source
+                subtotal=norm(getattr(r, "subtotal", "")),
+                created_at=norm(getattr(r, "created_at", "")),
             )
+            
+            # Verify the quantity was properly set in the joined item
+            self._log.debug("Q2 joined item: transaction_id=%s, item_name=%s, quantity=%s", 
+                          joined_item.transaction_id, joined_item.item_name, joined_item.quantity)
+            
+            out_rows.append(joined_item)
 
-        self._log.info("JOIN Q2: in=%d matched=%d", len(ti_rows), len(out_rows))
+        self._log.debug("JOIN Q2: in=%d matched=%d", len(ti_rows), len(out_rows))
         joined_msg = NewTransactionItemsMenuItems()
         joined_msg.rows = out_rows
+        # For Q2, we should preserve EOF status from TransactionItems
+        # TransactionItems (TI) is our primary stream that signals the end of Q2
+        batch_status = getattr(db.batch_msg, "batch_status", 0)
+        joined_msg.batch_status = batch_status
+        self._log.debug("Q2 preserving TI batch_status=%d", batch_status)
         db.table_ids = [Opcodes.NEW_MENU_ITEMS, Opcodes.NEW_TRANSACTION_ITEMS]
         db.batch_msg = joined_msg
         self._send(db)
 
     def _on_raw_tx(self, raw: bytes):
         kind, msg = self._decode_msg(raw)
+        db = msg if kind == "db" else None
+        queries = list(getattr(db, "query_ids", []) or []) if db else []
+        rows_qtty = len(db.batch_msg.rows)
+        self._log.debug("IN: transactions queries=%s rows_qtty=%d", queries, rows_qtty)
+        kind, msg = self._decode_msg(raw)
         if kind == "eof":
             eof: EOFMessage = msg
-            self._on_table_eof(_eof_table_id(eof))
+            # Explicitly mark the EOF for NEW_TRANSACTION table
+            # This ensures we don't rely on _eof_table_id which might return None or wrong ID
+            table_id = _eof_table_id(eof)
+            self._log.info(
+                "EOF en _on_raw_tx: table_type=%s, table_id=%s, forcing table_id=%s", 
+                getattr(eof, "table_type", "?"), table_id, Opcodes.NEW_TRANSACTION
+            )
+            # Always mark the correct table ID for transactions
+            self._on_table_eof(Opcodes.NEW_TRANSACTION)
             self._stop_queue(Opcodes.NEW_TRANSACTION)
             self._maybe_enable_u_phase()
             return
@@ -356,7 +437,7 @@ class JoinerWorker:
             self._cache_stores or self._store.get("stores", "full", default=None)
         )
         if not stores_idx:
-            self._log.debug("Stores cache no disponible aún; drop batch TX")
+            self._log.info("Stores cache no disponible aún; drop batch TX")
             return
 
         joined_tx_st: List[RawTransactionStore] = []
@@ -381,6 +462,11 @@ class JoinerWorker:
             self._log.info("JOIN Q3: in=%d matched=%d", len(tx_rows), len(joined_tx_st))
             msg_join = NewTransactionStores()
             msg_join.rows = joined_tx_st
+            # For Q3, we should preserve EOF status from Transactions
+            # Transactions (TX) is our primary stream that signals the end of Q3
+            batch_status = getattr(db.batch_msg, "batch_status", 0)
+            msg_join.batch_status = batch_status
+            self._log.debug("Q3 preserving TX batch_status=%d", batch_status)
             db.table_ids = [Opcodes.NEW_TRANSACTION_STORES]
             db.batch_msg = msg_join
             self._send(db)
@@ -403,6 +489,13 @@ class JoinerWorker:
             total = total_users if total_users else 1
             total_u8 = min(total, 255)
 
+            # For Q4, we must preserve EOF from Transactions (primary stream)
+            # This template will be used when joining with Users data
+            original_batch_status = getattr(db.batch_msg, "batch_status", 0)
+            # Ensure template's batch_msg has the same batch_status as original transaction
+            template.batch_msg.batch_status = original_batch_status
+            self._log.debug("Q4 template preserving TX batch_status=%d for later User join", original_batch_status)
+            
             for idx, (uid, lst) in enumerate(by_user.items()):
                 idx_u8 = idx % 256
                 template.meta[total_u8] = idx_u8
@@ -419,6 +512,19 @@ class JoinerWorker:
 
     def _on_raw_users(self, raw: bytes):
         kind, msg = self._decode_msg(raw)
+        db = msg if kind == "db" else None
+        batch_num = getattr(db, "batch_number", "?") if db else "?"
+        shard_num = getattr(self, "_shard", "?")
+        queries = list(getattr(db, "query_ids", []) or []) if db else []
+        shards_info = getattr(db, "shards_info", "[]") if db else "?"
+        self._log.debug(
+            "IN: users batch_number=%s shard=%s shards_info=%s queries=%s",
+            batch_num,
+            shard_num,
+            shards_info,
+            queries,
+        )
+        kind, msg = self._decode_msg(raw)
         if kind == "eof":
             eof: EOFMessage = msg
             self._on_table_eof(_eof_table_id(eof))
@@ -432,7 +538,7 @@ class JoinerWorker:
         users: List[RawUser] = (
             (db.batch_msg.rows or []) if getattr(db, "batch_msg", None) else []
         )
-        self._log.info("USERS recv rows=%d", len(users))
+        self._log.debug("USERS recv rows=%d", len(users))
 
         if Q4 in queries_set(db):
             uidx = index_by_attr(users, "user_id")
@@ -465,6 +571,11 @@ class JoinerWorker:
                     out_db = DataBatch.deserialize_from_bytes(template_raw)
                     msg_join = NewTransactionStoresUsers()
                     msg_join.rows = out_rows
+                    # For Q4, preserve the Transaction's EOF status from template
+                    # The template already has the Transaction's batch_status
+                    batch_status = getattr(out_db.batch_msg, "batch_status", 0)
+                    msg_join.batch_status = batch_status
+                    self._log.debug("Q4 preserving TX batch_status=%d from template during User join", batch_status)
                     out_db.table_ids = [Opcodes.NEW_TRANSACTION_STORES_USERS]
                     out_db.batch_msg = msg_join
                     self._log.info("Q4 out rows=%d for uid=%s", len(out_rows), uid)
@@ -484,14 +595,16 @@ class JoinerWorker:
             self._log.info("Activada fase TI")
 
     def _maybe_enable_tx_phase(self):
-        if Opcodes.NEW_TRANSACTION_ITEMS in self._eof:
+        if (Opcodes.NEW_MENU_ITEMS in self._eof) and (Opcodes.NEW_STORES in self._eof):
             self._start_queue(Opcodes.NEW_TRANSACTION, self._on_raw_tx)
             self._log.info("Activada fase TX")
 
     def _maybe_enable_u_phase(self):
+        # For Q4, we need Transactions EOF before enabling Users phase
+        # This means for Q4, Transaction EOF is the primary indicator
         if Opcodes.NEW_TRANSACTION in self._eof:
             self._start_queue(Opcodes.NEW_USERS, self._on_raw_users)
-            self._log.info("Activada fase USERS")
+            self._log.info("Activada fase USERS (Q4 depende del EOF de Transactions)")
 
     def _flush_remaining_q4_without_user(self):
         uids = self._store.keys_with_prefix("q4_by_user")
@@ -505,6 +618,12 @@ class JoinerWorker:
                 out_db = DataBatch.deserialize_from_bytes(template_raw)
                 msg_join = NewTransactionStores()
                 msg_join.rows = txst_rows
+                
+                # For Q4 without user, still preserve Transaction's EOF from template
+                batch_status = getattr(out_db.batch_msg, "batch_status", 0)
+                msg_join.batch_status = batch_status
+                self._log.debug("Q4 (sin user) preserving TX batch_status=%d from template", batch_status)
+                
                 out_db.table_ids = [Opcodes.NEW_TRANSACTION_STORES]
                 out_db.batch_msg = msg_join
                 self._log.info("Q4 (sin user) out rows=%d uid=%s", len(txst_rows), uid)
@@ -512,6 +631,26 @@ class JoinerWorker:
 
     # ---------- envío ----------
     def _send(self, db: DataBatch):
+        batch_num = getattr(db, "batch_number", "?")
+        shard_num = getattr(self, "_shard", "?")
+        queries = list(getattr(db, "query_ids", []) or [])
+        batch_status = getattr(db.batch_msg, "batch_status", None) if getattr(db, "batch_msg", None) else None
+        status_text = "UNKNOWN"
+        if batch_status == 0:
+            status_text = "CONTINUE"
+        elif batch_status == 1:
+            status_text = "EOF"
+        elif batch_status == 2:
+            status_text = "CANCEL"
+        self._log.debug(
+            "OUT: Sending batch table=%s batch_number=%s shard=%s queries=%s rows=%d batch_status=%s",
+            getattr(db.batch_msg, "opcode", "?"),
+            batch_num,
+            shard_num,
+            queries,
+            len((db.batch_msg.rows or []) if getattr(db, "batch_msg", None) else []),
+            status_text,
+        )
         if getattr(db, "batch_msg", None) and hasattr(db.batch_msg, "to_bytes"):
             db.batch_bytes = db.batch_msg.to_bytes()
         raw = db.to_bytes()

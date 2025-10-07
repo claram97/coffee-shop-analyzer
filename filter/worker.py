@@ -7,11 +7,13 @@ from datetime import datetime, timezone
 from typing import Any, Callable, Dict, List, Optional, Tuple
 from zoneinfo import ZoneInfo
 
-from middleware.middleware_client import MessageMiddlewareQueue
+from middleware.middleware_client import (
+    MessageMiddlewareExchange,
+    MessageMiddlewareQueue,
+)
 from protocol.constants import Opcodes
 from protocol.databatch import DataBatch
 
-# ---------------- Logging ----------------
 LOGGER_NAME = "filter_worker"
 logger = logging.getLogger(LOGGER_NAME)
 
@@ -19,7 +21,7 @@ logger = logging.getLogger(LOGGER_NAME)
 def _setup_logging() -> None:
     """Configura logging sólo si el root logger no tiene handlers."""
     if logging.getLogger().handlers:
-        return  # Respeta configuración existente (p. ej., si te lo setea Gunicorn)
+        return
     level_name = os.getenv("FILTER_WORKER_LOG_LEVEL", "INFO").upper()
     level = getattr(logging, level_name, logging.INFO)
     logging.basicConfig(
@@ -30,11 +32,9 @@ def _setup_logging() -> None:
 
 _setup_logging()
 
-# -------------- Constantes / Utiles --------------
 MYT_TZ = ZoneInfo("Asia/Kuala_Lumpur")
 
 
-# ---------- step desde bitmask ----------
 def current_step_from_mask(mask: int) -> Optional[int]:
     if mask == 0:
         return None
@@ -45,7 +45,6 @@ def current_step_from_mask(mask: int) -> Optional[int]:
     return i - 1
 
 
-# ---------- filtros atómicos ----------
 def _parse_dt_utc(s: str) -> Optional[datetime]:
     try:
         return datetime.strptime(s, "%Y-%m-%d %H:%M:%S").replace(tzinfo=timezone.utc)
@@ -53,7 +52,7 @@ def _parse_dt_utc(s: str) -> Optional[datetime]:
         return None
 
 
-def hour_filter(rows) -> List[Dict[str, Any]]:
+def hour_filter(rows) -> List[Any]:
     kept = []
     for r in rows:
         ts = r.created_at
@@ -65,7 +64,7 @@ def hour_filter(rows) -> List[Dict[str, Any]]:
     return kept
 
 
-def final_amount_filter(rows) -> List[Dict[str, Any]]:
+def final_amount_filter(rows) -> List[Any]:
     kept = []
     for r in rows:
         try:
@@ -76,23 +75,21 @@ def final_amount_filter(rows) -> List[Dict[str, Any]]:
     return kept
 
 
-def year_filter(
-    rows, min_year: int = 2024, max_year: int = 2025
-) -> List[Dict[str, Any]]:
+def year_filter(rows, min_year: int = 2024, max_year: int = 2025) -> List[Any]:
     kept = []
     for r in rows:
         ts = r.created_at
         try:
             y = datetime.strptime(ts, "%Y-%m-%d %H:%M:%S").year
-        except Exception:
+        except Exception as e:
+            logger.debug("exception while applying filter: %s", e)
             continue
         if min_year <= y <= max_year:
             kept.append(r)
     return kept
 
 
-# ---------- registro ----------
-FilterFn = Callable[[List[Dict[str, Any]]], List[Dict[str, Any]]]
+FilterFn = Callable[List[Any], List[Any]]
 FilterRegistry = Dict[Tuple[int, int, str], FilterFn]
 
 
@@ -107,27 +104,58 @@ REGISTRY[(Opcodes.NEW_TRANSACTION, 2, qkey([1]))] = final_amount_filter
 REGISTRY[(Opcodes.NEW_TRANSACTION_ITEMS, 0, qkey([2]))] = year_filter
 
 
-# ---------- worker ----------
 class FilterWorker:
     """
-    Consume de una cola (Filter Workers pool), aplica el filtro adecuado según (table_id, step, queries)
-    y reenvía el batch al Filter Router.
+    Consume de una cola (Filter Workers pool), aplica el filtro adecuado
+    y publica el batch al **exchange** del Filter Router usando la RK calculada
+    a partir de (batch_number % num_routers).
     """
 
     def __init__(
         self,
         host: str,
         in_queue: str,
-        out_router_queue: str,
+        out_router_exchange: str,
+        out_router_rk_fmt: str,
+        num_routers: int,
         filters: FilterRegistry | None = None,
     ):
+        self._host = host
         self._in = MessageMiddlewareQueue(host, in_queue)
-        self._out = MessageMiddlewareQueue(host, out_router_queue)
         self._filters = filters or REGISTRY
+
+        self._out_ex = out_router_exchange
+        self._rk_fmt = out_router_rk_fmt
+        self._num_routers = max(1, int(num_routers))
+
+        self._pub_cache: Dict[str, MessageMiddlewareExchange] = {}
+
         logger.info(
-            "FilterWorker inicializado",
-            extra={"host": host, "in_queue": in_queue, "out_queue": out_router_queue},
+            "FilterWorker inicializado | host=%s in_queue=%s out_exchange=%s rk_fmt=%s num_routers=%d",
+            host,
+            in_queue,
+            out_router_exchange,
+            out_router_rk_fmt,
+            self._num_routers,
         )
+
+    def _publisher_for_rk(self, rk: str) -> MessageMiddlewareExchange:
+        pub = self._pub_cache.get(rk)
+        if pub is None:
+            logger.info("Creando publisher a exchange=%s rk=%s", self._out_ex, rk)
+            pub = MessageMiddlewareExchange(
+                host=self._host,
+                exchange_name=self._out_ex,
+                route_keys=[rk],
+            )
+            self._pub_cache[rk] = pub
+        return pub
+
+    def _send_to_router(self, raw: bytes, batch_number: int | None) -> None:
+        pid = 0 if batch_number is None else int(batch_number) % self._num_routers
+        rk = self._rk_fmt.format(pid=pid)
+        pub = self._publisher_for_rk(rk)
+        pub.send(raw)
 
     def run(self) -> None:
         logger.info("Comenzando consumo de mensajes…")
@@ -139,94 +167,112 @@ class FilterWorker:
             db = DataBatch.deserialize_from_bytes(raw)
         except Exception:
             logger.exception("Fallo deserializando DataBatch; reenviando sin cambios")
-            self._out.send(raw)
+            self._send_to_router(raw, batch_number=None)
             return
 
+        bn = int(getattr(db, "batch_number", 0) or 0)
+
         if not getattr(db, "batch_msg", None):
-            logger.debug("Batch sin table_ids: reenvío sin cambios")
-            self._out.send(raw)
+            logger.warning("Batch sin batch_msg: reenvío sin cambios")
+            self._send_to_router(raw, bn)
             return
         try:
             table_id = int(db.batch_msg.opcode)
         except Exception:
             logger.warning("table_id inválido; reenvío sin cambios")
-            self._out.send(raw)
+            self._send_to_router(raw, bn)
             return
 
-        # Step actual desde la máscara (u16 contiguous-ones)
         step_mask = int(getattr(db, "reserved_u16", 0) or 0)
         step = current_step_from_mask(step_mask)
         if step is None:
             logger.debug(
-                "Sin step activo en máscara: reenvío sin cambios",
-                extra={"table_id": table_id, "mask": step_mask},
+                "Sin step activo en máscara: reenvío sin cambios | table_id=%s mask=%s",
+                table_id,
+                step_mask,
             )
-            self._out.send(raw)
+            self._send_to_router(raw, bn)
             return
 
-        # Filas
         inner = getattr(db, "batch_msg", None)
         if inner is None or not hasattr(inner, "rows"):
             logger.warning(
-                "Batch sin 'rows': reenvío sin cambios",
-                extra={"table_id": table_id, "step": step},
+                "Batch sin 'rows': reenvío sin cambios | table_id=%s step=%s",
+                table_id,
+                step,
             )
-            self._out.send(raw)
+            self._send_to_router(raw, bn)
             return
-        rows: List[Dict[str, Any]] = getattr(inner, "rows") or []
+        rows = getattr(inner, "rows") or []
         in_rows = len(rows)
+        if inner.opcode == Opcodes.NEW_TRANSACTION:
+            try:
+                if in_rows > 0:
+                    sample_rows = rows[:2]
+                    all_keys = set()
+                    for row in sample_rows:
+                        all_keys.update(row.__dict__.keys())
 
-        # Queries → key
+                    sample_data = [row.__dict__ for row in sample_rows]
+
+                    logging.info(
+                        "action: batch_preview | batch_number: %d | opcode: %d | keys: %s | sample_count: %d | sample: %s",
+                        getattr(inner, "batch_number", 0),
+                        inner.opcode,
+                        sorted(list(all_keys)),
+                        len(sample_rows),
+                        sample_data,
+                    )
+            except Exception as e:
+                logging.exception(
+                    "action: batch_preview | batch_number: %d | result: skip | exception: %s",
+                    getattr(inner, "batch_number", 0),
+                    e,
+                )
         queries = list(getattr(db, "query_ids", []) or [])
         queries_key = qkey(queries)
         key = (table_id, step, queries_key)
 
-        # Resolver filtro
         fn = self._filters.get(key)
         if fn is None:
-            logger.info(
-                "No hay filtro registrado para queries %s: reenvío sin cambios",
+            logger.warning(
+                "No hay filtro registrado para queries=%s: reenvío sin cambios | table_id=%s step=%s rows=%d",
                 queries_key,
-                extra={
-                    "table_id": table_id,
-                    "step": step,
-                    "queries": queries_key,
-                    "rows": in_rows,
-                },
+                table_id,
+                step,
+                in_rows,
             )
-            self._out.send(raw)
+            self._send_to_router(raw, bn)
             return
 
-        # Aplicar filtro (fail-closed: si falla, reenviamos sin cambios)
         try:
             new_rows = fn(rows) or []
             out_rows = len(new_rows)
             inner.rows = new_rows
             db.batch_bytes = inner.to_bytes()
             out_raw = db.to_bytes()
-            self._out.send(out_raw)
+            self._send_to_router(out_raw, bn)
+
             dt_ms = (time.perf_counter() - t0) * 1000
-            logger.debug(
-                "Filtro aplicado y reenviado",
-                extra={
-                    "table_id": table_id,
-                    "step": step,
-                    "queries": queries_key,
-                    "rows_in": in_rows,
-                    "rows_out": out_rows,
-                    "latency_ms": round(dt_ms, 2),
-                    "filter_name": getattr(fn, "__name__", "unknown"),
-                },
-            )
+            if table_id == Opcodes.NEW_TRANSACTION:
+                logger.info(
+                    "Filtro aplicado y publicado | table_id=%s step=%s queries=%s rows_in=%d rows_out=%d latency_ms=%.2f filter=%s pid=%02d",
+                    table_id,
+                    step,
+                    queries_key,
+                    in_rows,
+                    out_rows,
+                    dt_ms,
+                    getattr(fn, "__name__", "unknown"),
+                    (bn % self._num_routers),
+                )
         except Exception:
             logger.exception(
-                "Error aplicando filtro; reenvío sin cambios",
-                extra={
-                    "table_id": table_id,
-                    "step": step,
-                    "queries": queries_key,
-                    "rows_in": in_rows,
-                    "filter_name": getattr(fn, "__name__", "unknown"),
-                },
+                "Error aplicando filtro; reenvío sin cambios | table_id=%s step=%s queries=%s rows_in=%d filter=%s",
+                table_id,
+                step,
+                queries_key,
+                in_rows,
+                getattr(fn, "__name__", "unknown"),
             )
-            self._out.send(raw)
+            self._send_to_router(raw, bn)

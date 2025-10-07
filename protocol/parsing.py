@@ -5,7 +5,7 @@ for reliable I/O from a bytes buffer and handling specific byte-level data
 structures.
 """
 
-from typing import List, Dict, Tuple
+from typing import Dict, List, Tuple
 
 from .constants import ProtocolError
 
@@ -171,7 +171,9 @@ def write_string(buf: bytearray, s: str) -> None:
     buf.extend(b)
 
 
-def read_u8_with_remaining(reader: BytesReader, remaining: int, opcode: int) -> Tuple[int, int]:
+def read_u8_with_remaining(
+    reader: BytesReader, remaining: int, opcode: int
+) -> Tuple[int, int]:
     """Reads a u8 and decrements the remaining bytes counter."""
     if remaining < 1:
         raise ProtocolError("indicated length doesn't match body length", opcode)
@@ -179,28 +181,36 @@ def read_u8_with_remaining(reader: BytesReader, remaining: int, opcode: int) -> 
     return b, remaining - 1
 
 
-def read_u8_list(reader: BytesReader, remaining: int, opcode: int) -> Tuple[List[int], int]:
+def read_u8_list(
+    reader: BytesReader, remaining: int, opcode: int
+) -> Tuple[List[int], int]:
     """
     Reads a list of u8 values prefixed by a u8 count.
     Format: [u8 count][u8 item 1][u8 item 2]...
     """
     n, remaining = read_u8_with_remaining(reader, remaining, opcode)
     if remaining < n:
-        raise ProtocolError("indicated length doesn't match body length for u8 list", opcode)
+        raise ProtocolError(
+            "indicated length doesn't match body length for u8 list", opcode
+        )
 
     items_bytes = reader.read(n)
     remaining -= n
     return list(items_bytes), remaining
 
 
-def read_u8_u8_dict(reader: BytesReader, remaining: int, opcode: int) -> Tuple[Dict[int, int], int]:
+def read_u8_u8_dict(
+    reader: BytesReader, remaining: int, opcode: int
+) -> Tuple[Dict[int, int], int]:
     """
     Reads a dictionary of u8 -> u8 mappings prefixed by a u8 count.
     Format: [u8 count][u8 key 1][u8 value 1][u8 key 2][u8 value 2]...
     """
     n, remaining = read_u8_with_remaining(reader, remaining, opcode)
     if remaining < n * 2:
-        raise ProtocolError("indicated length doesn't match body length for u8->u8 dict", opcode)
+        raise ProtocolError(
+            "indicated length doesn't match body length for u8->u8 dict", opcode
+        )
 
     out: Dict[int, int] = {}
     for _ in range(n):
@@ -208,3 +218,39 @@ def read_u8_u8_dict(reader: BytesReader, remaining: int, opcode: int) -> Tuple[D
         v, remaining = read_u8_with_remaining(reader, remaining, opcode)
         out[k] = v
     return out, remaining
+
+
+def read_tuples_list(reader: BytesReader, remaining: int, context_opcode: int):
+    """
+    Reads a u8-prefixed list of (u8, u8) tuples from the buffer.
+
+    Binary format:
+        [u8 count]          - Number of tuples in the list
+        [u8 a0][u8 b0]      - First tuple
+        [u8 a1][u8 b1]      - Second tuple
+        ...
+        [u8 a{count-1}][u8 b{count-1}] - Last tuple
+
+    Args:
+        reader: The BytesReader instance to consume data from.
+        remaining: The number of bytes remaining in the buffer.
+        context_opcode: Opcode used for error context in case of protocol violations.
+
+    Returns:
+        A tuple of:
+            - List of (int, int) pairs, each representing a tuple of two u8 values.
+            - Updated remaining byte count after reading.
+
+    Raises:
+        ProtocolError: If the buffer does not contain enough bytes or if the format is invalid.
+    """
+    count, remaining = read_u8_with_remaining(reader, remaining, context_opcode)
+
+    result: List[Tuple[int, int]] = []
+    for _ in range(count):
+        a, remaining = read_u8_with_remaining(reader, remaining, context_opcode)
+        b, remaining = read_u8_with_remaining(reader, remaining, context_opcode)
+        result.append((a, b))
+
+    return result, remaining
+

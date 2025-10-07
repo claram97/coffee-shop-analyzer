@@ -57,12 +57,26 @@ class Q1Strategy(BaseQueryStrategy):
             try:
                 # Simply extract the data without re-filtering
                 # since it was already filtered upstream
+                final_amount = self._safe_extract_numeric(row, 'final_amount')
+                
+                # Log transaction data for diagnosis
+                import logging
+                logging.info(f"Q1 Transaction: id={row.transaction_id}, final_amount={final_amount}")
+                
                 filtered_transactions.append({
                     "transaction_id": row.transaction_id,
-                    "final_amount": self._safe_extract_numeric(row, 'final_amount')
+                    "final_amount": final_amount
                 })
             except (ValueError, AttributeError):
                 continue
+                
+        # Log summary of processed transactions
+        import logging
+        logging.info("--- Q1 Final Transactions Summary ---")
+        logging.info(f"Total filtered transactions: {len(filtered_transactions)}")
+        if filtered_transactions:
+            logging.info(f"Sample transaction: {filtered_transactions[0]}")
+            
         return {"transactions": filtered_transactions}
 
 class Q2Strategy(BaseQueryStrategy):
@@ -75,6 +89,11 @@ class Q2Strategy(BaseQueryStrategy):
     
     The results-finisher needs to further aggregate these metrics across batches.
     """
+    
+    def _log_metrics(self, month: str, item_name: str, quantity: int, revenue: float):
+        """Helper method to log metrics for debugging."""
+        import logging
+        logging.info(f"Q2 Metrics: Month={month}, Item={item_name}, Quantity={quantity}, Revenue={revenue}")
     def finalize(self, consolidated_data: Dict[str, Any]) -> Dict[str, Any]:
         # First, aggregate metrics by month and product across all batches
         metrics_by_month_product = defaultdict(lambda: {'quantity': 0, 'revenue': 0.0})
@@ -89,13 +108,41 @@ class Q2Strategy(BaseQueryStrategy):
                 key = (month_key, item_name)
                 
                 # Add the pre-aggregated quantities and revenues from this batch
-                metrics_by_month_product[key]['quantity'] += int(getattr(row, 'quantity', 0))
-                metrics_by_month_product[key]['revenue'] += self._safe_extract_numeric(row, 'subtotal')
+                # Handle quantity safely - convert to correct integer value
+                quantity_str = getattr(row, 'quantity', '0')
+                try:
+                    # Parse the quantity string to integer without any arbitrary adjustments
+                    raw_quantity_val = float(quantity_str) if quantity_str.strip() else 0
+                    quantity_val = int(raw_quantity_val)
+                    
+                    # Log the raw values we're seeing for diagnosis
+                    import logging
+                    logging.info(f"Q2 Raw Quantity: month={month_key}, item={item_name}, raw_str={quantity_str}, parsed={raw_quantity_val}, final={quantity_val}")
+                except (ValueError, TypeError) as e:
+                    quantity_val = 0
+                    logging.warning(f"Q2 Quantity Parse Error: {e}, using default 0")
+                
+                # Aggregate the quantity exactly as it was provided
+                metrics_by_month_product[key]['quantity'] += quantity_val
+                
+                # Handle subtotal/revenue safely
+                revenue_val = self._safe_extract_numeric(row, 'subtotal')
+                metrics_by_month_product[key]['revenue'] += revenue_val
+                
+                # Debug log the metrics to understand what's happening
+                self._log_metrics(month_key, item_name, quantity_val, revenue_val)
             except (ValueError, AttributeError):
                 continue
         
         # Format results by month
         result_by_month = {}
+        
+        # Log summary of aggregation before formatting
+        import logging
+        logging.info("--- Q2 Final Aggregated Metrics Summary ---")
+        for (month, product_name), metrics in sorted(metrics_by_month_product.items()):
+            logging.info(f"Month={month}, Product={product_name}, Total Quantity={metrics['quantity']}, Total Revenue={metrics['revenue']:.2f}")
+        
         for (month, product_name), metrics in metrics_by_month_product.items():
             if month not in result_by_month:
                 result_by_month[month] = {
@@ -103,8 +150,11 @@ class Q2Strategy(BaseQueryStrategy):
                     "by_revenue": []
                 }
             
+            final_quantity = int(metrics['quantity'])
+            logging.info(f"Q2 Final Result: month={month}, product={product_name}, quantity={final_quantity}, revenue={round(metrics['revenue'], 2)}")
+            
             result_by_month[month]["by_quantity"].append(
-                {"name": product_name, "quantity": metrics['quantity']}
+                {"name": product_name, "quantity": final_quantity}
             )
             result_by_month[month]["by_revenue"].append(
                 {"name": product_name, "revenue": round(metrics['revenue'], 2)}
@@ -140,7 +190,14 @@ class Q3Strategy(BaseQueryStrategy):
                     continue
                     
                 store_name = getattr(row, 'store_name', 'Unknown Store')
+                
+                # Get the raw amount string for logging
+                amount_str = getattr(row, 'final_amount', '0')
                 amount = self._safe_extract_numeric(row, 'final_amount')
+                
+                # Log the amount processing for diagnosis
+                import logging
+                logging.info(f"Q3 Amount: store={store_name}, created_at={created_at}, raw_str={amount_str}, parsed={amount}")
                 
                 # The created_at already contains the year-semester
                 year_semester = f"{created_at}"
@@ -159,7 +216,12 @@ class Q3Strategy(BaseQueryStrategy):
         
         # Format the final result
         final_result = defaultdict(dict)
-        for (store_name, year_semester), total_amount in tpv_by_store_semester.items():
+        
+        # Log summary of aggregation before formatting
+        import logging
+        logging.info("--- Q3 Final Aggregated Amounts Summary ---")
+        for (store_name, year_semester), total_amount in sorted(tpv_by_store_semester.items()):
+            logging.info(f"Store={store_name}, Period={year_semester}, Total Amount={total_amount:.2f}")
             final_result[store_name][year_semester] = round(total_amount, 2)
             
         return dict(final_result)
@@ -186,7 +248,17 @@ class Q4Strategy(BaseQueryStrategy):
                 birthdate = getattr(row, 'birthdate', 'Unknown')
                 
                 # The transaction_id field now contains the purchase count from this batch
-                purchase_count = int(getattr(row, 'transaction_id', 0))
+                purchase_count_str = getattr(row, 'transaction_id', '0')
+                
+                try:
+                    purchase_count = int(purchase_count_str) if purchase_count_str.strip() else 0
+                    
+                    # Log the purchase count processing
+                    import logging
+                    logging.info(f"Q4 Purchase Count: store={store_name}, user={user_id}, raw_str={purchase_count_str}, parsed={purchase_count}")
+                except (ValueError, TypeError) as e:
+                    purchase_count = 0
+                    logging.warning(f"Q4 Purchase Count Parse Error: {e}, using default 0")
                 
                 if user_id and purchase_count > 0:
                     # Aggregate purchase counts across batches

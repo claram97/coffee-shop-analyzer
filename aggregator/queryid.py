@@ -1,6 +1,6 @@
-from enum import Enum
+from enum import IntEnum
 
-class QueryId(Enum):
+class QueryId(IntEnum):
     FIRST_QUERY = 1
     SECOND_QUERY = 2
     THIRD_QUERY = 3

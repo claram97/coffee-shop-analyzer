@@ -204,19 +204,17 @@ class FilterRouter:
         rows = rows_of(batch)
         mask = int(getattr(batch, "reserved_u16", 0))
         bn = int(getattr(batch, "batch_number", 0))
-
         if not table:
             self._log.warning("Batch sin table_id válido. bn=%s", bn)
             return
 
         self._log.debug(
-            "recv DataBatch table=%s queries=%s rows=%d mask=%s shard=%s/%s bn=%s",
+            "recv DataBatch table=%s queries=%s rows=%d mask=%s shards_info=%s bn=%s",
             table,
             queries,
             len(rows),
             bin(mask),
-            getattr(batch, "shard_num", 0),
-            getattr(batch, "total_shards", 0),
+            getattr(batch, "shards_info", []),
             bn,
         )
         if self._log.isEnabledFor(logging.DEBUG) and rows:
@@ -251,27 +249,31 @@ class FilterRouter:
 
         dup_count = int(self._pol.get_duplication_count(queries) or 1)
         if dup_count > 1:
-            if mask == 0:
-                self._pending_batches[table] = max(0, self._pending_batches[table] - 1)
-                self._log.debug(
-                    "pending-- (fanout parent) %s -> %d",
-                    table,
-                    self._pending_batches[table],
-                )
-
             self._log.debug(
                 "Fan-out x%d table=%s queries=%s", dup_count, table, queries
             )
-            for i in range(dup_count):
-                try:
+
+            # NO hacer pending-- acá antes de crear hijos; lo hacemos al final del bloque.
+            try:
+                self._pending_batches[table] += dup_count
+                for i in range(dup_count):
                     new_queries = self._pol.get_new_batch_queries(
                         table, queries, copy_number=i
                     ) or list(queries)
                     b = copy.deepcopy(batch)
                     b.query_ids = list(new_queries)
                     self._p.requeue_to_router(b)
-                except Exception as e:
-                    self._log.error("requeue_to_router failed (copy=%d): %s", i, e)
+            except Exception as e:
+                self._log.error("requeue_to_router failed: %s", e)
+
+            # El padre ya “se dividió”, lo damos por terminado en este router
+            self._pending_batches[table] = max(0, self._pending_batches[table] - 1)
+            self._log.debug(
+                "pending-- (fanout parent) %s -> %d",
+                table,
+                self._pending_batches[table],
+            )
+            self._maybe_flush_pending_eof(table)
             return
 
         try:
@@ -308,10 +310,11 @@ class FilterRouter:
             if not subrows:
                 continue
             b = copy.deepcopy(batch)
+            b.shards_info = getattr(batch, "shards_info", []) + [(num_parts, pid)]
             inner = getattr(b, "batch_msg", None)
             if inner is not None and hasattr(inner, "rows"):
                 inner.rows = subrows
-            self._log.info(
+            self._log.debug(
                 "→ aggregator part=%d table=%s rows=%d", int(pid), table, len(subrows)
             )
             self._p.send_to_aggregator_partition(int(pid), b)
@@ -364,17 +367,17 @@ class ExchangeBusProducer:
         self,
         host: str,
         filters_pool_queue: str,
-        router_input_queue: str,
+        in_mw: MessageMiddlewareExchange,
         exchange_fmt: str = "ex.{table}",
         rk_fmt: str = "agg.{table}.{pid:02d}",
     ):
         self._log = logging.getLogger("filter-router.bus")
         self._host = host
         self._filters_pub = MessageMiddlewareQueue(host, filters_pool_queue)
-        self._router_pub = MessageMiddlewareQueue(host, router_input_queue)
         self._exchange_fmt = exchange_fmt
         self._rk_fmt = rk_fmt
         self._pub_cache: dict[tuple[str, str], MessageMiddlewareExchange] = {}
+        self._in_mw = in_mw
 
     def _get_pub(self, table: str, pid: int) -> MessageMiddlewareExchange:
         ex = self._exchange_fmt.format(table=table)
@@ -382,7 +385,7 @@ class ExchangeBusProducer:
         key = (ex, rk)
         pub = self._pub_cache.get(key)
         if pub is None:
-            self._log.info(
+            self._log.debug(
                 "create publisher exchange=%s rk=%s host=%s", ex, rk, self._host
             )
             pub = MessageMiddlewareExchange(
@@ -417,6 +420,26 @@ class ExchangeBusProducer:
                 e,
             )
 
+    def requeue_to_router(self, batch: DataBatch) -> None:
+        """
+        Reenvía un DataBatch de vuelta al router de filtros.
+        Se usa cuando se hace fan-out (duplicación de batches para queries múltiples).
+
+        Args:
+            batch: Instancia de DataBatch a reenviar.
+        """
+        try:
+            self._log.debug(
+                "requeue_to_router: reinyectando batch table=%s queries=%s",
+                table_name_of(batch),
+                queries_of(batch),
+            )
+            batch.batch_bytes = batch.batch_msg.to_bytes()
+            raw = batch.to_bytes()
+            self._in_mw.send(raw)
+        except Exception as e:
+            self._log.error("requeue_to_router failed: %s", e)
+
     def send_table_eof_to_aggregator_partition(
         self, table_name: str, partition_id: int
     ) -> None:
@@ -436,32 +459,24 @@ class ExchangeBusProducer:
                 e,
             )
 
-    def requeue_to_router(self, batch: DataBatch) -> None:
-        try:
-            self._log.debug("requeue → router_input")
-            batch.batch_bytes = batch.batch_msg.to_bytes()
-            self._router_pub.send(batch.to_bytes())
-        except Exception as e:
-            self._log.error("router_input send failed: %s", e)
-
 
 class RouterServer:
     def __init__(
         self,
         host: str,
-        router_input_queue: str,
+        router_in: MessageMiddlewareExchange,
         producer: ExchangeBusProducer,
         policy: QueryPolicyResolver,
         table_cfg: TableConfig,
     ):
-        self._mw_in = MessageMiddlewareQueue(host, router_input_queue)
+        self._mw_in = router_in
         self._router = FilterRouter(
             producer=producer, policy=policy, table_cfg=table_cfg
         )
         self._log = logging.getLogger("filter-router-server")
 
     def run(self) -> None:
-        self._log.info("RouterServer starting consume")
+        self._log.debug("RouterServer starting consume")
 
         def _cb(body: bytes):
             try:
@@ -485,7 +500,7 @@ class RouterServer:
 
         try:
             self._mw_in.start_consuming(_cb)
-            self._log.info("RouterServer consuming (thread started)")
+            self._log.debug("RouterServer consuming (thread started)")
         except Exception as e:
             self._log.exception("start_consuming failed: %s", e)
 

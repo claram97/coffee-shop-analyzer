@@ -72,15 +72,16 @@ func (t TransactionHandler) ProcessRecord(record []string) (map[string]string, e
 		"transaction_id":    record[0],
 		"store_id":          record[1],
 		"payment_method_id": record[2],
-		"user_id":           record[3],
-		"original_amount":   record[4],
-		"discount_applied":  record[5],
-		"final_amount":      record[6],
-		"created_at":        record[7],
+		"voucher_id":        record[3],
+		"user_id":           record[4],
+		"original_amount":   record[5],
+		"discount_applied":  record[6],
+		"final_amount":      record[7],
+		"created_at":        record[8],
 	}, nil
 }
 
-func (t TransactionHandler) GetExpectedFields() int { return 8 }
+func (t TransactionHandler) GetExpectedFields() int { return 9 }
 
 // UserHandler handles users table processing
 type UserHandler struct{}

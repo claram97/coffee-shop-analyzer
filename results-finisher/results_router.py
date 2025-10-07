@@ -61,7 +61,6 @@ class ResultsRouter:
 
         try:
             # The primary responsibility is to route DataBatch messages.
-            # We use the official protocol library for safe and correct parsing.
             if body[0] != Opcodes.DATA_BATCH:
                 logger.warning(f"Received message with unsupported opcode {body[0]}. Discarding.")
                 return
@@ -74,17 +73,16 @@ class ResultsRouter:
             
             # Route based on the first query_id in the list.
             query_id = str(message.query_ids[0])
+            batch_number = message.batch_number
             target_queue_name = self._get_target_queue_name(query_id)
             target_client = self.output_clients[target_queue_name]
             
             target_client.send(body)
-            
-            logger.debug(f"Routed DATA_BATCH for query '{query_id}' to queue '{target_queue_name}'")
+            logger.info(f"Routed DATA_BATCH {batch_number} for query '{query_id}' to queue '{target_queue_name}'")
 
         except ProtocolError as e:
             logger.error(f"Failed to parse message due to protocol error, discarding. Error: {e}. Body prefix: {body[:60]!r}")
         except Exception as e:
-            # Catch-all for unexpected errors to keep the router alive.
             logger.critical(f"An unexpected error occurred in the message handler: {e}", exc_info=True)
 
     def start(self):

@@ -179,6 +179,7 @@ def main(argv=None):
         out_results_mw=out_results,
         data_dir=os.environ.get("JOINER_DATA_DIR", "/data/joiner"),
         logger=logging.getLogger(f"joiner-worker-{shard}"),
+        shard_index=shard,
     )
 
     stop_event = threading.Event()

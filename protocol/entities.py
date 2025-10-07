@@ -118,6 +118,7 @@ class RawTransaction:
         transaction_id: str,
         store_id: str,
         payment_method_id: str,
+        voucher_id: str,
         user_id: str,
         original_amount: str,
         discount_applied: str,
@@ -131,6 +132,7 @@ class RawTransaction:
             transaction_id: The unique identifier for the transaction.
             store_id: The identifier of the store where the transaction occurred.
             payment_method_id: The identifier for the payment method used.
+            voucher_id: The identifier for any voucher applied to the transaction.
             user_id: The identifier of the user who made the purchase.
             original_amount: The total amount before any discounts.
             discount_applied: The amount of discount applied to the transaction.
@@ -140,6 +142,7 @@ class RawTransaction:
         self.transaction_id = transaction_id
         self.store_id = store_id
         self.payment_method_id = payment_method_id
+        self.voucher_id = voucher_id
         self.user_id = user_id
         self.original_amount = original_amount
         self.discount_applied = discount_applied
@@ -203,9 +206,14 @@ class RawTransactionItemMenuItem:
     ):
         self.transaction_id = transaction_id
         self.item_name = item_name
-        self.quantity = quantity
+        # Ensure quantity is never empty/None
+        self.quantity = "0" if quantity is None or quantity == "" else quantity
         self.subtotal = subtotal
         self.created_at = created_at
+        
+    def __str__(self):
+        """String representation for debugging"""
+        return f"RawTransactionItemMenuItem(id={self.transaction_id}, name={self.item_name}, quantity={self.quantity}, subtotal={self.subtotal})"
 
 
 class RawTransactionStoreUser:
@@ -245,8 +253,12 @@ class ResultProductMetrics:
     def __init__(self, month: str, name: str, quantity: str = None, revenue: str = None):
         self.month = month
         self.name = name
-        self.quantity = quantity
-        self.revenue = revenue
+        self.quantity = "0" if quantity is None else quantity
+        self.revenue = revenue or "0"
+        
+    def __str__(self):
+        """String representation for debugging"""
+        return f"ResultProductMetrics(month={self.month}, name={self.name}, quantity={self.quantity}, revenue={self.revenue})"
 
 
 class ResultStoreTPV:

@@ -74,14 +74,14 @@ func (bp *BatchProcessor) handleCancellation(batchBuff *bytes.Buffer, counter *i
 func (bp *BatchProcessor) handleEOF(batchBuff *bytes.Buffer, counter *int32, currentBatchNumber *int64, isLastFile bool) error {
 	if *counter > 0 {
 		(*currentBatchNumber)++ // Increment only when we actually send a batch
-		
+
 		// Choose the appropriate status - EOF only if this is the last file
 		batchStatus := protocol.BatchContinue
 		if isLastFile {
 			batchStatus = protocol.BatchEOF
 			bp.log.Infof("action: send_last_batch | result: setting_eof_status | batch_number: %d", *currentBatchNumber)
 		}
-		
+
 		if err := protocol.FlushBatch(batchBuff, bp.conn, *counter, bp.opCode, *currentBatchNumber, batchStatus); err != nil {
 			return err
 		}
