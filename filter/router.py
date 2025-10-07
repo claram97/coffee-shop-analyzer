@@ -123,11 +123,8 @@ def _group_rows_by_partition(
 
 
 class TableConfig:
-    def __init__(self, table_parts: Dict[str, int]):
-        self._parts = {str(k): int(v) for k, v in table_parts.items()}
-
-    def num_aggregator_partitions(self, table_name: str) -> int:
-        return self._parts.get(str(table_name), 1)
+    def __init__(self, aggregators: int):
+        self.aggregators = aggregators
 
 
 class QueryPolicyResolver:
@@ -292,7 +289,7 @@ class FilterRouter:
             self._p.send_to_aggregator_partition(0, batch)
             return
         rows = rows_of(batch)
-        num_parts = max(1, int(self._cfg.num_aggregator_partitions(table)))
+        num_parts = max(1, int(self._cfg.aggregators))
         self._log.debug(
             "shard plan table=%s parts=%d rows=%d", table, num_parts, len(rows)
         )
@@ -344,7 +341,7 @@ class FilterRouter:
                     "TABLE_EOF deferred: table=%s pending=%d", table, pending
                 )
             return
-        total_parts = max(1, int(self._cfg.num_aggregator_partitions(table)))
+        total_parts = max(1, int(self._cfg.aggregators))
         self._log.info(
             "TABLE_EOF -> aggregators: table=%s parts=%d", table, total_parts
         )

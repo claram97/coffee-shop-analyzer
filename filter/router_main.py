@@ -45,7 +45,7 @@ def build_filter_router_from_config(cfg: Config) -> RouterServer:
         exchange_fmt=cfg.names.filter_router_exchange_fmt,
         rk_fmt=cfg.names.filter_router_rk_fmt,
     )
-    table_cfg = TableConfig(cfg.agg_shards)
+    table_cfg = TableConfig(cfg.workers.aggregators)
     policy = QueryPolicyResolver()
     server = RouterServer(
         host=cfg.broker.host,
