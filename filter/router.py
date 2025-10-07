@@ -204,32 +204,6 @@ class FilterRouter:
         rows = rows_of(batch)
         mask = int(getattr(batch, "reserved_u16", 0))
         bn = int(getattr(batch, "batch_number", 0))
-
-        if batch.batch_msg.opcode == Opcodes.NEW_TRANSACTION:
-            try:
-                if len(rows) > 0:
-                    sample_rows = rows[:2]
-                    all_keys = set()
-                    for row in sample_rows:
-                        all_keys.update(row.__dict__.keys())
-
-                    sample_data = [row.__dict__ for row in sample_rows]
-
-                    logging.info(
-                        "action: batch_preview | batch_number: %d | opcode: %d | keys: %s | sample_count: %d | sample: %s",
-                        getattr(batch.batch_msg, "batch_number", 0),
-                        batch.batch_msg.opcode,
-                        sorted(list(all_keys)),
-                        len(sample_rows),
-                        sample_data,
-                    )
-            except Exception as e:
-                logging.exception(
-                    "action: batch_preview | batch_number: %d | result: skip | exception: %s",
-                    getattr(batch.batch_msg, "batch_number", 0),
-                    e,
-                )
-
         if not table:
             self._log.warning("Batch sin table_id válido. bn=%s", bn)
             return
@@ -275,28 +249,31 @@ class FilterRouter:
 
         dup_count = int(self._pol.get_duplication_count(queries) or 1)
         if dup_count > 1:
-            if mask == 0:
-                self._pending_batches[table] = max(0, self._pending_batches[table] - 1)
-                self._log.debug(
-                    "pending-- (fanout parent) %s -> %d",
-                    table,
-                    self._pending_batches[table],
-                )
-
             self._log.debug(
                 "Fan-out x%d table=%s queries=%s", dup_count, table, queries
             )
-            for i in range(dup_count):
-                try:
+
+            # NO hacer pending-- acá antes de crear hijos; lo hacemos al final del bloque.
+            try:
+                self._pending_batches[table] += dup_count
+                for i in range(dup_count):
                     new_queries = self._pol.get_new_batch_queries(
                         table, queries, copy_number=i
                     ) or list(queries)
-                    b = copy.copy(batch)
+                    b = copy.deepcopy(batch)
                     b.query_ids = list(new_queries)
-                    b.reserved_u16 = 0
-                    self._handle_data(b)
-                except Exception as e:
-                    self._log.error("requeue_to_router failed (copy=%d): %s", i, e)
+                    self._p.requeue_to_router(b)
+            except Exception as e:
+                self._log.error("requeue_to_router failed: %s", e)
+
+            # El padre ya “se dividió”, lo damos por terminado en este router
+            self._pending_batches[table] = max(0, self._pending_batches[table] - 1)
+            self._log.debug(
+                "pending-- (fanout parent) %s -> %d",
+                table,
+                self._pending_batches[table],
+            )
+            self._maybe_flush_pending_eof(table)
             return
 
         try:
@@ -337,7 +314,7 @@ class FilterRouter:
             inner = getattr(b, "batch_msg", None)
             if inner is not None and hasattr(inner, "rows"):
                 inner.rows = subrows
-            self._log.info(
+            self._log.debug(
                 "→ aggregator part=%d table=%s rows=%d", int(pid), table, len(subrows)
             )
             self._p.send_to_aggregator_partition(int(pid), b)
@@ -390,6 +367,7 @@ class ExchangeBusProducer:
         self,
         host: str,
         filters_pool_queue: str,
+        in_mw: MessageMiddlewareExchange,
         exchange_fmt: str = "ex.{table}",
         rk_fmt: str = "agg.{table}.{pid:02d}",
     ):
@@ -399,6 +377,7 @@ class ExchangeBusProducer:
         self._exchange_fmt = exchange_fmt
         self._rk_fmt = rk_fmt
         self._pub_cache: dict[tuple[str, str], MessageMiddlewareExchange] = {}
+        self._in_mw = in_mw
 
     def _get_pub(self, table: str, pid: int) -> MessageMiddlewareExchange:
         ex = self._exchange_fmt.format(table=table)
@@ -406,7 +385,7 @@ class ExchangeBusProducer:
         key = (ex, rk)
         pub = self._pub_cache.get(key)
         if pub is None:
-            self._log.info(
+            self._log.debug(
                 "create publisher exchange=%s rk=%s host=%s", ex, rk, self._host
             )
             pub = MessageMiddlewareExchange(
@@ -440,6 +419,26 @@ class ExchangeBusProducer:
                 int(partition_id),
                 e,
             )
+
+    def requeue_to_router(self, batch: DataBatch) -> None:
+        """
+        Reenvía un DataBatch de vuelta al router de filtros.
+        Se usa cuando se hace fan-out (duplicación de batches para queries múltiples).
+
+        Args:
+            batch: Instancia de DataBatch a reenviar.
+        """
+        try:
+            self._log.debug(
+                "requeue_to_router: reinyectando batch table=%s queries=%s",
+                table_name_of(batch),
+                queries_of(batch),
+            )
+            batch.batch_bytes = batch.batch_msg.to_bytes()
+            raw = batch.to_bytes()
+            self._in_mw.send(raw)
+        except Exception as e:
+            self._log.error("requeue_to_router failed: %s", e)
 
     def send_table_eof_to_aggregator_partition(
         self, table_name: str, partition_id: int
@@ -477,7 +476,7 @@ class RouterServer:
         self._log = logging.getLogger("filter-router-server")
 
     def run(self) -> None:
-        self._log.info("RouterServer starting consume")
+        self._log.debug("RouterServer starting consume")
 
         def _cb(body: bytes):
             try:
@@ -501,7 +500,7 @@ class RouterServer:
 
         try:
             self._mw_in.start_consuming(_cb)
-            self._log.info("RouterServer consuming (thread started)")
+            self._log.debug("RouterServer consuming (thread started)")
         except Exception as e:
             self._log.exception("start_consuming failed: %s", e)
 
