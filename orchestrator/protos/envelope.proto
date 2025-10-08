@@ -6,6 +6,7 @@ option go_package = "github.com/fede/coffee-shop-analyzer/protos;protocol";
 import "eof_message.proto";
 import "table_data.proto";
 import "query_request.proto";
+import "databatch.proto";
 
 message Envelope {
   enum Opcode {
@@ -16,6 +17,7 @@ message Envelope {
     BATCH_RECV_SUrCESS = 4;
     BATCH_RECV_FAIL = 5;
     QUERY_REQUEST = 6;
+    DATA_BATCH = 7;
   }
 
   Opcode type = 1;
@@ -24,5 +26,6 @@ message Envelope {
     EOFMessage eof = 2;
     TableData table_data = 3;
     QueryRequest query_request = 4;
+    DataBatch data_batch = 5;
   }
 }

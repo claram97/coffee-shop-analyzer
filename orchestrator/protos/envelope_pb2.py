@@ -25,9 +25,10 @@ _sym_db = _symbol_database.Default()
 from . import eof_message_pb2 as eof__message__pb2
 from . import table_data_pb2 as table__data__pb2
 from . import query_request_pb2 as query__request__pb2
+from . import databatch_pb2 as databatch__pb2
 
 
-DESCRIPTOR = _descriptor_pool.Default().AddSerializedFile(b'\n\x0e\x65nvelope.proto\x12\x08protocol\x1a\x11\x65of_message.proto\x1a\x10table_data.proto\x1a\x13query_request.proto\"\xbd\x02\n\x08\x45nvelope\x12\'\n\x04type\x18\x01 \x01(\x0e\x32\x19.protocol.Envelope.Opcode\x12#\n\x03\x65of\x18\x02 \x01(\x0b\x32\x14.protocol.EOFMessageH\x00\x12)\n\ntable_data\x18\x03 \x01(\x0b\x32\x13.protocol.TableDataH\x00\x12/\n\rquery_request\x18\x04 \x01(\x0b\x32\x16.protocol.QueryRequestH\x00\"|\n\x06Opcode\x12\x0b\n\x07UNKNOWN\x10\x00\x12\x07\n\x03\x45OF\x10\x01\x12\x0c\n\x08\x46INISHED\x10\x02\x12\x0e\n\nTABLE_DATA\x10\x03\x12\x16\n\x12\x42\x41TCH_RECV_SUrCESS\x10\x04\x12\x13\n\x0f\x42\x41TCH_RECV_FAIL\x10\x05\x12\x11\n\rQUERY_REQUEST\x10\x06\x42\t\n\x07payloadB6Z4github.com/fede/coffee-shop-analyzer/protos;protocolb\x06proto3')
+DESCRIPTOR = _descriptor_pool.Default().AddSerializedFile(b'\n\x0e\x65nvelope.proto\x12\x08protocol\x1a\x11\x65of_message.proto\x1a\x10table_data.proto\x1a\x13query_request.proto\x1a\x0f\x64\x61tabatch.proto\"\xf9\x02\n\x08\x45nvelope\x12\'\n\x04type\x18\x01 \x01(\x0e\x32\x19.protocol.Envelope.Opcode\x12#\n\x03\x65of\x18\x02 \x01(\x0b\x32\x14.protocol.EOFMessageH\x00\x12)\n\ntable_data\x18\x03 \x01(\x0b\x32\x13.protocol.TableDataH\x00\x12/\n\rquery_request\x18\x04 \x01(\x0b\x32\x16.protocol.QueryRequestH\x00\x12)\n\ndata_batch\x18\x05 \x01(\x0b\x32\x13.protocol.DataBatchH\x00\"\x8c\x01\n\x06Opcode\x12\x0b\n\x07UNKNOWN\x10\x00\x12\x07\n\x03\x45OF\x10\x01\x12\x0c\n\x08\x46INISHED\x10\x02\x12\x0e\n\nTABLE_DATA\x10\x03\x12\x16\n\x12\x42\x41TCH_RECV_SUrCESS\x10\x04\x12\x13\n\x0f\x42\x41TCH_RECV_FAIL\x10\x05\x12\x11\n\rQUERY_REQUEST\x10\x06\x12\x0e\n\nDATA_BATCH\x10\x07\x42\t\n\x07payloadB6Z4github.com/fede/coffee-shop-analyzer/protos;protocolb\x06proto3')
 
 _globals = globals()
 _builder.BuildMessageAndEnumDescriptors(DESCRIPTOR, _globals)
@@ -35,8 +36,8 @@ _builder.BuildTopDescriptorsAndMessages(DESCRIPTOR, 'envelope_pb2', _globals)
 if not _descriptor._USE_C_DESCRIPTORS:
   _globals['DESCRIPTOR']._loaded_options = None
   _globals['DESCRIPTOR']._serialized_options = b'Z4github.com/fede/coffee-shop-analyzer/protos;protocol'
-  _globals['_ENVELOPE']._serialized_start=87
-  _globals['_ENVELOPE']._serialized_end=404
-  _globals['_ENVELOPE_OPCODE']._serialized_start=269
-  _globals['_ENVELOPE_OPCODE']._serialized_end=393
+  _globals['_ENVELOPE']._serialized_start=104
+  _globals['_ENVELOPE']._serialized_end=481
+  _globals['_ENVELOPE_OPCODE']._serialized_start=330
+  _globals['_ENVELOPE_OPCODE']._serialized_end=470
 # @@protoc_insertion_point(module_scope)

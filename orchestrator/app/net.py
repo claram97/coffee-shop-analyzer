@@ -129,9 +129,56 @@ class Orchestrator:
         finally:
             client_sock.close()
 
+    def _convert_table_data_to_databatch(self, table_data):
+        """Convert TableData to DataBatch protobuf format.
+        
+        DataBatch wraps TableData with routing metadata for the Filter Router.
+        """
+        from protos import databatch_pb2, table_data_pb2
+        
+        data_batch = databatch_pb2.DataBatch()
+        
+        # Map TableName to Query IDs that need this data
+        table_to_queries = {
+            table_data_pb2.TableName.TRANSACTIONS: [
+                databatch_pb2.Query.Q1,
+                databatch_pb2.Query.Q3,
+                databatch_pb2.Query.Q4,
+            ],
+            table_data_pb2.TableName.TRANSACTION_ITEMS: [
+                databatch_pb2.Query.Q2,
+            ],
+            table_data_pb2.TableName.MENU_ITEMS: [
+                databatch_pb2.Query.Q2,
+            ],
+            table_data_pb2.TableName.STORES: [
+                databatch_pb2.Query.Q3,
+            ],
+            table_data_pb2.TableName.USERS: [ 
+                databatch_pb2.Query.Q4,
+            ],
+        }
+        
+        # Set query IDs based on table name
+        query_ids = table_to_queries.get(table_data.name, [])
+        data_batch.query_ids.extend(query_ids)
+        
+        # Initialize routing metadata (will be set by Filter Router)
+        # TO-DO: revisar esto!
+        data_batch.total_copies = 1
+        data_batch.copy_num = 0
+        data_batch.total_shards = 1
+        data_batch.shard_num = 0
+        data_batch.filter_steps = 0
+        
+        # Wrap the TableData as payload
+        data_batch.payload.CopyFrom(table_data)
+        
+        return data_batch
+
     def _process_table_data_message(self, envelope, client_sock) -> bool:
-        """Process TABLE_DATA envelope."""
-        from protos import envelope_pb2, table_data_pb2
+        """Process TABLE_DATA envelope and convert to DataBatch protobuf."""
+        from protos import envelope_pb2, table_data_pb2, databatch_pb2
         
         try:
             if not envelope.HasField('table_data'):
@@ -152,15 +199,25 @@ class Orchestrator:
                 batch_status
             )
             
-            # Serialize and forward to RabbitMQ
-            table_bytes = table_data.SerializeToString()
-            self._send_to_filter_router_exchange(table_bytes, table_data.batch_number)
+            # Convert TableData to DataBatch protobuf
+            data_batch = self._convert_table_data_to_databatch(table_data)
             
+            # Create Envelope with DataBatch
+            batch_envelope = envelope_pb2.Envelope()
+            batch_envelope.type = envelope_pb2.Envelope.DATA_BATCH
+            batch_envelope.data_batch.CopyFrom(data_batch)
+            
+            # Serialize and forward to RabbitMQ
+            envelope_bytes = batch_envelope.SerializeToString()
+            self._send_to_filter_router_exchange(envelope_bytes, table_data.batch_number)
+            
+            query_names = [databatch_pb2.Query.Name(q) for q in data_batch.query_ids]
             logging.info(
-                "action: table_data_forwarded | table: %s | batch: %d | bytes: %d",
+                "action: databatch_forwarded | table: %s | batch: %d | queries: %s | bytes: %d",
                 table_name,
                 table_data.batch_number,
-                len(table_bytes)
+                query_names,
+                len(envelope_bytes)
             )
             
             # Send success response
