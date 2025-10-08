@@ -159,7 +159,7 @@ def main():
         (Opcodes.NEW_STORES, "stores"),
     ]
     for tid, tname in tables_for_input:
-        parts = cfg.agg_partitions(tname)
+        parts = cfg.workers.aggregators
         for pid in range(parts):
             q = cfg.aggregator_to_joiner_router_queue(tname, pid)
             in_queues.append(q)

@@ -140,11 +140,6 @@ class Config:
         r_filters = cp.getint("filters", "routers", fallback=1)
         self.routers = RoutersCfg(r_filters)
 
-    def agg_partitions(self, table: str) -> int:
-        """Particiones de salida del Filter Router para TABLE (consumen Aggregators)."""
-        t = str(table).strip()
-        return int(self.agg_shards.get(t, 1))
-
     def joiner_partitions(self, table: str) -> int:
         """Shards de salida del Joiner Router para TABLE (consumen Joiners)."""
         t = str(table).strip()

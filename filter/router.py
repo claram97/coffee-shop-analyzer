@@ -98,6 +98,23 @@ def _pick_key_field(table_name: str, queries: List[int]) -> Optional[str]:
     return None
 
 
+def _clone_with_rows(
+    batch: DataBatch, subrows: list, parts_info: tuple[int, int] | None = None
+) -> DataBatch:
+    # copia shallow del batch
+    b = copy.copy(batch)
+    # copia shallow del mensaje interno (sin duplicar filas)
+    inner = copy.copy(batch.batch_msg)
+    inner.rows = subrows
+    b.batch_msg = inner
+    # shards_info + serialización una sola vez
+    if parts_info:
+        parts, pid = parts_info
+        b.shards_info = getattr(batch, "shards_info", []) + [(parts, pid)]
+    b.batch_bytes = b.batch_msg.to_bytes()
+    return b
+
+
 def _group_rows_by_partition(
     table_name: str,
     queries: List[int],
@@ -123,11 +140,8 @@ def _group_rows_by_partition(
 
 
 class TableConfig:
-    def __init__(self, table_parts: Dict[str, int]):
-        self._parts = {str(k): int(v) for k, v in table_parts.items()}
-
-    def num_aggregator_partitions(self, table_name: str) -> int:
-        return self._parts.get(str(table_name), 1)
+    def __init__(self, aggregators: int):
+        self.aggregators = aggregators
 
 
 class QueryPolicyResolver:
@@ -260,8 +274,12 @@ class FilterRouter:
                     new_queries = self._pol.get_new_batch_queries(
                         table, queries, copy_number=i
                     ) or list(queries)
-                    b = copy.deepcopy(batch)
+                    b = copy.copy(batch)
+                    inner = copy.copy(batch.batch_msg)
+                    inner.rows = getattr(batch.batch_msg, "rows", [])
+                    b.batch_msg = inner
                     b.query_ids = list(new_queries)
+                    b.batch_bytes = b.batch_msg.to_bytes()
                     self._p.requeue_to_router(b)
             except Exception as e:
                 self._log.error("requeue_to_router failed: %s", e)
@@ -292,7 +310,7 @@ class FilterRouter:
             self._p.send_to_aggregator_partition(0, batch)
             return
         rows = rows_of(batch)
-        num_parts = max(1, int(self._cfg.num_aggregator_partitions(table)))
+        num_parts = max(1, int(self._cfg.aggregators))
         self._log.debug(
             "shard plan table=%s parts=%d rows=%d", table, num_parts, len(rows)
         )
@@ -309,11 +327,7 @@ class FilterRouter:
         for pid, subrows in by_part.items():
             if not subrows:
                 continue
-            b = copy.deepcopy(batch)
-            b.shards_info = getattr(batch, "shards_info", []) + [(num_parts, pid)]
-            inner = getattr(b, "batch_msg", None)
-            if inner is not None and hasattr(inner, "rows"):
-                inner.rows = subrows
+            b = _clone_with_rows(batch, subrows, (num_parts, int(pid)))
             self._log.debug(
                 "→ aggregator part=%d table=%s rows=%d", int(pid), table, len(subrows)
             )
@@ -344,7 +358,7 @@ class FilterRouter:
                     "TABLE_EOF deferred: table=%s pending=%d", table, pending
                 )
             return
-        total_parts = max(1, int(self._cfg.num_aggregator_partitions(table)))
+        total_parts = max(1, int(self._cfg.aggregators))
         self._log.info(
             "TABLE_EOF -> aggregators: table=%s parts=%d", table, total_parts
         )

@@ -48,12 +48,23 @@ def _hash_to_shard(s: str, num_shards: int) -> int:
     return int.from_bytes(h, "little") % num_shards
 
 
+def _norm_user_id(v: Any) -> Optional[str]:
+    if v is None:
+        return None
+    s = str(v)
+    return s.split(".", 1)[0] if s.endswith(".0") else s
+
+
 def _shard_key_for_row(table_id: int, row, queries: List[int]) -> Optional[str]:
     q = set(queries)
 
+    if table_id == Opcodes.NEW_USERS:
+        uid = getattr(row, "user_id", None)
+        return _norm_user_id(uid)
+
     if 4 in q:
-        key = getattr(row, "user_id", None)
-        return str(key) if key is not None else None
+        uid = getattr(row, "user_id", None)
+        return _norm_user_id(uid)
 
     if 2 in q and table_id == Opcodes.NEW_TRANSACTION_ITEMS:
         key = getattr(row, "item_id", None)
@@ -317,7 +328,7 @@ def build_route_cfg_from_config(cfg: "Config") -> Dict[int, TableRouteCfg]:
     route: Dict[int, TableRouteCfg] = {}
 
     for tname, tid in NAME_TO_ID.items():
-        agg_parts = cfg.agg_partitions(tname)
+        agg_parts = cfg.workers.aggregators
         if tname in LIGHT_TABLES:
             j_parts = cfg.joiner_partitions(tname)
             if j_parts <= 1:
@@ -358,14 +369,6 @@ def build_publisher_pool_from_config(cfg: "Config") -> ExchangePublisherPool:
 
     log.info("Publisher pool factory using host=%s", cfg.broker.host)
     return ExchangePublisherPool(factory)
-
-
-def build_joiner_router_from_config(cfg: "Config", in_queue: str) -> JoinerRouter:
-    log.info("Build JoinerRouter from queue=%s host=%s", in_queue, cfg.broker.host)
-    in_mw = MessageMiddlewareQueue(cfg.broker.host, in_queue)
-    pool = build_publisher_pool_from_config(cfg)
-    route_cfg = build_route_cfg_from_config(cfg)
-    return JoinerRouter(in_mw=in_mw, publisher_pool=pool, route_cfg=route_cfg)
 
 
 class JoinerRouterServer:
