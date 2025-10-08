@@ -212,6 +212,9 @@ class DataBatch:
         framed.append(int(inner_opcode))
         framed.extend(len(inner_body).to_bytes(4, "little", signed=True))
         framed.extend(inner_body)
+        # Log para depuración del framing del mensaje embebido
+        import logging
+        logging.debug(f"[make_embedded] opcode={inner_opcode} len={len(inner_body)} framed[:24]={framed[:24].hex()} client_id_bytes={inner_body[13:17].hex() if len(inner_body) >= 17 else 'short'}")
         return bytes(framed)
 
     def _read_data_batch_header(self, reader: BytesReader, remaining: int) -> int:

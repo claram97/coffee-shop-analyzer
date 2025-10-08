@@ -8,27 +8,26 @@ import logging
 from typing import Dict, List
 
 
-def serialize_header(n_rows: int, batch_number: int, batch_status: int) -> bytearray:
+def serialize_header(n_rows: int, batch_number: int, batch_status: int, client_id: int) -> bytearray:
     """
     Serializes a common header for filtered data messages.
 
-    The header format is: [i32 nRows][i64 batchNumber][u8 status]
+    The header format is: [i32 nRows][i64 batchNumber][u8 status][i32 client_id]
 
     Args:
         n_rows: The total number of rows in the batch.
         batch_number: The sequence number of the batch.
         batch_status: The status code for the batch (e.g., Continue, EOF).
+        client_id: The client identifier (int).
 
     Returns:
         A bytearray containing the serialized header.
     """
     body = bytearray()
-    # [i32 nRows]: 4-byte little-endian signed integer
     body.extend(n_rows.to_bytes(4, "little", signed=True))
-    # [i64 batchNumber]: 8-byte little-endian signed integer
     body.extend(batch_number.to_bytes(8, "little", signed=True))
-    # [u8 status]: 1-byte unsigned integer
     body.extend(batch_status.to_bytes(1, "little", signed=False))
+    body.extend(client_id.to_bytes(4, "little", signed=True))
     return body
 
 
@@ -92,6 +91,7 @@ def serialize_filtered_data(
     batch_status: int,
     required_keys: List[str],
     table_name: str,
+    client_id: int = 1,
 ) -> bytes:
     """
     A generic function that serializes a list of filtered rows into a complete
@@ -110,7 +110,7 @@ def serialize_filtered_data(
     n_rows = len(filtered_rows)
 
     # Start with the common header
-    body = serialize_header(n_rows, batch_number, batch_status)
+    body = serialize_header(n_rows, batch_number, batch_status, client_id)
 
     # Append each serialized row
     for row in filtered_rows:
@@ -123,7 +123,7 @@ def serialize_filtered_data(
 
 
 def serialize_filtered_menu_items(
-    filtered_rows: List[Dict], batch_number: int, batch_status: int
+    filtered_rows: List[Dict], batch_number: int, batch_status: int, client_id: int = 1
 ) -> bytes:
     """
     Serializes filtered menu items data using a predefined set of required keys.
@@ -140,12 +140,12 @@ def serialize_filtered_menu_items(
     """
     required_keys = ["product_id", "name", "price"]
     return serialize_filtered_data(
-        filtered_rows, batch_number, batch_status, required_keys, "menu_items"
+        filtered_rows, batch_number, batch_status, required_keys, "menu_items", client_id
     )
 
 
 def serialize_filtered_stores(
-    filtered_rows: List[Dict], batch_number: int, batch_status: int
+    filtered_rows: List[Dict], batch_number: int, batch_status: int, client_id: int = 1
 ) -> bytes:
     """
     Serializes filtered store data using a predefined set of required keys.
@@ -162,12 +162,12 @@ def serialize_filtered_stores(
     """
     required_keys = ["store_id", "store_name"]
     return serialize_filtered_data(
-        filtered_rows, batch_number, batch_status, required_keys, "stores"
+        filtered_rows, batch_number, batch_status, required_keys, "stores", client_id
     )
 
 
 def serialize_filtered_transaction_items(
-    filtered_rows: List[Dict], batch_number: int, batch_status: int
+    filtered_rows: List[Dict], batch_number: int, batch_status: int, client_id: int = 1
 ) -> bytes:
     """
     Serializes filtered transaction item data using a predefined set of required keys.
@@ -184,12 +184,12 @@ def serialize_filtered_transaction_items(
     """
     required_keys = ["transaction_id", "item_id", "quantity", "subtotal", "created_at"]
     return serialize_filtered_data(
-        filtered_rows, batch_number, batch_status, required_keys, "transaction_items"
+        filtered_rows, batch_number, batch_status, required_keys, "transaction_items", client_id
     )
 
 
 def serialize_filtered_transactions(
-    filtered_rows: List[Dict], batch_number: int, batch_status: int
+    filtered_rows: List[Dict], batch_number: int, batch_status: int, client_id: int = 1
 ) -> bytes:
     """
     Serializes filtered transaction data using a predefined set of required keys.
@@ -212,12 +212,12 @@ def serialize_filtered_transactions(
         "created_at",
     ]
     return serialize_filtered_data(
-        filtered_rows, batch_number, batch_status, required_keys, "transactions"
+        filtered_rows, batch_number, batch_status, required_keys, "transactions", client_id
     )
 
 
 def serialize_filtered_users(
-    filtered_rows: List[Dict], batch_number: int, batch_status: int
+    filtered_rows: List[Dict], batch_number: int, batch_status: int, client_id: int = 1
 ) -> bytes:
     """
     Serializes filtered user data using a predefined set of required keys.
@@ -234,6 +234,6 @@ def serialize_filtered_users(
     """
     required_keys = ["user_id", "birthdate"]
     return serialize_filtered_data(
-        filtered_rows, batch_number, batch_status, required_keys, "users"
+        filtered_rows, batch_number, batch_status, required_keys, "users", client_id
     )
 

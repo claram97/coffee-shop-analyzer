@@ -523,58 +523,40 @@ class EOFMessage(TableMessage):
         return self.table_type
 
     def to_bytes(self) -> bytes:
-        """Serialize the EOF message to bytes following TableMessage protocol.
-
-        Format: [opcode:u8][length:i32][nRows:i32][batchNumber:i64][status:u8][n_pairs:i32]["table_type"][table_type_value]
-
-        Returns:
-            The serialized message as bytes
-        """
         import struct
 
-        # Build the body first to calculate length
         body_parts = []
 
-        # nRows (i32) - should be 1 for EOF with table_type info
-        body_parts.append(struct.pack("<I", 1))  # Little endian uint32
+        # nRows (i32)
+        body_parts.append(struct.pack("<I", 1))
 
         # batchNumber (i64)
-        body_parts.append(struct.pack("<Q", self.batch_number))  # Little endian uint64
+        body_parts.append(struct.pack("<Q", self.batch_number))
 
         # status (u8)
         from .constants import BatchStatus
+        body_parts.append(struct.pack("<B", BatchStatus.EOF))
 
-        body_parts.append(struct.pack("<B", BatchStatus.EOF))  # uint8
+        # client_id (i32) - ¡nuevo campo agregado!
+        client_id = getattr(self, "client_id", 1)
+        body_parts.append(struct.pack("<I", client_id))
 
         # Row data: ["table_type", table_type_value]
-        # n_pairs (i32) = 1
-        body_parts.append(struct.pack("<I", 1))
-
-        # Key: "table_type"
+        body_parts.append(struct.pack("<I", 1))  # n_pairs
         key = "table_type"
         key_bytes = key.encode("utf-8")
-        body_parts.append(struct.pack("<I", len(key_bytes)))  # key length
-        body_parts.append(key_bytes)  # key data
+        body_parts.append(struct.pack("<I", len(key_bytes)))
+        body_parts.append(key_bytes)
+        value_bytes = self.table_type.encode("utf-8") if hasattr(self, "table_type") and self.table_type else b"unknown"
+        body_parts.append(struct.pack("<I", len(value_bytes)))
+        body_parts.append(value_bytes)
 
-        # Value: self.table_type
-        if hasattr(self, "table_type") and self.table_type:
-            value_bytes = self.table_type.encode("utf-8")
-        else:
-            # Fallback if table_type not set
-            value_bytes = b"unknown"
-
-        body_parts.append(struct.pack("<I", len(value_bytes)))  # value length
-        body_parts.append(value_bytes)  # value data
-
-        # Join all body parts
         body = b"".join(body_parts)
-
-        # Create complete message: [opcode:u8][length:i32][body]
-        message_parts = []
-        message_parts.append(struct.pack("<B", self.opcode))  # opcode (u8)
-        message_parts.append(struct.pack("<I", len(body)))  # length (i32)
-        message_parts.append(body)  # body
-
+        message_parts = [
+            struct.pack("<B", self.opcode),
+            struct.pack("<I", len(body)),
+            body,
+        ]
         return b"".join(message_parts)
 
 

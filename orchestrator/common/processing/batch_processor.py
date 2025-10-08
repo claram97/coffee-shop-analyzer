@@ -169,6 +169,9 @@ class BatchProcessor:
         inner_body = serialize_func(
             filtered_rows, original_msg.batch_number, original_msg.batch_status
         )
+        # Log primeros bytes del inner_body para depuración de header y client_id
+        import logging
+        logging.debug(f"[filter_and_serialize_data] inner_body[:24]={inner_body[:24].hex()} opcode={original_msg.opcode} batch_number={original_msg.batch_number} status={original_msg.batch_status}")
 
         return filtered_rows, inner_body
 
@@ -273,9 +276,16 @@ class BatchProcessor:
 
         filtered_rows, inner_body = self.filter_and_serialize_data(original_msg)
 
+        # Log antes de envolver el inner_body en DataBatch
+        import logging
+        logging.debug(f"[create_filtered_data_batch] inner_body[:24]={inner_body[:24].hex()} opcode={original_msg.opcode} batch_number={original_msg.batch_number} status={original_msg.batch_status}")
+
         batch_bytes = DataBatch.make_embedded(
             inner_opcode=original_msg.opcode, inner_body=inner_body
         )
+
+        # Log los primeros bytes del batch_bytes (DataBatch embebido)
+        logging.debug(f"[create_filtered_data_batch] batch_bytes[:32]={batch_bytes[:32].hex()} opcode={original_msg.opcode} batch_number={original_msg.batch_number}")
 
         self.log_data_batch_creation(
             original_msg, query_ids, filtered_rows, inner_body, batch_bytes
