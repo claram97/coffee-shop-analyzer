@@ -1,6 +1,10 @@
 """
 Provides file and logging utilities for debugging the message processing pipeline
 by writing the contents of messages to disk.
+
+⚠️ DEPRECATED: This module is part of the legacy custom protocol debugging utilities.
+With the protobuf migration, message debugging should use protobuf text format or
+standard logging. This module is kept for backward compatibility only.
 """
 
 import logging

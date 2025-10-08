@@ -1,35 +1,37 @@
 package common
 
 import (
-	"bytes"
 	"context"
+	"encoding/binary"
 	"encoding/csv"
 	"errors"
+	"fmt"
 	"io"
 	"net"
 
 	"github.com/op/go-logging"
+	"google.golang.org/protobuf/proto"
 
-	// Import protocol definitions
-	protocol "github.com/7574-sistemas-distribuidos/docker-compose-init/client/protocol"
+	// Import protobuf definitions
+	pb "github.com/7574-sistemas-distribuidos/docker-compose-init/client/protos"
 )
 
 // BatchProcessor handles batch processing logic
 type BatchProcessor struct {
 	conn       net.Conn
 	handler    TableRowHandler
-	opCode     byte
+	tableName  pb.TableName
 	batchLimit int32
 	clientID   string
 	log        *logging.Logger
 }
 
 // NewBatchProcessor creates a new batch processor
-func NewBatchProcessor(conn net.Conn, handler TableRowHandler, opCode byte, batchLimit int32, clientID string, logger *logging.Logger) *BatchProcessor {
+func NewBatchProcessor(conn net.Conn, handler TableRowHandler, tableName pb.TableName, batchLimit int32, clientID string, logger *logging.Logger) *BatchProcessor {
 	return &BatchProcessor{
 		conn:       conn,
 		handler:    handler,
-		opCode:     opCode,
+		tableName:  tableName,
 		batchLimit: batchLimit,
 		clientID:   clientID,
 		log:        logger,
@@ -37,8 +39,8 @@ func NewBatchProcessor(conn net.Conn, handler TableRowHandler, opCode byte, batc
 }
 
 // processNextRow reads a single CSV record from reader, converts it
-// to the protocol key/value map and attempts to add it to the current batch buffer
-func (bp *BatchProcessor) processNextRow(reader *csv.Reader, batchBuff *bytes.Buffer, counter *int32, batchNumber *int64) error {
+// to a protobuf Row and adds it to the batch rows slice
+func (bp *BatchProcessor) processNextRow(reader *csv.Reader, rows *[]*pb.Row, counter *int32, batchNumber *int64) error {
 	record, err := reader.Read()
 	if err != nil {
 		return err
@@ -50,18 +52,97 @@ func (bp *BatchProcessor) processNextRow(reader *csv.Reader, batchBuff *bytes.Bu
 		return err
 	}
 
-	// Call the low-level generic function
-	if err := protocol.AddRowToBatch(rowMap, batchBuff, bp.conn, counter, bp.batchLimit, bp.opCode, batchNumber); err != nil {
-		return err
+	// Convert map to Row with values in consistent order
+	// The schema will define the column order
+	values := make([]string, 0, len(rowMap))
+	for _, v := range rowMap {
+		values = append(values, v)
 	}
+
+	// Create protobuf Row
+	row := &pb.Row{
+		Values: values,
+	}
+
+	// Add row to batch
+	*rows = append(*rows, row)
+	*counter++
+
+	// Check if we need to flush the batch
+	if *counter >= bp.batchLimit {
+		(*batchNumber)++
+		if err := bp.flushBatch(*rows, *counter, *batchNumber, pb.BatchStatus_CONTINUE); err != nil {
+			return err
+		}
+		// Reset for next batch
+		*rows = make([]*pb.Row, 0, bp.batchLimit)
+		*counter = 0
+	}
+
 	return nil
 }
 
+// flushBatch sends a batch of rows as a TableData message
+func (bp *BatchProcessor) flushBatch(rows []*pb.Row, counter int32, batchNumber int64, status pb.BatchStatus) error {
+	// Create TableData message
+	tableData := &pb.TableData{
+		Name:        bp.tableName,
+		Schema:      bp.getSchema(),
+		Rows:        rows,
+		BatchNumber: uint64(batchNumber),
+		Status:      status,
+	}
+
+	// Create Envelope
+	envelope := &pb.Envelope{
+		Type: pb.Envelope_TABLE_DATA,
+		Payload: &pb.Envelope_TableData{
+			TableData: tableData,
+		},
+	}
+
+	// Serialize
+	msgBytes, err := proto.Marshal(envelope)
+	if err != nil {
+		bp.log.Errorf("action: flush_batch | result: fail | error: marshal: %v", err)
+		return err
+	}
+
+	// Write size (4 bytes big-endian)
+	msgSize := uint32(len(msgBytes))
+	if err := binary.Write(bp.conn, binary.BigEndian, msgSize); err != nil {
+		bp.log.Errorf("action: flush_batch | result: fail | error: write_size: %v", err)
+		return err
+	}
+
+	// Write data
+	if _, err := bp.conn.Write(msgBytes); err != nil {
+		bp.log.Errorf("action: flush_batch | result: fail | error: write_data: %v", err)
+		return err
+	}
+
+	bp.log.Debugf("action: flush_batch | result: success | table: %s | batch: %d | rows: %d | status: %v",
+		bp.tableName, batchNumber, counter, status)
+
+	return nil
+}
+
+// getSchema returns the schema for this table type
+func (bp *BatchProcessor) getSchema() *pb.TableSchema {
+	// Get the column names from the handler's ProcessRecord method
+	// For now, we'll use generic column names based on the expected fields
+	columns := make([]string, bp.handler.GetExpectedFields())
+	for i := range columns {
+		columns[i] = fmt.Sprintf("column_%d", i)
+	}
+	return &pb.TableSchema{Columns: columns}
+}
+
 // handleCancellation handles context cancellation and sends pending batch if there's data
-func (bp *BatchProcessor) handleCancellation(batchBuff *bytes.Buffer, counter *int32, currentBatchNumber *int64) error {
+func (bp *BatchProcessor) handleCancellation(rows []*pb.Row, counter *int32, currentBatchNumber *int64) error {
 	if *counter > 0 {
 		(*currentBatchNumber)++ // Increment only when we actually send a batch
-		if err := protocol.FlushBatch(batchBuff, bp.conn, *counter, bp.opCode, *currentBatchNumber, protocol.BatchCancel); err != nil {
+		if err := bp.flushBatch(rows, *counter, *currentBatchNumber, pb.BatchStatus_CANCEL); err != nil {
 			return err
 		}
 		*counter = 0
@@ -71,18 +152,18 @@ func (bp *BatchProcessor) handleCancellation(batchBuff *bytes.Buffer, counter *i
 
 // handleEOF handles end of file and sends pending batch if there's data
 // isLastFile indicates whether this is the last file for this table type
-func (bp *BatchProcessor) handleEOF(batchBuff *bytes.Buffer, counter *int32, currentBatchNumber *int64, isLastFile bool) error {
+func (bp *BatchProcessor) handleEOF(rows []*pb.Row, counter *int32, currentBatchNumber *int64, isLastFile bool) error {
 	if *counter > 0 {
 		(*currentBatchNumber)++ // Increment only when we actually send a batch
 
 		// Choose the appropriate status - EOF only if this is the last file
-		batchStatus := protocol.BatchContinue
+		batchStatus := pb.BatchStatus_CONTINUE
 		if isLastFile {
-			batchStatus = protocol.BatchEOF
+			batchStatus = pb.BatchStatus_EOF
 			bp.log.Infof("action: send_last_batch | result: setting_eof_status | batch_number: %d", *currentBatchNumber)
 		}
 
-		if err := protocol.FlushBatch(batchBuff, bp.conn, *counter, bp.opCode, *currentBatchNumber, batchStatus); err != nil {
+		if err := bp.flushBatch(rows, *counter, *currentBatchNumber, batchStatus); err != nil {
 			return err
 		}
 	}
@@ -90,20 +171,20 @@ func (bp *BatchProcessor) handleEOF(batchBuff *bytes.Buffer, counter *int32, cur
 }
 
 // processCSVLoop processes the main CSV reading loop
-func (bp *BatchProcessor) processCSVLoop(ctx context.Context, reader *csv.Reader, batchBuff *bytes.Buffer, counter *int32, currentBatchNumber *int64, isLastFile bool) error {
+func (bp *BatchProcessor) processCSVLoop(ctx context.Context, reader *csv.Reader, rows *[]*pb.Row, counter *int32, currentBatchNumber *int64, isLastFile bool) error {
 	for {
 		// Check for cancellation
 		select {
 		case <-ctx.Done():
-			return bp.handleCancellation(batchBuff, counter, currentBatchNumber)
+			return bp.handleCancellation(*rows, counter, currentBatchNumber)
 		default:
 			// Continue normal processing
 		}
 
 		// Read and process the next CSV line
-		if err := bp.processNextRow(reader, batchBuff, counter, currentBatchNumber); err != nil {
+		if err := bp.processNextRow(reader, rows, counter, currentBatchNumber); err != nil {
 			if errors.Is(err, io.EOF) {
-				return bp.handleEOF(batchBuff, counter, currentBatchNumber, isLastFile)
+				return bp.handleEOF(*rows, counter, currentBatchNumber, isLastFile)
 			}
 			// Any other error (malformed CSV, I/O, etc.)
 			return err
@@ -112,7 +193,7 @@ func (bp *BatchProcessor) processCSVLoop(ctx context.Context, reader *csv.Reader
 }
 
 // BuildAndSendBatches streams the CSV, incrementally building table data
-// bodies into batchBuff and flushing to connection as limits are reached.
+// rows into a slice and flushing to connection as limits are reached.
 // On context cancellation, it flushes any partial batch and returns the
 // context error. On clean EOF, it flushes a final partial batch (if any)
 // and returns nil. Any serialization or socket error is returned.
@@ -120,14 +201,14 @@ func (bp *BatchProcessor) processCSVLoop(ctx context.Context, reader *csv.Reader
 // isLastFile indicates if this is the last file for this table type, which
 // determines whether the final batch should have BatchStatus=EOF
 //
-// Returns the error (if any) and the last batch number used
-func (bp *BatchProcessor) BuildAndSendBatches(ctx context.Context, reader *csv.Reader, batchNumber int64, isLastFile bool) (error, int64) {
-	var batchBuff bytes.Buffer
+// Returns the last batch number used and the error (if any)
+func (bp *BatchProcessor) BuildAndSendBatches(ctx context.Context, reader *csv.Reader, batchNumber int64, isLastFile bool) (int64, error) {
+	rows := make([]*pb.Row, 0, bp.batchLimit)
 	var counter int32 = 0
 	currentBatchNumber := batchNumber // Current batch number (not incremented per line)
 
-	err := bp.processCSVLoop(ctx, reader, &batchBuff, &counter, &currentBatchNumber, isLastFile)
-	return err, currentBatchNumber
+	err := bp.processCSVLoop(ctx, reader, &rows, &counter, &currentBatchNumber, isLastFile)
+	return currentBatchNumber, err
 }
 
 // GetConnection returns the network connection used by this processor

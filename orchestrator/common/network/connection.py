@@ -8,8 +8,7 @@ import socket
 import threading
 from typing import List, Callable, Optional
 
-from protocol.dispatcher import recv_msg
-from protocol.constants import ProtocolError
+from common.protobuf_handler import ProtobufMessageReader
 
 
 class ConnectionManager:
@@ -102,40 +101,21 @@ class ConnectionManager:
         """
         The target function for a client handler thread.
 
-        Enters a loop to continuously receive and process messages from a single
-        client until the connection is closed, an error occurs, or the server stops.
+        Delegates all message handling to the provided handler function,
+        which manages its own message reading loop.
 
         Args:
             client_sock: The client's socket object.
-            message_handler: The function to process messages from the client.
+            message_handler: The function to handle the client connection.
         """
-        while not self._stop.is_set():
-            try:
-                msg = recv_msg(client_sock)
-                addr = client_sock.getpeername()
-                logging.debug(
-                    "action: receive_message | result: success | ip: %s | opcode: %i",
-                    addr[0],
-                    msg.opcode,
-                )
-
-                # The message_handler returns False to signal that the connection
-                # should be closed from the application logic side.
-                if not message_handler(msg, client_sock):
-                    break
-
-            except ProtocolError as e:
-                logging.error("action: receive_message | result: protocol error | error: %s", e)
-                break  # Close connection on protocol errors
-            except EOFError:
-                # This occurs when the client gracefully closes the connection.
-                break
-            except OSError as e:
-                # This can happen if the connection is forcibly closed.
-                logging.error("action: receive_message | result: fail | error: %s", e)
-                break
-
-        client_sock.close()
+        try:
+            # Delegate to the message handler (which has its own loop)
+            message_handler(client_sock)
+        except Exception as e:
+            logging.error("action: handle_client_connection | result: fail | error: %s", e)
+        finally:
+            # Handler is responsible for closing the socket
+            pass
 
 
 class ServerManager:

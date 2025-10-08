@@ -1,0 +1,15 @@
+syntax = "proto3";
+
+package protocol;
+option go_package = "github.com/fede/coffee-shop-analyzer/protos;protocol";
+
+enum QueryType {
+  QUERY_1 = 0;  // Morning high-value transactions
+  QUERY_2 = 1;  // Product ranking
+  QUERY_3 = 2;  // TPV analysis
+  QUERY_4 = 3;  // Top customers
+}
+
+message QueryRequest {
+  QueryType query_type = 1;
+}

@@ -3,6 +3,7 @@ package common
 import (
 	"bufio"
 	"context"
+	"encoding/binary"
 	"errors"
 	"io"
 	"net"
@@ -10,10 +11,34 @@ import (
 	"time"
 
 	"github.com/op/go-logging"
+	"google.golang.org/protobuf/proto"
 
-	// Import protocol definitions
-	protocol "github.com/7574-sistemas-distribuidos/docker-compose-init/client/protocol"
+	// Import protobuf definitions
+	pb "github.com/7574-sistemas-distribuidos/docker-compose-init/client/protos"
 )
+
+// ReadEnvelope reads a protobuf Envelope from the connection
+func ReadEnvelope(reader *bufio.Reader) (*pb.Envelope, error) {
+	// Read message size (4 bytes, big-endian)
+	var msgSize uint32
+	if err := binary.Read(reader, binary.BigEndian, &msgSize); err != nil {
+		return nil, err
+	}
+
+	// Read message bytes
+	msgBytes := make([]byte, msgSize)
+	if _, err := io.ReadFull(reader, msgBytes); err != nil {
+		return nil, err
+	}
+
+	// Unmarshal protobuf
+	envelope := &pb.Envelope{}
+	if err := proto.Unmarshal(msgBytes, envelope); err != nil {
+		return nil, err
+	}
+
+	return envelope, nil
+}
 
 // ResponseHandler handles server response communication
 type ResponseHandler struct {
@@ -44,60 +69,93 @@ func (rh *ResponseHandler) handleReadError(err error) bool {
 }
 
 // handleResponseMessage processes a received response message
-func (rh *ResponseHandler) handleResponseMessage(msg interface{}) {
-	// Use type assertion to access the GetOpCode() method
-	if respMsg, ok := msg.(interface{ GetOpCode() byte }); ok {
-		switch respMsg.GetOpCode() {
-		case protocol.BatchRecvSuccessOpCode:
-			rh.log.Debug("action: batch_enviado | result: success")
-		case protocol.BatchRecvFailOpCode:
-			rh.log.Error("action: batch_enviado | result: fail")
-		case protocol.OpCodeDataBatch:
-			// Try to cast to DataBatch to get inner message type
-			if dataBatch, ok := respMsg.(*protocol.DataBatch); ok {
-				rh.handleQueryResult(dataBatch)
-			} else {
-				rh.log.Warning("action: response_received | result: unexpected_format | type: databatch")
-			}
+func (rh *ResponseHandler) handleResponseMessage(envelope *pb.Envelope) {
+	switch envelope.Type {
+	case pb.Envelope_BATCH_RECV_SUrCESS:
+		rh.log.Debug("action: batch_enviado | result: success")
+	case pb.Envelope_BATCH_RECV_FAIL:
+		rh.log.Error("action: batch_enviado | result: fail")
+	case pb.Envelope_TABLE_DATA:
+		if tableData := envelope.GetTableData(); tableData != nil {
+			rh.handleTableData(tableData)
 		}
+	case pb.Envelope_EOF:
+		if eofMsg := envelope.GetEof(); eofMsg != nil {
+			rh.handleEOF(eofMsg)
+		}
+	case pb.Envelope_FINISHED:
+		rh.log.Info("action: servidor_finished | result: all_queries_complete")
+	default:
+		rh.log.Warning("action: response_received | result: unknown_type | type: %v", envelope.Type)
 	}
 }
 
-// handleQueryResult processes a query result message
-func (rh *ResponseHandler) handleQueryResult(dataBatch *protocol.DataBatch) {
-	// Log based on the inner message opcode
-	switch dataBatch.OpCode {
-	case protocol.OpCodeQueryResult1:
-		rh.log.Info("action: query_result_received | result: success | type: filtered_transactions")
+// handleEOF processes EOF message
+func (rh *ResponseHandler) handleEOF(eofMsg *pb.EOFMessage) {
+	tableName := eofMsg.Table.String()
+	rh.log.Infof("action: eof_received | table: %s | result: completed", tableName)
+
+	switch eofMsg.Table {
+	case pb.TableName_QUERY_RESULTS_1:
+		rh.log.Info("Query 1 transmission completed")
+	case pb.TableName_QUERY_RESULTS_2:
+		rh.log.Info("Query 2 transmission completed")
+	case pb.TableName_QUERY_RESULTS_3:
+		rh.log.Info("Query 3 transmission completed")
+	case pb.TableName_QUERY_RESULTS_4:
+		rh.log.Info("Query 4 transmission completed")
+	}
+}
+
+// handleTableData processes a query result message
+func (rh *ResponseHandler) handleTableData(tableData *pb.TableData) {
+	// Log based on the table name
+	switch tableData.Name {
+	case pb.TableName_QUERY_RESULTS_1:
+		rh.log.Infof("action: query_result_received | result: success | type: filtered_transactions | batch: %d | rows: %d",
+			tableData.BatchNumber, len(tableData.Rows))
 		rh.log.Debug("Query 1 result: Morning high-value transactions")
-	case protocol.OpCodeQueryResult2:
-		rh.log.Info("action: query_result_received | result: success | type: product_metrics")
+	case pb.TableName_QUERY_RESULTS_2:
+		rh.log.Infof("action: query_result_received | result: success | type: product_metrics | batch: %d | rows: %d",
+			tableData.BatchNumber, len(tableData.Rows))
 		rh.log.Debug("Query 2 result: Product ranking by sales quantity and revenue")
-	case protocol.OpCodeQueryResult3:
-		rh.log.Info("action: query_result_received | result: success | type: tpv_analysis")
+	case pb.TableName_QUERY_RESULTS_3:
+		rh.log.Infof("action: query_result_received | result: success | type: tpv_analysis | batch: %d | rows: %d",
+			tableData.BatchNumber, len(tableData.Rows))
 		rh.log.Debug("Query 3 result: Total Processing Volume by store and semester")
-	case protocol.OpCodeQueryResult4:
-		rh.log.Info("action: query_result_received | result: success | type: top_customers")
+	case pb.TableName_QUERY_RESULTS_4:
+		rh.log.Infof("action: query_result_received | result: success | type: top_customers | batch: %d | rows: %d",
+			tableData.BatchNumber, len(tableData.Rows))
 		rh.log.Debug("Query 4 result: Top 3 customers by purchase count per store")
-	case protocol.OpCodeQueryResultError:
-		rh.log.Error("action: query_result_received | result: error | type: query_error")
-		rh.log.Debug("Query execution failed with an error")
 	default:
-		rh.log.Warning("action: query_result_received | result: unknown_type | opcode: %d", dataBatch.OpCode)
+		rh.log.Debugf("action: table_data_received | table: %v | batch: %d | rows: %d",
+			tableData.Name, tableData.BatchNumber, len(tableData.Rows))
+	}
+
+	// Check batch status
+	switch tableData.Status {
+	case pb.BatchStatus_EOF:
+		rh.log.Infof("action: batch_status | table: %s | status: eof | last_batch: %d",
+			tableData.Name.String(), tableData.BatchNumber)
+	case pb.BatchStatus_CANCEL:
+		rh.log.Warningf("action: batch_status | table: %s | status: cancelled",
+			tableData.Name.String())
+	case pb.BatchStatus_CONTINUE:
+		// Normal batch, more data expected
 	}
 }
 
 // responseReaderLoop executes the main response reading loop
 func (rh *ResponseHandler) responseReaderLoop(reader *bufio.Reader) {
 	for {
-		msg, err := protocol.ReadMessage(reader)
+		envelope, err := ReadEnvelope(reader)
 		if err != nil {
 			if rh.handleReadError(err) {
 				break
 			}
 			continue
 		}
-		rh.handleResponseMessage(msg)
+		rh.handleResponseMessage(envelope)
 	}
 }
 
@@ -150,9 +208,28 @@ func (fms *FinishedMessageSender) SendFinished() {
 		return
 	}
 
-	finishedMsg := protocol.Finished{AgencyId: int32(agencyId)}
-	if _, err := finishedMsg.WriteTo(fms.conn); err != nil {
-		fms.log.Errorf("action: send_finished | result: fail | error: %v", err)
+	// Create FINISHED envelope
+	envelope := &pb.Envelope{
+		Type: pb.Envelope_FINISHED,
+	}
+
+	// Serialize
+	msgBytes, err := proto.Marshal(envelope)
+	if err != nil {
+		fms.log.Errorf("action: send_finished | result: fail | error: marshal: %v", err)
+		return
+	}
+
+	// Write size (4 bytes big-endian)
+	msgSize := uint32(len(msgBytes))
+	if err := binary.Write(fms.conn, binary.BigEndian, msgSize); err != nil {
+		fms.log.Errorf("action: send_finished | result: fail | error: write_size: %v", err)
+		return
+	}
+
+	// Write data
+	if _, err := fms.conn.Write(msgBytes); err != nil {
+		fms.log.Errorf("action: send_finished | result: fail | error: write_data: %v", err)
 		return
 	}
 

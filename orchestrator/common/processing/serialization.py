@@ -2,6 +2,10 @@
 Provides a set of functions for serializing filtered data structures into a
 specific binary format. This is used to prepare data for network transmission
 according to a custom protocol.
+
+⚠️ DEPRECATED: This module is part of the legacy custom protocol serialization.
+With the protobuf migration, serialization is now handled by protobuf's
+SerializeToString() method. This module is kept for backward compatibility only.
 """
 
 import logging

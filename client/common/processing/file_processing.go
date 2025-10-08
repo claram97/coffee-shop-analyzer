@@ -2,7 +2,6 @@ package common
 
 import (
 	"context"
-	"encoding/binary"
 	"encoding/csv"
 	"errors"
 	"fmt"
@@ -12,8 +11,8 @@ import (
 
 	"github.com/op/go-logging"
 
-	// Import protocol definitions
-	protocol "github.com/7574-sistemas-distribuidos/docker-compose-init/client/protocol"
+	// Import protobuf definitions
+	pb "github.com/7574-sistemas-distribuidos/docker-compose-init/client/protos"
 	// Import network utilities for connection error checking
 	network "github.com/7574-sistemas-distribuidos/docker-compose-init/client/common/network"
 )
@@ -46,19 +45,19 @@ func NewTableTypeHandler(clientID string, logger *logging.Logger) *TableTypeHand
 	}
 }
 
-// SetHandlerForTableType automatically sets the appropriate handler and opcode based on table type directory name
-func (tth *TableTypeHandler) GetHandlerAndOpCode(tableType string) (TableRowHandler, byte, error) {
+// SetHandlerForTableType automatically sets the appropriate handler and table name based on table type directory name
+func (tth *TableTypeHandler) GetHandlerAndOpCode(tableType string) (TableRowHandler, pb.TableName, error) {
 	switch tableType {
 	case "transactions":
-		return TransactionHandler{}, protocol.OpCodeNewTransaction, nil
+		return TransactionHandler{}, pb.TableName_TRANSACTIONS, nil
 	case "transaction_items":
-		return TransactionItemHandler{}, protocol.OpCodeNewTransactionItems, nil
+		return TransactionItemHandler{}, pb.TableName_TRANSACTION_ITEMS, nil
 	case "menu_items":
-		return MenuItemHandler{}, protocol.OpCodeNewMenuItems, nil
+		return MenuItemHandler{}, pb.TableName_MENU_ITEMS, nil
 	case "stores":
-		return StoreHandler{}, protocol.OpCodeNewStores, nil
+		return StoreHandler{}, pb.TableName_STORES, nil
 	case "users":
-		return UserHandler{}, protocol.OpCodeNewUsers, nil
+		return UserHandler{}, pb.TableName_USERS, nil
 	default:
 		return nil, 0, fmt.Errorf("unknown table type: %s", tableType)
 	}
@@ -94,13 +93,13 @@ func (fp *FileProcessor) setupCSVReader(file *os.File) (*csv.Reader, error) {
 // Returns the last batch number used and any error
 func (fp *FileProcessor) processFileAsync(ctx context.Context, reader *csv.Reader, fileName string, processor *BatchProcessor, isLastFile bool, startingBatchNumber int64) (int64, error) {
 	type batchResult struct {
-		err        error
+		err         error
 		lastBatchNo int64
 	}
-	
+
 	writeDone := make(chan batchResult, 1)
 	go func() {
-		err, lastBatchNo := processor.BuildAndSendBatches(ctx, reader, startingBatchNumber, isLastFile)
+		lastBatchNo, err := processor.BuildAndSendBatches(ctx, reader, startingBatchNumber, isLastFile)
 		writeDone <- batchResult{err, lastBatchNo}
 	}()
 
@@ -134,27 +133,27 @@ func (fp *FileProcessor) ProcessFile(ctx context.Context, dir, fileName string, 
 }
 
 // ProcessTableType processes all CSV files in a table type directory
-func (fp *FileProcessor) ProcessTableType(ctx context.Context, dataDir, tableType string, processorFactory func(TableRowHandler, byte) *BatchProcessor) error {
+func (fp *FileProcessor) ProcessTableType(ctx context.Context, dataDir, tableType string, processorFactory func(TableRowHandler, pb.TableName) *BatchProcessor) error {
 	subDirPath := filepath.Join(dataDir, tableType)
 	fp.log.Infof("action: processing_table_type | table_type: %s | client_id: %v", tableType, fp.clientID)
 
-	// Get handler and opcode for this table type
+	// Get handler and table name for this table type
 	tth := NewTableTypeHandler(fp.clientID, fp.log)
-	handler, opCode, err := tth.GetHandlerAndOpCode(tableType)
+	handler, tableName, err := tth.GetHandlerAndOpCode(tableType)
 	if err != nil {
 		fp.log.Infof("action: skip_table_type | table_type: %s | reason: unsupported | client_id: %v | error: %v", tableType, fp.clientID, err)
 		return nil
 	}
 
 	// Create processor for this table type
-	processor := processorFactory(handler, opCode)
+	processor := processorFactory(handler, tableName)
 
 	files, err := os.ReadDir(subDirPath)
 	if err != nil {
 		fp.log.Errorf("Error reading subdirectory %s: %v", subDirPath, err)
 		return err
 	}
-	
+
 	// Filter to only CSV files
 	var csvFiles []os.DirEntry
 	for _, entry := range files {
@@ -165,43 +164,39 @@ func (fp *FileProcessor) ProcessTableType(ctx context.Context, dataDir, tableTyp
 
 	// Initialize a table-wide batch counter
 	var tableBatchCounter int64 = 0
-	
+
 	// Process each file
 	for i, fileEntry := range csvFiles {
 		// Check if this is the last CSV file for this table type
 		isLastFile := (i == len(csvFiles)-1)
-		
+
 		if isLastFile {
 			fp.log.Infof("action: processing_file | file: %s | is_last_file: true | starting_batch: %d", fileEntry.Name(), tableBatchCounter)
 		} else {
 			fp.log.Infof("action: processing_file | file: %s | starting_batch: %d", fileEntry.Name(), tableBatchCounter)
 		}
-		
+
 		// Process the file with the current table batch counter
 		lastBatchNo, err := fp.ProcessFile(ctx, subDirPath, fileEntry.Name(), processor, isLastFile, tableBatchCounter)
 		if err != nil {
 			return err
 		}
-		
+
 		// Update the table batch counter for the next file
 		tableBatchCounter = lastBatchNo
 		fp.log.Infof("action: updated_batch_counter | table_type: %s | new_value: %d", tableType, tableBatchCounter)
-		
+
 		time.Sleep(1 * time.Second) // delay between files
 	}
 
-	// Send EOF message after processing all files of this table type
-	if err := fp.sendEOFMessage(processor, tableType); err != nil {
-		fp.log.Errorf("action: send_eof | result: fail | table_type: %s | error: %v", tableType, err)
-		return err
-	}
-
-	fp.log.Infof("action: sent_eof | result: success | table_type: %s", tableType)
+	// With protobuf, EOF is sent automatically with the last batch (BatchStatus=EOF)
+	// when isLastFile=true in the last CSV file processing
+	fp.log.Infof("action: completed_table_type | result: success | table_type: %s", tableType)
 	return nil
 }
 
 // ProcessAllTables processes all table types in the data directory
-func (fp *FileProcessor) ProcessAllTables(ctx context.Context, processorFactory func(TableRowHandler, byte) *BatchProcessor, dataDir string) error {
+func (fp *FileProcessor) ProcessAllTables(ctx context.Context, processorFactory func(TableRowHandler, pb.TableName) *BatchProcessor, dataDir string) error {
 	entries, err := os.ReadDir(dataDir)
 	if err != nil {
 		fp.log.Errorf("Error reading data directory: %v", err)
@@ -221,78 +216,4 @@ func (fp *FileProcessor) ProcessAllTables(ctx context.Context, processorFactory 
 		}
 	}
 	return lastErr
-}
-
-// sendEOFMessage sends an EOF message for the specified table type
-func (fp *FileProcessor) sendEOFMessage(processor *BatchProcessor, tableType string) error {
-	conn := processor.GetConnection() // Assuming BatchProcessor has a method to get connection
-
-	// Build EOF message body
-	body := fp.buildEOFMessageBody(tableType)
-	messageLength := int32(len(body))
-
-	// Send opcode (u8)
-	if err := binary.Write(conn, binary.LittleEndian, protocol.OpCodeEOF); err != nil {
-		return fmt.Errorf("failed to send EOF opcode: %w", err)
-	}
-
-	// Send length (i32)
-	if err := binary.Write(conn, binary.LittleEndian, messageLength); err != nil {
-		return fmt.Errorf("failed to send EOF length: %w", err)
-	}
-
-	// Send body
-	if _, err := conn.Write(body); err != nil {
-		return fmt.Errorf("failed to send EOF body: %w", err)
-	}
-
-	fp.log.Infof("action: send_eof_message | result: success | table_type: %s | message_length: %d", tableType, messageLength)
-	return nil
-}
-
-// buildEOFMessageBody builds the body of an EOF message following TableMessage format
-func (fp *FileProcessor) buildEOFMessageBody(tableType string) []byte {
-	var body []byte
-
-	// TableMessage format: [nRows:i32][batchNumber:i64][status:u8][rows...]
-
-	// nRows = 1 (one virtual row with table_type info)
-	nRowsBytes := make([]byte, 4)
-	binary.LittleEndian.PutUint32(nRowsBytes, 1)
-	body = append(body, nRowsBytes...)
-
-	// batchNumber = 0 (EOF doesn't have a specific batch number)
-	batchNumberBytes := make([]byte, 8)
-	binary.LittleEndian.PutUint64(batchNumberBytes, 0)
-	body = append(body, batchNumberBytes...)
-
-	// status = EOF (1)
-	body = append(body, protocol.BatchEOF)
-
-	// Row data: one pair ["table_type", tableType]
-	// n_pairs (i32) = 1
-	nPairsBytes := make([]byte, 4)
-	binary.LittleEndian.PutUint32(nPairsBytes, 1)
-	body = append(body, nPairsBytes...)
-
-	// Key: "table_type"
-	key := "table_type"
-	keyBytes := []byte(key)
-	keyLength := int32(len(keyBytes))
-
-	keyLengthBytes := make([]byte, 4)
-	binary.LittleEndian.PutUint32(keyLengthBytes, uint32(keyLength))
-	body = append(body, keyLengthBytes...)
-	body = append(body, keyBytes...)
-
-	// Value: tableType (e.g., "menu_items")
-	valueBytes := []byte(tableType)
-	valueLength := int32(len(valueBytes))
-
-	valueLengthBytes := make([]byte, 4)
-	binary.LittleEndian.PutUint32(valueLengthBytes, uint32(valueLength))
-	body = append(body, valueLengthBytes...)
-	body = append(body, valueBytes...)
-
-	return body
 }

@@ -11,6 +11,7 @@ import (
 	// Import the refactored modules with aliases to avoid name conflicts
 	network "github.com/7574-sistemas-distribuidos/docker-compose-init/client/common/network"
 	processing "github.com/7574-sistemas-distribuidos/docker-compose-init/client/common/processing"
+	pb "github.com/7574-sistemas-distribuidos/docker-compose-init/client/protos"
 )
 
 var log = logging.MustGetLogger("log")
@@ -68,8 +69,8 @@ func (c *Client) SendBatch() {
 	responseHandler.ReadResponses(readDone)
 
 	// Process all tables with a factory function to create batch processors
-	processorFactory := func(handler processing.TableRowHandler, opCode byte) *processing.BatchProcessor {
-		return processing.NewBatchProcessor(conn, handler, opCode, c.config.BatchLimit, c.config.ID, log)
+	processorFactory := func(handler processing.TableRowHandler, tableName pb.TableName) *processing.BatchProcessor {
+		return processing.NewBatchProcessor(conn, handler, tableName, c.config.BatchLimit, c.config.ID, log)
 	}
 
 	lastErr := c.fileProcessor.ProcessAllTables(ctx, processorFactory, c.config.TablesDirectory)

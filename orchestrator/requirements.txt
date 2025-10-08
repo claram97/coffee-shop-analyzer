@@ -1,0 +1,4 @@
+# Requirements for orchestrator
+pika>=1.3.0
+protobuf>=4.25.0
+grpcio-tools>=1.60.0

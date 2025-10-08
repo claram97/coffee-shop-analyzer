@@ -1,6 +1,10 @@
 """
 Provides utility classes for handling incoming messages and sending
 standardized responses within a network communication protocol.
+
+⚠️ DEPRECATED: This module uses the legacy custom protocol.
+For new code, use common.protobuf_handler.ProtobufMessageHandler instead.
+This module is kept for backward compatibility and reference purposes only.
 """
 
 import logging

@@ -2,6 +2,10 @@
 Provides a set of functions for filtering raw data objects, selecting only the
 columns required for downstream processing and analysis. This helps reduce data
 size and complexity by creating leaner data representations.
+
+⚠️ DEPRECATED: This module is part of the legacy custom protocol.
+With the protobuf migration, filtering is now handled by the Go client in
+batch_processing.go. This module is kept for backward compatibility only.
 """
 
 from typing import List, Dict, Any

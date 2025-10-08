@@ -1,6 +1,11 @@
 """
 Defines the BatchProcessor class, responsible for transforming raw data messages
 into filtered, serialized, and wrapped DataBatch messages for downstream processing.
+
+⚠️ DEPRECATED: This module is part of the legacy custom protocol.
+With the protobuf migration, the client now handles filtering and serialization,
+and the orchestrator simply forwards the protobuf TableData to RabbitMQ.
+This module is kept for backward compatibility only.
 """
 
 import logging

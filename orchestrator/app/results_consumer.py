@@ -1,5 +1,6 @@
 """
 Results consumer that handles query results from the results-finisher component.
+Converts custom protocol results to protobuf before forwarding to clients.
 """
 
 import logging
@@ -8,6 +9,7 @@ import time
 from middleware.middleware_client import MessageMiddlewareQueue, MessageMiddlewareDisconnectedError
 from protocol import DataBatch, Opcodes, BatchStatus
 from protocol.messages import QueryResult1, QueryResult2, QueryResult3, QueryResult4, QueryResultError
+from common.protobuf_handler import ProtobufMessageWriter
 
 
 class ResultsConsumer:
@@ -157,16 +159,88 @@ class ResultsConsumer:
             Opcodes.QUERY_RESULT_ERROR: "QUERY_RESULT_ERROR"
         }
         return opcode_names.get(opcode, "UNKNOWN")
+    
+    def _convert_to_protobuf_table_data(self, data_batch):
+        """Convert custom protocol DataBatch to protobuf TableData.
+        
+        Args:
+            data_batch: DataBatch object from custom protocol
+            
+        Returns:
+            protobuf TableData message
+        """
+        from protos import table_data_pb2
+        
+        # Create TableData
+        table_data = table_data_pb2.TableData()
+        
+        # Map opcode to TableName (query results)
+        opcode = getattr(data_batch.batch_msg, "opcode", None)
+        if opcode == Opcodes.QUERY_RESULT_1:
+            table_data.name = table_data_pb2.TableName.QUERY_RESULTS_1
+        elif opcode == Opcodes.QUERY_RESULT_2:
+            table_data.name = table_data_pb2.TableName.QUERY_RESULTS_2
+        elif opcode == Opcodes.QUERY_RESULT_3:
+            table_data.name = table_data_pb2.TableName.QUERY_RESULTS_3
+        elif opcode == Opcodes.QUERY_RESULT_4:
+            table_data.name = table_data_pb2.TableName.QUERY_RESULTS_4
+        else:
+            logging.warning(f"action: convert_to_protobuf | result: unknown_opcode | opcode: {opcode}")
+            table_data.name = table_data_pb2.TableName.MENU_ITEMS  # Default
+        
+        # Set batch number
+        table_data.batch_number = getattr(data_batch.batch_msg, "batch_number", 0)
+        
+        # Map batch status
+        batch_status = getattr(data_batch.batch_msg, "batch_status", BatchStatus.CONTINUE)
+        if batch_status == BatchStatus.EOF:
+            table_data.status = table_data_pb2.BatchStatus.EOF
+        elif batch_status == BatchStatus.CANCEL:
+            table_data.status = table_data_pb2.BatchStatus.CANCEL
+        else:
+            table_data.status = table_data_pb2.BatchStatus.CONTINUE
+        
+        # Convert rows
+        if hasattr(data_batch.batch_msg, "rows"):
+            for row in data_batch.batch_msg.rows:
+                pb_row = table_data.rows.add()
+                
+                # Extract values from row (handle both dict and object)
+                if isinstance(row, dict):
+                    values = [str(v) for v in row.values()]
+                else:
+                    # Get all non-private attributes as values
+                    attrs = [attr for attr in dir(row) 
+                            if not attr.startswith('_') and not callable(getattr(row, attr))]
+                    values = [str(getattr(row, attr)) for attr in attrs]
+                
+                pb_row.values.extend(values)
+        
+        # Create schema (extract column names from first row if available)
+        if hasattr(data_batch.batch_msg, "rows") and len(data_batch.batch_msg.rows) > 0:
+            first_row = data_batch.batch_msg.rows[0]
+            if isinstance(first_row, dict):
+                columns = list(first_row.keys())
+            else:
+                attrs = [attr for attr in dir(first_row) 
+                        if not attr.startswith('_') and not callable(getattr(first_row, attr))]
+                columns = attrs
+            
+            table_data.schema.columns.extend(columns)
+        
+        return table_data
         
 
             
     def _forward_result_to_client(self, query_id, result_bytes):
-        """Forward the result to the appropriate client.
+        """Forward the result to the appropriate client using protobuf.
         
         Args:
             query_id: The query ID to find the associated client
-            result_bytes: The raw result bytes to forward
+            result_bytes: The raw result bytes (custom protocol from RabbitMQ)
         """
+        from protos import envelope_pb2
+        
         client_conn = None
         with self.client_lock:
             client_conn = self.client_connections.get(query_id)
@@ -176,21 +250,31 @@ class ResultsConsumer:
             return
             
         try:
-            # Send the raw bytes to the client
-            client_conn.sendall(result_bytes)
-            bytes_sent = len(result_bytes)
-            logging.info(f"action: forward_result | result: success | query_id: {query_id} | bytes_sent: {bytes_sent}")
+            # 1. Deserialize custom protocol from RabbitMQ
+            data_batch = DataBatch.deserialize_from_bytes(result_bytes)
             
-            # Check if this is an EOF batch - if so, we can unregister the client
-            try:
-                data_batch = DataBatch.deserialize_from_bytes(result_bytes)
-                batch_status = getattr(data_batch.batch_msg, "batch_status", None)
-                
-                if batch_status == BatchStatus.EOF:
-                    logging.info(f"action: eof_result_forwarded | query_id: {query_id} | unregistering_client: true")
-                    self.unregister_client_for_query(query_id)
-            except Exception as e:
-                logging.warning(f"action: check_eof | result: fail | query_id: {query_id} | error: {str(e)}")
+            # 2. Convert to protobuf TableData
+            table_data = self._convert_to_protobuf_table_data(data_batch)
+            
+            # 3. Create Envelope with TableData
+            envelope = envelope_pb2.Envelope()
+            envelope.type = envelope_pb2.Envelope.TABLE_DATA
+            envelope.table_data.CopyFrom(table_data)
+            
+            # 4. Send using ProtobufMessageWriter
+            ProtobufMessageWriter.write_envelope(client_conn, envelope)
+            
+            logging.info(
+                f"action: forward_result | result: success | query_id: {query_id} | "
+                f"table: {table_data.name} | batch: {table_data.batch_number} | "
+                f"rows: {len(table_data.rows)} | status: {table_data.status}"
+            )
+            
+            # Check if this is an EOF batch - if so, unregister the client
+            batch_status = getattr(data_batch.batch_msg, "batch_status", None)
+            if batch_status == BatchStatus.EOF:
+                logging.info(f"action: eof_result_forwarded | query_id: {query_id} | unregistering_client: true")
+                self.unregister_client_for_query(query_id)
             
         except Exception as e:
             logging.error(f"action: forward_result | result: fail | query_id: {query_id} | error: {str(e)}")
