@@ -8,7 +8,7 @@ from .constants import ProtocolError, Opcodes
 from .socket_parsing import read_u8, read_i32, recv_exact
 from .messages import Finished, NewMenuItems, NewStores, NewTransactionItems, NewTransactions, NewUsers, EOFMessage
 from .databatch import DataBatch
-
+import logging
 
 def recv_msg(sock: socket.socket):
     """
@@ -40,7 +40,8 @@ def recv_msg(sock: socket.socket):
     (length, _) = read_i32(sock, 4, -1)
     if length < 0:
         raise ProtocolError("invalid message length")
-
+    
+    logging.info("action: receive_message | result: success | opcode: %d | length: %d", opcode, length)
     # Instantiate the appropriate message object based on the opcode
     msg = None
     if opcode == Opcodes.FINISHED:
@@ -65,8 +66,10 @@ def recv_msg(sock: socket.socket):
 
     body_bytes = recv_exact(sock, length)
     if opcode == Opcodes.FINISHED:
+        logging.info("Message Finished received")
         msg.read_from(body_bytes, length)
     else:
+        logging.info("Table message received")
         msg.read_from(body_bytes)
     
     return msg

@@ -3,6 +3,7 @@ Protocol message classes for handling different types of communication.
 """
 
 import inspect
+import logging
 import socket
 import struct
 from typing import Any, Iterator, Tuple
@@ -194,6 +195,10 @@ class TableMessage:
         )
         self.batch_status = batch_status
 
+        (client_id, remaining) = read_i32(reader, remaining, self.opcode)
+        self.client_id = client_id
+        logging.info(f"Received Client ID: {self.client_id}")
+
         return remaining
 
     def _read_row(self, reader: BytesReader, remaining: int) -> int:
@@ -229,7 +234,9 @@ class TableMessage:
 
         try:
             remaining = self._read_table_header(reader, remaining)
-
+            logging.info(
+                f"Successfully read table header. Remaining bytes: {remaining}"
+            )
             remaining = self._read_all_rows(reader, remaining, self.amount)
 
             self._validate_message_length(remaining)

@@ -11,9 +11,22 @@ func writeOpCode(out io.Writer, opCode byte) error {
 	return binary.Write(out, binary.LittleEndian, opCode)
 }
 
+// Tamaños de los campos del header en bytes
+const (
+	headerNLinesSize      = 4 // int32
+	headerBatchNumberSize = 8 // int64
+	headerStatusSize      = 1 // byte
+	headerClientIDSize    = 4 // int32
+)
+
 // calculateMessageLength calculates the total message length including headers and body
+// Ahora el header incluye clientID (int32)
 func calculateMessageLength(bodyLen int) int32 {
-	return int32(4 + 8 + 1 + bodyLen) // nLines + batchNumber + status + bodyLen
+	return int32(headerNLinesSize +
+		headerBatchNumberSize +
+		headerStatusSize +
+		headerClientIDSize +
+		bodyLen)
 }
 
 // writeMessageLength writes the message length field to the output
@@ -75,6 +88,12 @@ func FlushBatch(batch *bytes.Buffer, out io.Writer, counter int32, opCode byte, 
 
 	// Write batch status
 	if err := writeBatchStatus(out, batchStatus); err != nil {
+		return err
+	}
+
+	// Write clientID (hardcodeado en 1 por ahora)
+	var clientID int32 = 1
+	if err := binary.Write(out, binary.LittleEndian, clientID); err != nil {
 		return err
 	}
 
