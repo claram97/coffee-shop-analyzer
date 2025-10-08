@@ -15,6 +15,7 @@ from middleware.middleware_client import (
 from protocol.constants import Opcodes
 from protocol.databatch import DataBatch
 from protocol.messages import EOFMessage
+from protobuf_adapter import deserialize_envelope_from_rabbitmq, serialize_to_envelope_bytes
 
 TID_TO_NAME = {
     Opcodes.NEW_TRANSACTION: "transactions",
@@ -60,7 +61,7 @@ class MetadataCompat:
 def table_eof_to_bytes(table_name: str) -> bytes:
     eof_msg = EOFMessage()
     eof_msg.create_eof_message(batch_number=0, table_type=table_name)
-    return eof_msg.to_bytes()
+    return serialize_to_envelope_bytes(eof_msg)
 
 
 def is_bit_set(mask: int, idx: int) -> bool:
@@ -412,7 +413,8 @@ class ExchangeBusProducer:
         try:
             self._log.debug("publish → filters_pool")
             batch.batch_bytes = batch.batch_msg.to_bytes()
-            self._filters_pub.send(batch.to_bytes())
+            raw = serialize_to_envelope_bytes(batch)
+            self._filters_pub.send(raw)
         except Exception as e:
             self._log.error("filters_pool send failed: %s", e)
 
@@ -425,7 +427,8 @@ class ExchangeBusProducer:
                 int(partition_id),
             )
             batch.batch_bytes = batch.batch_msg.to_bytes()
-            self._get_pub(table, partition_id).send(batch.to_bytes())
+            raw = serialize_to_envelope_bytes(batch)
+            self._get_pub(table, partition_id).send(raw)
         except Exception as e:
             self._log.error(
                 "aggregator send failed table=%s part=%d: %s",
@@ -449,7 +452,7 @@ class ExchangeBusProducer:
                 queries_of(batch),
             )
             batch.batch_bytes = batch.batch_msg.to_bytes()
-            raw = batch.to_bytes()
+            raw = serialize_to_envelope_bytes(batch)
             self._in_mw.send(raw)
         except Exception as e:
             self._log.error("requeue_to_router failed: %s", e)
@@ -494,21 +497,20 @@ class RouterServer:
 
         def _cb(body: bytes):
             try:
-                if len(body) < 1:
-                    self._log.error("Received empty message")
+                # Deserialize protobuf Envelope → DataBatch or EOFMessage
+                msg = deserialize_envelope_from_rabbitmq(body)
+                
+                if msg is None:
+                    self._log.warning("Failed to deserialize message from RabbitMQ")
                     return
-
-                opcode = body[0]
-                if opcode == Opcodes.EOF:
-                    eof_msg = EOFMessage()
-                    eof_msg.read_from(body[5:])
-                    self._log.debug("recv EOF table=%s", eof_msg.table_type)
-                    self._router.process_message(eof_msg)
-                elif opcode == Opcodes.DATA_BATCH:
-                    db = DataBatch.deserialize_from_bytes(body)
-                    self._router.process_message(db)
+                
+                if isinstance(msg, EOFMessage):
+                    self._log.debug("recv EOF table=%s", msg.table_type)
+                    self._router.process_message(msg)
+                elif isinstance(msg, DataBatch):
+                    self._router.process_message(msg)
                 else:
-                    self._log.warning(f"Unwanted message opcode: {opcode}")
+                    self._log.warning(f"Unwanted message type: {type(msg)}")
             except Exception as e:
                 self._log.exception("Error in router callback: %s", e)
 

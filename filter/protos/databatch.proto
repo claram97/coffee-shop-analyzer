@@ -1,0 +1,24 @@
+syntax = "proto3";
+
+package protocol;
+
+import "table_data.proto";
+
+enum Query {
+  Q1 = 0;
+  Q2 = 1;
+  Q3 = 2;
+  Q4 = 3;
+}
+
+message DataBatch {
+  repeated Query query_ids = 1;
+
+  int32 total_copies = 2;
+  int32 copy_num = 3;
+  int32 total_shards = 4;
+  int32 shard_num = 5;
+  int32 filter_steps = 6;
+
+  TableData payload = 7;
+}

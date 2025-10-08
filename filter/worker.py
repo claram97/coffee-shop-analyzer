@@ -13,6 +13,7 @@ from middleware.middleware_client import (
 )
 from protocol.constants import Opcodes
 from protocol.databatch import DataBatch
+from protobuf_adapter import deserialize_envelope_from_rabbitmq, serialize_to_envelope_bytes
 
 LOGGER_NAME = "filter_worker"
 logger = logging.getLogger(LOGGER_NAME)
@@ -164,7 +165,11 @@ class FilterWorker:
     def _on_raw(self, raw: bytes) -> None:
         t0 = time.perf_counter()
         try:
-            db = DataBatch.deserialize_from_bytes(raw)
+            # Deserialize protobuf Envelope → DataBatch
+            db = deserialize_envelope_from_rabbitmq(raw)
+            if db is None or not isinstance(db, DataBatch):
+                logger.warning("Mensaje inválido o no es DataBatch; descartando")
+                return
         except Exception:
             logger.exception("Fallo deserializando DataBatch; reenviando sin cambios")
             self._send_to_router(raw, batch_number=None)
@@ -250,7 +255,7 @@ class FilterWorker:
             out_rows = len(new_rows)
             inner.rows = new_rows
             db.batch_bytes = inner.to_bytes()
-            out_raw = db.to_bytes()
+            out_raw = serialize_to_envelope_bytes(db)
             self._send_to_router(out_raw, bn)
 
             dt_ms = (time.perf_counter() - t0) * 1000
