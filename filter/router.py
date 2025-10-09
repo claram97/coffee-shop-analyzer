@@ -101,13 +101,10 @@ def _pick_key_field(table_name: str, queries: List[int]) -> Optional[str]:
 def _clone_with_rows(
     batch: DataBatch, subrows: list, parts_info: tuple[int, int] | None = None
 ) -> DataBatch:
-    # copia shallow del batch
     b = copy.copy(batch)
-    # copia shallow del mensaje interno (sin duplicar filas)
     inner = copy.copy(batch.batch_msg)
     inner.rows = subrows
     b.batch_msg = inner
-    # shards_info + serialización una sola vez
     if parts_info:
         parts, pid = parts_info
         b.shards_info = getattr(batch, "shards_info", []) + [(parts, pid)]
@@ -267,7 +264,6 @@ class FilterRouter:
                 "Fan-out x%d table=%s queries=%s", dup_count, table, queries
             )
 
-            # NO hacer pending-- acá antes de crear hijos; lo hacemos al final del bloque.
             try:
                 self._pending_batches[table] += dup_count
                 for i in range(dup_count):
@@ -284,7 +280,6 @@ class FilterRouter:
             except Exception as e:
                 self._log.error("requeue_to_router failed: %s", e)
 
-            # El padre ya “se dividió”, lo damos por terminado en este router
             self._pending_batches[table] = max(0, self._pending_batches[table] - 1)
             self._log.debug(
                 "pending-- (fanout parent) %s -> %d",
