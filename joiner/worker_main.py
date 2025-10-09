@@ -180,6 +180,7 @@ def main(argv=None):
         data_dir=os.environ.get("JOINER_DATA_DIR", "/data/joiner"),
         logger=logging.getLogger(f"joiner-worker-{shard}"),
         shard_index=shard,
+        router_replicas=cfg.routers.joiner,
     )
 
     stop_event = threading.Event()

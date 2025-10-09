@@ -7,6 +7,7 @@ processing and analyzing coffee shop data from multiple clients.
 """
 import logging
 import os
+import random
 
 from processing import (
     process_query_2,
@@ -41,7 +42,6 @@ TID_TO_NAME = {
 }
 
 
-# Connection pool for sharing connections
 class ExchangePublisherPool:
     def __init__(self, host):
         self._host = host
@@ -80,22 +80,19 @@ class Aggregator:
         self.config_path = os.getenv("CONFIG_PATH", "/config/config.ini")
         self.config = Config(self.config_path)
         self.host = self.config.broker.host
+        self._jr_replicas = self.config.routers.joiner
 
-        # Create a shared connection pool
         self._exchange_pool = ExchangePublisherPool(host=self.host)
         logging.info(f"Initialized exchange pool for aggregator {id}")
 
-        # Setup input exchanges for different data types
         tables = ["menu_items", "stores", "transactions", "transaction_items", "users"]
         self._exchanges = {}
 
-        # Create exchange connections for each table based on the aggregator ID
         for table in tables:
             exchange_name = self.config.filter_router_exchange(table)
             routing_key = self.config.filter_router_rk(table, self.id)
             queue_name = self.config.aggregator_queue(table, self.id)
 
-            # Get exchange from the pool instead of creating a new one each time
             self._exchanges[table] = self._exchange_pool.get_exchange(
                 exchange_name=exchange_name, route_keys=[routing_key]
             )
@@ -105,30 +102,38 @@ class Aggregator:
 
         self._out_queues = {}
         for table in tables:
-            out_q = self.config.aggregator_to_joiner_router_queue(table, self.id)
-            self._out_queues[table] = MessageMiddlewareQueue(
-                host=self.host, queue_name=out_q
-            )
+            for replica in range(0, self._jr_replicas):
+                out_q = self.config.aggregator_to_joiner_router_queue(
+                    table, self.id, replica
+                )
+                self._out_queues[(table, replica)] = MessageMiddlewareQueue(
+                    host=self.host, queue_name=out_q
+                )
 
     def _send_to_joiner_by_table(self, table: str, raw_bytes: bytes):
-        q = self._out_queues.get(table)
+        replica = random.randint(0, self._jr_replicas - 1)
+        q = self._out_queues.get((table, replica))
         if not q:
             logging.error("No out queue configured for table=%s", table)
             return
         q.send(raw_bytes)
-    
+
     def _forward_databatch_by_opcode(self, raw: bytes, opcode: int):
         """Reenvía DataBatch a la cola correcta usando el opcode provisto."""
         try:
             table = TID_TO_NAME.get(opcode)
-            logging.info("Forwarding DataBatch with opcode=%s to table=%s", opcode, table)
+            logging.info(
+                "Forwarding DataBatch with opcode=%s to table=%s", opcode, table
+            )
             if not table:
                 logging.error("Unknown opcode=%s", opcode)
                 return
-            
+
             self._send_to_joiner_by_table(table, raw)
         except Exception:
-            logging.exception("Failed to forward databatch by opcode. Opcode: %s", opcode)
+            logging.exception(
+                "Failed to forward databatch by opcode. Opcode: %s", opcode
+            )
             return
 
     def _forward_eof(self, raw: bytes, opcode: int):
@@ -138,14 +143,15 @@ class Aggregator:
             logging.error("Unknown opcode in EOF message: %s", opcode)
             return
         logging.info("Forwarding EOF for table=%s", table)
-        self._send_to_joiner_by_table(table, raw)
+        for replica in range(0, self._jr_replicas):
+            q = self._out_queues.get((table, replica))
+            q.send(raw)
 
     def run(self):
         """Start the aggregator server."""
         self.running = True
         logging.info(f"Starting aggregator server with ID {self.id}")
 
-        # Start consuming from each input queue
         self._exchanges["menu_items"].start_consuming(self._handle_menu_item)
         self._exchanges["stores"].start_consuming(self._handle_store)
         self._exchanges["transactions"].start_consuming(self._handle_transaction)
@@ -161,12 +167,8 @@ class Aggregator:
         self.running = False
         logging.debug("Stopping aggregator server")
 
-        # Stop consuming from all queues
         for exchange in self._exchanges.values():
             exchange.stop_consuming()
-
-        # Since we're using a pool, we don't close individual exchanges
-        # as they might share connections
 
         for queue in self._out_queues:
             queue.close()
@@ -215,9 +217,7 @@ class Aggregator:
                 self._forward_databatch_by_opcode(message, Opcodes.NEW_TRANSACTION)
             elif query_id == 3:
                 processed = process_query_3(rows)
-                out = serialize_query3_results(
-                    processed
-                ) 
+                out = serialize_query3_results(processed)
                 db.batch_msg.rows = out
                 db.batch_bytes = db.batch_msg.to_bytes()
                 db.batch_msg.amount = len(out)
@@ -225,7 +225,7 @@ class Aggregator:
                 self._forward_databatch_by_opcode(databatch, Opcodes.NEW_TRANSACTION)
             elif query_id == 4:
                 processed = process_query_4_transactions(rows)
-                out = serialize_query4_transaction_results(processed)  # idem arriba
+                out = serialize_query4_transaction_results(processed)
                 db.batch_msg.rows = out
                 db.batch_bytes = db.batch_msg.to_bytes()
                 db.batch_msg.amount = len(out)
@@ -251,19 +251,21 @@ class Aggregator:
             rows = db.batch_msg.rows or []
             query_id = db.query_ids[0] if db.query_ids else None
 
-            if int(query_id) == QueryId.SECOND_QUERY: 
+            if int(query_id) == QueryId.SECOND_QUERY:
                 logging.info("Processing transaction item with query 2")
                 processed = process_query_2(rows)
-                out = serialize_query2_results(
-                    processed
-                )  
+                out = serialize_query2_results(processed)
                 db.batch_msg.rows = out
                 db.batch_bytes = db.batch_msg.to_bytes()
                 db.batch_msg.amount = len(out)
                 databatch = db.to_bytes()
-                self._forward_databatch_by_opcode(databatch, Opcodes.NEW_TRANSACTION_ITEMS)
+                self._forward_databatch_by_opcode(
+                    databatch, Opcodes.NEW_TRANSACTION_ITEMS
+                )
             else:
-                logging.error("Transaction item with query distinct from 2: %s", query_id)
+                logging.error(
+                    "Transaction item with query distinct from 2: %s", query_id
+                )
                 return False
             return True
         except Exception:

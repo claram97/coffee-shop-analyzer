@@ -21,7 +21,10 @@ while getopts "c:o:" opt; do
 done
 
 read FILTERS AGGS JOINERS < <(python3 ./app_config/config_subscript.py -c "$INI_PATH" workers --format=plain)
-read FR_ROUTERS < <(python3 ./app_config/config_subscript.py -c "$INI_PATH" routers --format=plain)
+read FR_ROUTERS J_ROUTERS < <(python3 ./app_config/config_subscript.py -c "$INI_PATH" routers --format=plain)
+
+echo "$FR_ROUTERS"
+echo "$J_ROUTERS"
 
 eval "$(python3 ./app_config/config_subscript.py -c "$INI_PATH" broker --format=env)"
 
@@ -152,12 +155,13 @@ cat >> "$OUT_PATH" <<YAML
         condition: service_started
 YAML
 done
-#
-# --- joiner-router (único) ---
+
+# --- joiner-router ---
+for i in $(seq 0 $((J_ROUTERS-1))); do
 cat >> "$OUT_PATH" <<YAML
 
-  joiner-router:
-    container_name: joiner-router
+  joiner-router-${i}:
+    container_name: joiner-router-${i}
     build:
       context: .
       dockerfile: joiner/Dockerfile.router
@@ -165,6 +169,7 @@ cat >> "$OUT_PATH" <<YAML
       - PYTHONUNBUFFERED=1
       - LOG_LEVEL=INFO
       - CONFIG_PATH=/config/config.ini
+      - JOINER_ROUTER_INDEX=${i}
     networks:
       - testing_net
     volumes:
@@ -175,6 +180,7 @@ cat >> "$OUT_PATH" <<YAML
       aggregator-0:
         condition: service_started
 YAML
+done
 
 # --- joiner workers (shardeados) ---
 for i in $(seq 0 $((JOINERS-1))); do
@@ -197,7 +203,7 @@ cat >> "$OUT_PATH" <<YAML
     depends_on:
       rabbitmq:
         condition: service_healthy
-      joiner-router:
+      joiner-router-0:
         condition: service_started
 YAML
 done

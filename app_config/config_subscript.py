@@ -51,7 +51,8 @@ def _read_broker(cp: configparser.ConfigParser):
 
 def _read_routers(cp: configparser.ConfigParser):
     filter = cp.getint("filters", "routers", fallback=1)
-    return {"fr_routers": filter}
+    joiner = cp.getint("joiners", "routers", fallback=1)
+    return {"fr_routers": filter, "j_routers": joiner}
 
 
 def cmd_workers(cp: configparser.ConfigParser, fmt: str):
@@ -93,9 +94,10 @@ def cmd_broker(cp: configparser.ConfigParser, fmt: str):
 def cmd_routers(cp: configparser.ConfigParser, fmt: str):
     w = _read_routers(cp)
     if fmt == "plain":
-        print(w["fr_routers"])
+        print(w["fr_routers"], w["j_routers"])
     elif fmt == "env":
         print(f"FR_ROUTERS={w['fr_routers']}")
+        print(f"J_ROUTERS={w['j_routers']}")
     else:
         _die(f"unknown format: {fmt}")
 
@@ -109,6 +111,7 @@ def cmd_all_env(cp: configparser.ConfigParser):
         f"AGGREGATORS={w['aggregators']}",
         f"JOINERS={w['joiners']}",
         f"FR_ROUTERS={r['fr_routers']}",
+        f"J_ROUTERS={r['j_routers']}",
         f"RABBIT_HOST={b['host']}",
         f"RABBIT_PORT={b['port']}",
         f"RABBIT_MGMT_PORT={b['management_port']}",

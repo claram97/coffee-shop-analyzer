@@ -56,6 +56,7 @@ class BatchesCfg:
 @dataclass(frozen=True)
 class RoutersCfg:
     filter: int
+    joiner: int
 
 
 class ConfigError(Exception):
@@ -138,7 +139,8 @@ class Config:
         )
 
         r_filters = cp.getint("filters", "routers", fallback=1)
-        self.routers = RoutersCfg(r_filters)
+        r_joiners = cp.getint("joiners", "routers", fallback=1)
+        self.routers = RoutersCfg(r_filters, r_joiners)
 
     def joiner_partitions(self, table: str) -> int:
         """Shards de salida del Joiner Router para TABLE (consumen Joiners)."""
@@ -154,9 +156,11 @@ class Config:
     def aggregator_queue(self, table: str, pid: int) -> str:
         return self.names.aggregator_queue_fmt.format(table=table, pid=int(pid))
 
-    def aggregator_to_joiner_router_queue(self, table: str, pid: int) -> str:
+    def aggregator_to_joiner_router_queue(
+        self, table: str, pid: int, replica: int
+    ) -> str:
         return self.names.aggregator_to_joiner_router_queue_fmt.format(
-            table=table, pid=int(pid)
+            table=table, pid=int(pid), replica=int(replica)
         )
 
     def joiner_router_exchange(self, table: str) -> str:
