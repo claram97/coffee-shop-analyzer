@@ -78,7 +78,7 @@ class ResultsRouter:
             target_client = self.output_clients[target_queue_name]
             
             target_client.send(body)
-            logger.info(f"Routed DATA_BATCH {batch_number} for query '{query_id}' to queue '{target_queue_name}'")
+            logger.debug(f"Routed DATA_BATCH {batch_number} for query '{query_id}' to queue '{target_queue_name}'")
 
         except ProtocolError as e:
             logger.error(f"Failed to parse message due to protocol error, discarding. Error: {e}. Body prefix: {body[:60]!r}")

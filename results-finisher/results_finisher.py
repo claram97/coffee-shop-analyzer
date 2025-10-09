@@ -66,6 +66,8 @@ class QueryState:
     completed_tables: Set[str] = field(default_factory=set)
     eof_received: Dict[str, int] = field(default_factory=dict)
     last_update_time: float = field(default_factory=time.time)
+    completed_batch_counts: Dict[str, int] = field(default_factory=dict)
+    strategy: Any = field(default=None, repr=False)
     lock: threading.Lock = field(default_factory=threading.Lock, repr=False)
 
 class ResultsFinisher:
@@ -132,11 +134,15 @@ class ResultsFinisher:
             try:
                 query_type = QueryType(int(query_id))
                 logger.info(f"New query detected: ID '{query_id}', Type '{query_type.name}'.")
-                self.active_queries[query_id] = QueryState(query_id=query_id, query_type=query_type)
+                self.active_queries[query_id] = QueryState(
+                    query_id=query_id,
+                    query_type=query_type,
+                    strategy=get_strategy(query_type)
+                )
             except ValueError:
                 raise ValueError(f"Cannot determine a valid QueryType from query_id '{query_id}'")
         
-        logger.info(f"Retrieved state for query '{query_id}'.")
+        logger.debug(f"Retrieved state for query '{query_id}'.")
         return self.active_queries[query_id]
 
     def _update_batch_accounting(self, state: QueryState, table_type: str, batch: DataBatch):
@@ -153,8 +159,10 @@ class ResultsFinisher:
         batch_info = table_batches.setdefault(batch.batch_number, {
             "total_shards": total_shards,
             "shards": {},
-            "shards_info": shards_info  # Store the complete shards_info for verification
+            "shards_info": shards_info,  # Store the complete shards_info for verification
+            "completed": False
         })
+        batch_info.setdefault("completed", False)
 
         batch_query_id = batch.query_ids[0] if batch.query_ids else None
 
@@ -165,28 +173,48 @@ class ResultsFinisher:
 
         shard_entry = batch_info["shards"].setdefault(shard_key, {
             "expected_copies": copy_total,
-            "received_copies": set(),
+            "received_bitmap": [False] * max(1, copy_total),
+            "received_count": 0,
             "shard_info": shards_info
         })
+        shard_entry.setdefault("received_count", 0)
 
-        shard_entry["expected_copies"] = max(shard_entry.get("expected_copies", 1), copy_total)
-        shard_entry.setdefault("received_copies", set()).add(copy_index)
+        if copy_total > shard_entry.get("expected_copies", 1):
+            bitmap_ref = shard_entry.get("received_bitmap", [])
+            additional_slots = copy_total - len(bitmap_ref)
+            if additional_slots > 0:
+                bitmap_ref.extend([False] * additional_slots)
+            shard_entry["received_bitmap"] = bitmap_ref
+            shard_entry["expected_copies"] = copy_total
+        else:
+            shard_entry["expected_copies"] = max(shard_entry.get("expected_copies", 1), copy_total)
+
+        bitmap = shard_entry.setdefault("received_bitmap", [False] * max(1, shard_entry.get("expected_copies", 1)))
+        if copy_index >= len(bitmap):
+            bitmap.extend([False] * (copy_index - len(bitmap) + 1))
+        if not bitmap[copy_index]:
+            bitmap[copy_index] = True
+            shard_entry["received_count"] = shard_entry.get("received_count", 0) + 1
 
         # Calculate the number of received vs expected shards for this batch
         expected_total_shards = self._calculate_total_expected_shards(batch_info)
         received_shard_instances = self._count_received_shards(batch_info)
 
-        logger.info(
+        logger.debug(
             "Query '%s': Received batch %s for table '%s', shard_info: %s, copy %s/%s. BATCH STATE: %s/%s shard copies received.",
             batch_query_id,
             batch.batch_number,
             table_type,
             shards_info,
             copy_index + 1,
-            copy_total,
+            shard_entry.get("expected_copies", copy_total),
             received_shard_instances,
             expected_total_shards
         )
+
+        if not batch_info.get("completed") and received_shard_instances >= expected_total_shards:
+            batch_info["completed"] = True
+            state.completed_batch_counts[table_type] = state.completed_batch_counts.get(table_type, 0) + 1
         
         # If this is an EOF batch, record it
         if batch.batch_msg.batch_status == BatchStatus.EOF:
@@ -203,36 +231,23 @@ class ResultsFinisher:
     def _consolidate_batch_data(self, state: QueryState, table_type: str, batch: DataBatch):
         rows = getattr(batch.batch_msg, 'rows', [])
         if not rows: return
-        strategy = get_strategy(state.query_type)
-        strategy.consolidate(state.consolidated_data, table_type, rows)
+        if state.strategy is None:
+            state.strategy = get_strategy(state.query_type)
+        state.strategy.consolidate(state.consolidated_data, table_type, rows)
 
     def _check_and_mark_table_as_complete(self, state: QueryState, table_type: str):
         max_batch_num = state.eof_received.get(table_type)
         if max_batch_num is None:
             return
 
-        all_batches_info = state.batch_counters.get(table_type, {})
+        if table_type in state.completed_tables:
+            return
 
-        for i in range(1, max_batch_num + 1):
-            batch_info = all_batches_info.get(i)
-            if not batch_info: 
-                return
-            
-            expected_total_shards = self._calculate_total_expected_shards(batch_info)
-            received_shards = self._count_received_shards(batch_info)
+        completed_batches = state.completed_batch_counts.get(table_type, 0)
+        if completed_batches < max_batch_num:
+            return
 
-            if received_shards < expected_total_shards:
-                logger.info(
-                    "Query '%s': Table '%s' batch %s has %s of %s expected shard copies.",
-                    state.query_id,
-                    table_type,
-                    i,
-                    received_shards,
-                    expected_total_shards
-                )
-                return
-        
-        # If all checks pass for all batches up to the EOF, the table is complete.
+        # All batches up to EOF have reached completion once.
         state.completed_tables.add(table_type)
         logging.info(f"Query '{state.query_id}': Table '{table_type}' is now complete.")
     
@@ -268,11 +283,12 @@ class ResultsFinisher:
         shards = batch_info.get("shards", {})
         total_received = 0
         for shard_entry in shards.values():
-            copies = shard_entry.get("received_copies")
-            if isinstance(copies, set):
-                total_received += len(copies)
-            elif shard_entry.get("received"):
-                total_received += 1
+            if "received_count" in shard_entry:
+                total_received += int(shard_entry.get("received_count", 0))
+            else:
+                bitmap = shard_entry.get("received_bitmap")
+                if isinstance(bitmap, list):
+                    total_received += sum(1 for flag in bitmap if flag)
         return total_received
 
     def _extract_copy_info(self, meta: Dict[int, int]) -> Tuple[int, int]:
@@ -307,8 +323,9 @@ class ResultsFinisher:
 
     def _finalize_query(self, state: QueryState):
         try:
-            strategy = get_strategy(state.query_type)
-            final_result = strategy.finalize(state.consolidated_data)
+            if state.strategy is None:
+                state.strategy = get_strategy(state.query_type)
+            final_result = state.strategy.finalize(state.consolidated_data)
             self._send_result(state.query_id, "success", final_result)
         except Exception as e:
             logger.error(f"Error during finalization of query '{state.query_id}': {e}", exc_info=True)
