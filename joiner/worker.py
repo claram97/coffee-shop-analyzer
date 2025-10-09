@@ -16,12 +16,22 @@ from typing import Any, Callable, Dict, List, Optional, Set, Tuple, Union
 from middleware.middleware_client import MessageMiddleware
 from protocol.constants import Opcodes
 from protocol.databatch import DataBatch
-from protocol.entities import (RawMenuItems, RawStore, RawTransaction,
-                               RawTransactionItem, RawTransactionItemMenuItem,
-                               RawTransactionStore, RawTransactionStoreUser,
-                               RawUser)
-from protocol.messages import (EOFMessage, NewTransactionItemsMenuItems,
-                               NewTransactionStores, NewTransactionStoresUsers)
+from protocol.entities import (
+    RawMenuItems,
+    RawStore,
+    RawTransaction,
+    RawTransactionItem,
+    RawTransactionItemMenuItem,
+    RawTransactionStore,
+    RawTransactionStoreUser,
+    RawUser,
+)
+from protocol.messages import (
+    EOFMessage,
+    NewTransactionItemsMenuItems,
+    NewTransactionStores,
+    NewTransactionStoresUsers,
+)
 
 _RecordPtr = Tuple[int, int]
 
@@ -540,9 +550,6 @@ class JoinerWorker:
             for idx, (uid, lst) in enumerate(by_user.items()):
                 idx_u8 = idx % 256
                 template.meta[total_u8] = idx_u8
-                template.shards_info = getattr(db, "shards_info", []) + [
-                    (total_u8, idx_u8)
-                ]
                 template.batch_bytes = template.batch_msg.to_bytes()
                 template_raw = template.to_bytes()
                 self._store.append_list("q4_by_user", uid, (template_raw, lst))
