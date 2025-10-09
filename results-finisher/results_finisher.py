@@ -3,7 +3,7 @@ import os
 import threading
 import time
 from dataclasses import dataclass, field
-from typing import Dict, Any, Set
+from typing import Dict, Any, Set, Tuple
 
 from middleware.middleware_client import MessageMiddlewareQueue
 from protocol import ProtocolError, Opcodes, BatchStatus, DataBatch
@@ -57,7 +57,11 @@ class QueryState:
     # {table: {batch_num: {
     #     "total_shards": int,  # First dimension's total shards (for backward compatibility)
     #     "shards_info": [(total_shards, shard_num), ...],  # All sharding dimensions
-    #     "shards": {shard_key: {"received": bool, "shard_info": [(total_shards, shard_num), ...]}}
+    #     "shards": {shard_key: {
+    #         "expected_copies": int,
+    #         "received_copies": Set[int],
+    #         "shard_info": [(total_shards, shard_num), ...]
+    #     }}
     # }}}
     completed_tables: Set[str] = field(default_factory=set)
     eof_received: Dict[str, int] = field(default_factory=dict)
@@ -137,14 +141,14 @@ class ResultsFinisher:
 
     def _update_batch_accounting(self, state: QueryState, table_type: str, batch: DataBatch):
         shards_info = batch.shards_info if batch.shards_info else [(1, 0)]
-            
+
         # Create a unique shard key from all sharding dimensions
         shard_key = "_".join([f"{total_shards}_{shard_num}" for total_shards, shard_num in shards_info])
-        
+
         # Extract the primary shard dimension for single-dimension use cases
         primary_shard = shards_info[0]
         total_shards, shard_num = primary_shard
-        
+
         table_batches = state.batch_counters.setdefault(table_type, {})
         batch_info = table_batches.setdefault(batch.batch_number, {
             "total_shards": total_shards,
@@ -153,21 +157,36 @@ class ResultsFinisher:
         })
 
         batch_query_id = batch.query_ids[0] if batch.query_ids else None
-        
+
         # Update the total_shards with the first dimension's total shards value
         batch_info["total_shards"] = total_shards
-        
-        # Use the combined shard key for tracking
-        batch_info["shards"].setdefault(shard_key, {
-            "received": True,
-            "shard_info": shards_info  # Store which specific shard configuration this is
+
+        copy_total, copy_index = self._extract_copy_info(getattr(batch, "meta", {}))
+
+        shard_entry = batch_info["shards"].setdefault(shard_key, {
+            "expected_copies": copy_total,
+            "received_copies": set(),
+            "shard_info": shards_info
         })
+
+        shard_entry["expected_copies"] = max(shard_entry.get("expected_copies", 1), copy_total)
+        shard_entry.setdefault("received_copies", set()).add(copy_index)
 
         # Calculate the number of received vs expected shards for this batch
         expected_total_shards = self._calculate_total_expected_shards(batch_info)
-        received_shard_keys = set(batch_info["shards"].keys())
-        
-        logger.info(f"Query '{batch_query_id}': Received batch {batch.batch_number} for table '{table_type}', shard_info: {shards_info}. BATCH STATE: {len(received_shard_keys)}/{expected_total_shards} shards received.")
+        received_shard_instances = self._count_received_shards(batch_info)
+
+        logger.info(
+            "Query '%s': Received batch %s for table '%s', shard_info: %s, copy %s/%s. BATCH STATE: %s/%s shard copies received.",
+            batch_query_id,
+            batch.batch_number,
+            table_type,
+            shards_info,
+            copy_index + 1,
+            copy_total,
+            received_shard_instances,
+            expected_total_shards
+        )
         
         # If this is an EOF batch, record it
         if batch.batch_msg.batch_status == BatchStatus.EOF:
@@ -199,15 +218,18 @@ class ResultsFinisher:
             if not batch_info: 
                 return
             
-            # Calculate the expected total number of shard combinations
             expected_total_shards = self._calculate_total_expected_shards(batch_info)
-            
-            # Get the actual shard keys we've received
-            received_shard_keys = set(batch_info["shards"].keys())
-            
-            # Check if we've received all expected shard combinations
-            if len(received_shard_keys) < expected_total_shards:
-                logger.info(f"Query '{state.query_id}': Table '{table_type}' batch {i} has {len(received_shard_keys)} of {expected_total_shards} expected shards.")
+            received_shards = self._count_received_shards(batch_info)
+
+            if received_shards < expected_total_shards:
+                logger.info(
+                    "Query '%s': Table '%s' batch %s has %s of %s expected shard copies.",
+                    state.query_id,
+                    table_type,
+                    i,
+                    received_shards,
+                    expected_total_shards
+                )
                 return
         
         # If all checks pass for all batches up to the EOF, the table is complete.
@@ -223,18 +245,59 @@ class ResultsFinisher:
         
         For example, if shards_info contains [(2, x), (3, y)], we expect 2*3 = 6 combinations total.
         """
-        if not batch_info.get("shards"):
-            return 0
-        
-        # Get the shards_info from the batch_info
+        base_expected = 1
         shards_info = batch_info.get("shards_info", [])
-        
-        # Simply multiply all total_shards values to get the total number of combinations
-        total = 1
-        for total_shards, _ in shards_info:
-            total *= total_shards
-            
-        return total
+        if not shards_info:
+            base_expected = max(1, len(batch_info.get("shards", {})) or 0)
+        else:
+            for total_shards, _ in shards_info:
+                base_expected *= max(1, int(total_shards))
+
+        shards = batch_info.get("shards", {})
+        if not shards:
+            return base_expected
+
+        additional_copies = 0
+        for shard_entry in shards.values():
+            expected_copies = max(1, int(shard_entry.get("expected_copies", 1)))
+            additional_copies += expected_copies - 1
+
+        return base_expected + additional_copies
+
+    def _count_received_shards(self, batch_info) -> int:
+        shards = batch_info.get("shards", {})
+        total_received = 0
+        for shard_entry in shards.values():
+            copies = shard_entry.get("received_copies")
+            if isinstance(copies, set):
+                total_received += len(copies)
+            elif shard_entry.get("received"):
+                total_received += 1
+        return total_received
+
+    def _extract_copy_info(self, meta: Dict[int, int]) -> Tuple[int, int]:
+        if not meta:
+            return 1, 0
+
+        try:
+            normalized = {int(k): int(v) for k, v in meta.items()}
+        except (TypeError, ValueError):
+            return 1, 0
+
+        positive_keys = [k for k in normalized.keys() if k > 0]
+        if not positive_keys:
+            return 1, 0
+
+        copy_total = max(positive_keys)
+        copy_index = normalized.get(copy_total, 0)
+
+        copy_total = max(1, copy_total)
+        if copy_index < 0:
+            copy_index = 0
+        if copy_index >= copy_total:
+            copy_index = copy_index % copy_total
+
+        return copy_total, copy_index
 
     def _is_query_complete(self, state: QueryState) -> bool:
         expected_table = QUERY_TYPE_TO_TABLE.get(state.query_type)
