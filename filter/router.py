@@ -179,7 +179,9 @@ class QueryPolicyResolver:
                 return 3
             if len(batch_queries) == 2:
                 return 2
-            if batch_queries == [1] or batch_queries == [3] or batch_queries == [4]:
+            if batch_queries == [1]:
+                return 3
+            if batch_queries == [3] or batch_queries == [4]:
                 return 1
         return 1
 
