@@ -229,9 +229,9 @@ class JoinerRouter:
         buckets: Dict[int, List[Any]] = {}
         for r in rows:
             k = _shard_key_for_row(table_id, r, queries)
-            if k is None or not k.strip():
+            if 1 not in queries and (k is None or not k.strip()):
                 continue
-            shard = _hash_to_shard(k, cfg.joiner_shards)
+            shard = 0 if k is None else _hash_to_shard(k, cfg.joiner_shards)
             buckets.setdefault(shard, []).append(r)
 
         if log.isEnabledFor(logging.INFO):
@@ -242,9 +242,10 @@ class JoinerRouter:
             if not shard_rows:
                 continue
             db_sh = copy.deepcopy(db)
-            db_sh.shards_info = getattr(db, "shards_info", []) + [
-                (cfg.joiner_shards, shard)
-            ]
+            if 1 not in queries:
+                db_sh.shards_info = getattr(db, "shards_info", []) + [
+                    (cfg.joiner_shards, shard)
+                ]
             if getattr(db_sh, "batch_msg", None) and hasattr(db_sh.batch_msg, "rows"):
                 db_sh.batch_msg.rows = shard_rows
             db_sh.batch_bytes = db_sh.batch_msg.to_bytes()

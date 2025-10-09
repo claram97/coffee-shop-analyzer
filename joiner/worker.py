@@ -471,7 +471,7 @@ class JoinerWorker:
             (db.batch_msg.rows or []) if getattr(db, "batch_msg", None) else []
         )
 
-        if qset == {Q1}:
+        if Q1 in qset:
             self._log.info("TX Q1 passthrough rows=%d", len(tx_rows))
             self._send(db)
             return
@@ -577,9 +577,9 @@ class JoinerWorker:
         kind, msg = self._decode_msg(raw)
         if kind == "eof":
             eof: EOFMessage = msg
-            self._on_table_eof(_eof_table_id(eof))
-            self._stop_queue(Opcodes.NEW_USERS)
-            self._flush_remaining_q4_without_user()
+            if self._on_table_eof(_eof_table_id(eof)):
+                self._stop_queue(Opcodes.NEW_USERS)
+                self._flush_remaining_q4_without_user()
             return
         if kind != "db":
             return
