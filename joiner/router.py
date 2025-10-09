@@ -52,7 +52,7 @@ def _norm_user_id(v: Any) -> Optional[str]:
     if v is None:
         return None
     s = str(v)
-    return s.split(".", 1)[0] if s.endswith(".0") else s
+    return s.split(".", maxsplit=1)[0] if s.endswith(".0") else s
 
 
 def _shard_key_for_row(table_id: int, row, queries: List[int]) -> Optional[str]:
@@ -161,7 +161,6 @@ class JoinerRouter:
 
     @staticmethod
     def _eof_table_id(eof: EOFMessage) -> Optional[int]:
-        # Intentar ambos: atributo y método helper
         raw = getattr(eof, "table_type", None)
         if raw in (None, "") and hasattr(eof, "get_table_type"):
             try:
@@ -174,11 +173,9 @@ class JoinerRouter:
 
         s = str(raw).strip().lower()
 
-        # nombre → id
         if s in NAME_TO_ID:
             return NAME_TO_ID[s]
 
-        # numérico → id
         try:
             num = int(s)
             return num if num in ID_TO_NAME else None
@@ -232,19 +229,22 @@ class JoinerRouter:
         buckets: Dict[int, List[Any]] = {}
         for r in rows:
             k = _shard_key_for_row(table_id, r, queries)
-            shard = 0 if k is None else _hash_to_shard(k, cfg.joiner_shards)
+            if k is None or not k.strip():
+                continue
+            shard = _hash_to_shard(k, cfg.joiner_shards)
             buckets.setdefault(shard, []).append(r)
 
         if log.isEnabledFor(logging.INFO):
             sizes = {sh: len(rs) for sh, rs in buckets.items()}
             log.info("shard plan table=%s -> %s", tname, sizes)
 
-        # Emitir por shard
         for shard, shard_rows in buckets.items():
             if not shard_rows:
                 continue
             db_sh = copy.deepcopy(db)
-            db_sh.shards_info.append((cfg.joiner_shards, shard))
+            db_sh.shards_info = getattr(db, "shards_info", []) + [
+                (cfg.joiner_shards, shard)
+            ]
             if getattr(db_sh, "batch_msg", None) and hasattr(db_sh.batch_msg, "rows"):
                 db_sh.batch_msg.rows = shard_rows
             db_sh.batch_bytes = db_sh.batch_msg.to_bytes()
