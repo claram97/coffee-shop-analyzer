@@ -186,7 +186,7 @@ class JoinerWorker:
         self._router_replicas = router_replicas
 
         self._pending_eofs: Dict[tuple[int, str, str], Set[int]] = {}
-        self._part_counter: Dict[int, int] = {}
+        self._part_counter: Dict[tuple[int, str, str], int] = {}
 
     def _log_db(self, where: str, db: DataBatch):
         try:
