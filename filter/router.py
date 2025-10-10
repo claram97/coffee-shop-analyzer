@@ -6,6 +6,7 @@ import hashlib
 import logging
 from collections import defaultdict
 from dataclasses import dataclass
+from random import randint
 from typing import Any, Dict, List, Optional, Union
 
 from middleware.middleware_client import (
@@ -278,7 +279,7 @@ class FilterRouter:
                     b.batch_msg = inner
                     b.query_ids = list(new_queries)
                     b.batch_bytes = b.batch_msg.to_bytes()
-                    self._p.requeue_to_router(b)
+                    self._handle_data(b)
             except Exception as e:
                 self._log.error("requeue_to_router failed: %s", e)
 
@@ -288,7 +289,6 @@ class FilterRouter:
                 table,
                 self._pending_batches[table],
             )
-            self._maybe_flush_pending_eof(table)
             return
 
         try:
@@ -303,19 +303,17 @@ class FilterRouter:
     def _send_sharded_to_aggregators(
         self, batch: DataBatch, table: str, queries: List[int]
     ) -> None:
+        num_parts = max(1, int(self._cfg.aggregators))
         if table in ["stores", "menu_items"]:
-            self._p.send_to_aggregator_partition(0, batch)
+            self._p.send_to_aggregator_partition(randint(0, num_parts - 1), batch)
             return
         rows = rows_of(batch)
-        num_parts = max(1, int(self._cfg.aggregators))
         self._log.debug(
             "shard plan table=%s parts=%d rows=%d", table, num_parts, len(rows)
         )
 
         if not isinstance(rows, list) or len(rows) == 0:
-            pid = self._pick_part_for_empty_payload(
-                table, queries, int(getattr(batch, "reserved_u16", 0))
-            )
+            pid = randint(0, self._cfg.aggregators - 1)
             self._log.debug("→ aggregator (no-rows) part=%d table=%s", pid, table)
             self._p.send_to_aggregator_partition(pid, batch)
             return
