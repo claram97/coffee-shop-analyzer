@@ -122,8 +122,8 @@ class JoinerRouter:
         self._in = in_mw
         self._pool = publisher_pool
         self._cfg = route_cfg
-        self._pending_eofs: Dict[int, Set[int]] = {}
-        self._part_counter: Dict[int, int] = {}
+        self._pending_eofs: Dict[tuple[int, str, str], Set[int]] = {}
+        self._part_counter: Dict[tuple[int, str, str], int] = {}
         self._fr_replicas = fr_replicas
         log.info(
             "JoinerRouter init: tables=%s",
@@ -257,15 +257,18 @@ class JoinerRouter:
         if table_id is None:
             log.warning("EOF without valid table_type; ignoring")
             return
+        cid = getattr(eof, "client_id", "")
+        rid = getattr(eof, "run_id", "")
+        key = (table_id, cid, rid)
         cfg = self._cfg.get(table_id)
         if cfg is None:
             log.warning("EOF for unknown table_id=%s; ignoring", table_id)
             return
 
         tname = ID_TO_NAME.get(table_id, f"#{table_id}")
-        recvd = self._pending_eofs.setdefault(table_id, set())
-        next_idx = self._part_counter.get(table_id, 0) + 1
-        self._part_counter[table_id] = next_idx
+        recvd = self._pending_eofs.setdefault(key, set())
+        next_idx = self._part_counter.get(key, 0) + 1
+        self._part_counter[key] = next_idx
         recvd.add(next_idx)
 
         log.info("EOF recv table=%s progress=%d/%d", tname, len(recvd), cfg.agg_shards)
@@ -277,8 +280,8 @@ class JoinerRouter:
                 cfg.joiner_shards,
             )
             self._broadcast(cfg, raw_eof, shards=cfg.joiner_shards)
-            self._pending_eofs[table_id] = set()
-            self._part_counter[table_id] = 0
+            self._pending_eofs.pop(key)
+            self._part_counter.pop(key)
 
     def _rk(self, cfg: TableRouteCfg, shard: int) -> str:
         return cfg.key_pattern.format(shard=int(shard))
