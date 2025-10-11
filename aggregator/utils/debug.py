@@ -14,13 +14,43 @@ def log_query2_results(aggregated_data: Dict) -> None:
     logging.debug('Year | Month | Item_ID | Total_Quantity | Total_Revenue')
     logging.debug('-' * 60)
 
+    total_items = 0
+    missing_quantity_items = 0
+    zero_quantity_items = 0
+    
     for (year, month, item_id), totals in aggregated_data.items():
+        total_items += 1
+        quantity = totals.get("total_quantity", 0)
+        
+        # Track missing or zero quantity metrics
+        if "total_quantity" not in totals:
+            missing_quantity_items += 1
+        elif quantity == 0:
+            zero_quantity_items += 1
+            
+        # Enhanced logging with warnings for quantity issues
+        quantity_str = f'{quantity:13.1f}'
+        if "total_quantity" not in totals:
+            quantity_str = f'{"MISSING":>13}'
+        elif quantity == 0:
+            quantity_str = f'{"0.0 (ZERO)":>13}'
+            
         logging.debug(
             f'{year:4d} | {month:5d} | {item_id:7s} | '
-            f'{totals["total_quantity"]:13.1f} | {totals["total_revenue"]:12.2f}'
+            f'{quantity_str} | {totals.get("total_revenue", 0):12.2f}'
         )
 
     logging.debug(f'Total groups: {len(aggregated_data)}')
+    
+    # Report on quantity metric status
+    if missing_quantity_items > 0 or zero_quantity_items > 0:
+        logging.warning(
+            f'Q2 Quantity Metrics Issues: {missing_quantity_items} missing, '
+            f'{zero_quantity_items} zero out of {total_items} items'
+        )
+    else:
+        logging.info('Q2 Quantity Metrics: All items have valid quantity values')
+        
     logging.debug('')
 
 

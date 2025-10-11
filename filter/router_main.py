@@ -32,20 +32,21 @@ def resolve_config_path(cli_value: str | None) -> str:
 
 
 def build_filter_router_from_config(cfg: Config) -> RouterServer:
-    producer = ExchangeBusProducer(
-        host=cfg.broker.host,
-        filters_pool_queue=cfg.names.filters_pool_queue,
-        exchange_fmt=cfg.names.filter_router_exchange_fmt,
-        rk_fmt=cfg.names.filter_router_rk_fmt,
-    )
-    table_cfg = TableConfig(cfg.agg_shards)
-    policy = QueryPolicyResolver()
     pid = int(os.environ["FILTER_ROUTER_INDEX"])
     router_in = MessageMiddlewareExchange(
         host=cfg.broker.host,
         exchange_name=cfg.names.orch_to_fr_exchange,
         route_keys=[cfg.orchestrator_rk(pid)],
     )
+    producer = ExchangeBusProducer(
+        host=cfg.broker.host,
+        filters_pool_queue=cfg.names.filters_pool_queue,
+        in_mw=router_in,
+        exchange_fmt=cfg.names.filter_router_exchange_fmt,
+        rk_fmt=cfg.names.filter_router_rk_fmt,
+    )
+    table_cfg = TableConfig(cfg.workers.aggregators)
+    policy = QueryPolicyResolver()
     server = RouterServer(
         host=cfg.broker.host,
         router_in=router_in,

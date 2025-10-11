@@ -48,12 +48,23 @@ def _hash_to_shard(s: str, num_shards: int) -> int:
     return int.from_bytes(h, "little") % num_shards
 
 
+def _norm_user_id(v: Any) -> Optional[str]:
+    if v is None:
+        return None
+    s = str(v)
+    return s.split(".", maxsplit=1)[0] if s.endswith(".0") else s
+
+
 def _shard_key_for_row(table_id: int, row, queries: List[int]) -> Optional[str]:
     q = set(queries)
 
+    if table_id == Opcodes.NEW_USERS:
+        uid = getattr(row, "user_id", None)
+        return _norm_user_id(uid)
+
     if 4 in q:
-        key = getattr(row, "user_id", None)
-        return str(key) if key is not None else None
+        uid = getattr(row, "user_id", None)
+        return _norm_user_id(uid)
 
     if 2 in q and table_id == Opcodes.NEW_TRANSACTION_ITEMS:
         key = getattr(row, "item_id", None)
@@ -150,7 +161,6 @@ class JoinerRouter:
 
     @staticmethod
     def _eof_table_id(eof: EOFMessage) -> Optional[int]:
-        # Intentar ambos: atributo y método helper
         raw = getattr(eof, "table_type", None)
         if raw in (None, "") and hasattr(eof, "get_table_type"):
             try:
@@ -163,11 +173,9 @@ class JoinerRouter:
 
         s = str(raw).strip().lower()
 
-        # nombre → id
         if s in NAME_TO_ID:
             return NAME_TO_ID[s]
 
-        # numérico → id
         try:
             num = int(s)
             return num if num in ID_TO_NAME else None
@@ -221,6 +229,8 @@ class JoinerRouter:
         buckets: Dict[int, List[Any]] = {}
         for r in rows:
             k = _shard_key_for_row(table_id, r, queries)
+            if 1 not in queries and (k is None or not k.strip()):
+                continue
             shard = 0 if k is None else _hash_to_shard(k, cfg.joiner_shards)
             buckets.setdefault(shard, []).append(r)
 
@@ -228,12 +238,14 @@ class JoinerRouter:
             sizes = {sh: len(rs) for sh, rs in buckets.items()}
             log.info("shard plan table=%s -> %s", tname, sizes)
 
-        # Emitir por shard
         for shard, shard_rows in buckets.items():
             if not shard_rows:
                 continue
             db_sh = copy.deepcopy(db)
-            db_sh.shards_info.append((cfg.joiner_shards, shard))
+            if 1 not in queries:
+                db_sh.shards_info = getattr(db, "shards_info", []) + [
+                    (cfg.joiner_shards, shard)
+                ]
             if getattr(db_sh, "batch_msg", None) and hasattr(db_sh.batch_msg, "rows"):
                 db_sh.batch_msg.rows = shard_rows
             db_sh.batch_bytes = db_sh.batch_msg.to_bytes()
@@ -317,7 +329,7 @@ def build_route_cfg_from_config(cfg: "Config") -> Dict[int, TableRouteCfg]:
     route: Dict[int, TableRouteCfg] = {}
 
     for tname, tid in NAME_TO_ID.items():
-        agg_parts = cfg.agg_partitions(tname)
+        agg_parts = cfg.workers.aggregators
         if tname in LIGHT_TABLES:
             j_parts = cfg.joiner_partitions(tname)
             if j_parts <= 1:
@@ -358,14 +370,6 @@ def build_publisher_pool_from_config(cfg: "Config") -> ExchangePublisherPool:
 
     log.info("Publisher pool factory using host=%s", cfg.broker.host)
     return ExchangePublisherPool(factory)
-
-
-def build_joiner_router_from_config(cfg: "Config", in_queue: str) -> JoinerRouter:
-    log.info("Build JoinerRouter from queue=%s host=%s", in_queue, cfg.broker.host)
-    in_mw = MessageMiddlewareQueue(cfg.broker.host, in_queue)
-    pool = build_publisher_pool_from_config(cfg)
-    route_cfg = build_route_cfg_from_config(cfg)
-    return JoinerRouter(in_mw=in_mw, publisher_pool=pool, route_cfg=route_cfg)
 
 
 class JoinerRouterServer:

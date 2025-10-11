@@ -6,7 +6,7 @@ import logging
 import threading
 import time
 from middleware.middleware_client import MessageMiddlewareQueue, MessageMiddlewareDisconnectedError
-from protocol import DataBatch, Opcodes
+from protocol import DataBatch, Opcodes, BatchStatus
 from protocol.messages import QueryResult1, QueryResult2, QueryResult3, QueryResult4, QueryResultError
 
 
@@ -94,19 +94,72 @@ class ResultsConsumer:
                 
             query_id = str(data_batch.query_ids[0])
             
-            # Log the receipt of the result
-            result_type = "unknown"
-            if data_batch.table_ids:
-                result_type = f"opcode_{data_batch.table_ids[0]}"
-                
-            logging.info(f"action: result_received | result: success | query_id: {query_id} | type: {result_type}")
+            # Log detailed information about the result
+            inner_opcode = getattr(data_batch.batch_msg, "opcode", "unknown")
+            batch_status = getattr(data_batch.batch_msg, "batch_status", "unknown")
+            row_count = len(getattr(data_batch.batch_msg, "rows", [])) if hasattr(data_batch.batch_msg, "rows") else 0
+            
+            # Get status text
+            status_text = "UNKNOWN"
+            if batch_status == BatchStatus.CONTINUE:
+                status_text = "CONTINUE"
+            elif batch_status == BatchStatus.EOF:
+                status_text = "EOF"
+            elif batch_status == BatchStatus.CANCEL:
+                status_text = "CANCEL"
+            
+            # Get opcode name
+            opcode_name = self._get_opcode_name(inner_opcode)
+            
+            # Log detailed information about the result
+            logging.info(
+                f"action: result_received | result: success | query_id: {query_id} | " 
+                f"opcode: {inner_opcode} ({opcode_name}) | batch_status: {batch_status} ({status_text}) | rows: {row_count}"
+            )
+            
+            # Log ALL rows from the result
+            if row_count > 0 and hasattr(data_batch.batch_msg, "rows"):
+                try:
+                    for i, row in enumerate(data_batch.batch_msg.rows):
+                        row_data = {}
+                        if isinstance(row, dict):
+                            # For dictionary rows
+                            row_data = row
+                        else:
+                            # For object rows, convert to dict for logging
+                            attrs = [attr for attr in dir(row) if not attr.startswith('_') and not callable(getattr(row, attr))]
+                            row_data = {attr: getattr(row, attr) for attr in attrs}
+                        
+                        logging.info(f"action: result_row | query_id: {query_id} | row: {i+1}/{row_count} | data: {row_data}")
+                except Exception as e:
+                    logging.warning(f"action: log_row_data | result: fail | error: {str(e)}")
             
             # Forward the result to the client
             self._forward_result_to_client(query_id, body)
             
         except Exception as e:
-            logging.error(f"action: process_result | result: fail | error: {e}")
+            logging.error(f"action: process_result | result: fail | error: {str(e)}")
     
+    def _get_opcode_name(self, opcode):
+        """Get a human-readable name for an opcode.
+        
+        Args:
+            opcode: The opcode to get the name for
+            
+        Returns:
+            A string name for the opcode
+        """
+        opcode_names = {
+            Opcodes.QUERY_RESULT_1: "QUERY_RESULT_1",
+            Opcodes.QUERY_RESULT_2: "QUERY_RESULT_2",
+            Opcodes.QUERY_RESULT_3: "QUERY_RESULT_3",
+            Opcodes.QUERY_RESULT_4: "QUERY_RESULT_4",
+            Opcodes.QUERY_RESULT_ERROR: "QUERY_RESULT_ERROR"
+        }
+        return opcode_names.get(opcode, "UNKNOWN")
+        
+
+            
     def _forward_result_to_client(self, query_id, result_bytes):
         """Forward the result to the appropriate client.
         
@@ -125,12 +178,21 @@ class ResultsConsumer:
         try:
             # Send the raw bytes to the client
             client_conn.sendall(result_bytes)
-            logging.info(f"action: forward_result | result: success | query_id: {query_id}")
+            bytes_sent = len(result_bytes)
+            logging.info(f"action: forward_result | result: success | query_id: {query_id} | bytes_sent: {bytes_sent}")
             
-            # After forwarding the result, unregister the client
-            self.unregister_client_for_query(query_id)
+            # Check if this is an EOF batch - if so, we can unregister the client
+            try:
+                data_batch = DataBatch.deserialize_from_bytes(result_bytes)
+                batch_status = getattr(data_batch.batch_msg, "batch_status", None)
+                
+                if batch_status == BatchStatus.EOF:
+                    logging.info(f"action: eof_result_forwarded | query_id: {query_id} | unregistering_client: true")
+                    self.unregister_client_for_query(query_id)
+            except Exception as e:
+                logging.warning(f"action: check_eof | result: fail | query_id: {query_id} | error: {str(e)}")
             
         except Exception as e:
-            logging.error(f"action: forward_result | result: fail | query_id: {query_id} | error: {e}")
+            logging.error(f"action: forward_result | result: fail | query_id: {query_id} | error: {str(e)}")
             # Clean up the connection on error
             self.unregister_client_for_query(query_id)

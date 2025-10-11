@@ -21,7 +21,10 @@ while getopts "c:o:" opt; do
 done
 
 read FILTERS AGGS JOINERS < <(python3 ./app_config/config_subscript.py -c "$INI_PATH" workers --format=plain)
-read FR_ROUTERS < <(python3 ./app_config/config_subscript.py -c "$INI_PATH" routers --format=plain)
+read FR_ROUTERS J_ROUTERS < <(python3 ./app_config/config_subscript.py -c "$INI_PATH" routers --format=plain)
+
+echo "$FR_ROUTERS"
+echo "$J_ROUTERS"
 
 eval "$(python3 ./app_config/config_subscript.py -c "$INI_PATH" broker --format=env)"
 
@@ -152,12 +155,13 @@ cat >> "$OUT_PATH" <<YAML
         condition: service_started
 YAML
 done
-#
-# --- joiner-router (único) ---
+
+# --- joiner-router ---
+for i in $(seq 0 $((J_ROUTERS-1))); do
 cat >> "$OUT_PATH" <<YAML
 
-  joiner-router:
-    container_name: joiner-router
+  joiner-router-${i}:
+    container_name: joiner-router-${i}
     build:
       context: .
       dockerfile: joiner/Dockerfile.router
@@ -165,6 +169,7 @@ cat >> "$OUT_PATH" <<YAML
       - PYTHONUNBUFFERED=1
       - LOG_LEVEL=INFO
       - CONFIG_PATH=/config/config.ini
+      - JOINER_ROUTER_INDEX=${i}
     networks:
       - testing_net
     volumes:
@@ -175,6 +180,7 @@ cat >> "$OUT_PATH" <<YAML
       aggregator-0:
         condition: service_started
 YAML
+done
 
 # --- joiner workers (shardeados) ---
 for i in $(seq 0 $((JOINERS-1))); do
@@ -197,61 +203,61 @@ cat >> "$OUT_PATH" <<YAML
     depends_on:
       rabbitmq:
         condition: service_healthy
-      joiner-router:
+      joiner-router-0:
         condition: service_started
 YAML
 done
 
-# # --- results-router ---
-# cat >> "$OUT_PATH" <<YAML
-#
-#   results-router:
-#     container_name: results-router
-#     build:
-#       context: .
-#       dockerfile: results-finisher/Dockerfile.router
-#     environment:
-#       - PYTHONUNBUFFERED=1
-#       - RABBITMQ_HOST=rabbitmq
-#       - LOG_LEVEL=INFO
-#       - INPUT_QUEUE=results.controller.in
-#       - OUTPUT_QUEUES=finisher_input_queue_1,finisher_input_queue_2
-#     networks:
-#       - testing_net
-#     volumes:
-#       - ./results-finisher:/app/results-finisher:ro
-#     depends_on:
-#       rabbitmq:
-#         condition: service_healthy
-# YAML
+# --- results-router ---
+cat >> "$OUT_PATH" <<YAML
 
-# # --- results-finishers (multiple instances) ---
-# for i in 1 2; do
-# cat >> "$OUT_PATH" <<YAML
-#
-#   results-finisher-${i}:
-#     container_name: results-finisher-${i}
-#     build:
-#       context: .
-#       dockerfile: results-finisher/Dockerfile
-#     environment:
-#       - PYTHONUNBUFFERED=1
-#       - RABBITMQ_HOST=rabbitmq
-#       - LOG_LEVEL=INFO
-#       - STRATEGY_MODE=append_only  # Can be 'append_only' or 'incremental'
-#       - INPUT_QUEUE=finisher_input_queue_${i}
-#       - OUTPUT_QUEUE=orchestrator_results_queue
-#     networks:
-#       - testing_net
-#     volumes:
-#       - ./results-finisher:/app/results-finisher:ro
-#     depends_on:
-#       rabbitmq:
-#         condition: service_healthy
-#       results-router:
-#         condition: service_started
-# YAML
-# done
+  results-router:
+    container_name: results-router
+    build:
+      context: .
+      dockerfile: results-finisher/Dockerfile.router
+    environment:
+      - PYTHONUNBUFFERED=1
+      - RABBITMQ_HOST=rabbitmq
+      - LOG_LEVEL=INFO
+      - INPUT_QUEUE=results.controller.in
+      - OUTPUT_QUEUES=finisher_input_queue_1,finisher_input_queue_2
+    networks:
+      - testing_net
+    volumes:
+      - ./results-finisher:/app/results-finisher:ro
+    depends_on:
+      rabbitmq:
+        condition: service_healthy
+YAML
+
+# --- results-finishers (multiple instances) ---
+for i in 1 2; do
+cat >> "$OUT_PATH" <<YAML
+
+  results-finisher-${i}:
+    container_name: results-finisher-${i}
+    build:
+      context: .
+      dockerfile: results-finisher/Dockerfile
+    environment:
+      - PYTHONUNBUFFERED=1
+      - RABBITMQ_HOST=rabbitmq
+      - LOG_LEVEL=INFO
+      - STRATEGY_MODE=append_only  # Can be 'append_only' or 'incremental'
+      - INPUT_QUEUE=finisher_input_queue_${i}
+      - OUTPUT_QUEUE=orchestrator_results_queue
+    networks:
+      - testing_net
+    volumes:
+      - ./results-finisher:/app/results-finisher:ro
+    depends_on:
+      rabbitmq:
+        condition: service_healthy
+      results-router:
+        condition: service_started
+YAML
+done
 
 # --- networks ---
 cat >> "$OUT_PATH" <<'YAML'

@@ -3,9 +3,8 @@ from __future__ import annotations
 import logging
 import os
 import time
-from datetime import datetime, timezone
+from datetime import datetime
 from typing import Any, Callable, Dict, List, Optional, Tuple
-from zoneinfo import ZoneInfo
 
 from middleware.middleware_client import (
     MessageMiddlewareExchange,
@@ -32,9 +31,6 @@ def _setup_logging() -> None:
 
 _setup_logging()
 
-MYT_TZ = ZoneInfo("Asia/Kuala_Lumpur")
-
-
 def current_step_from_mask(mask: int) -> Optional[int]:
     if mask == 0:
         return None
@@ -45,9 +41,9 @@ def current_step_from_mask(mask: int) -> Optional[int]:
     return i - 1
 
 
-def _parse_dt_utc(s: str) -> Optional[datetime]:
+def _parse_dt_local(s: str) -> Optional[datetime]:
     try:
-        return datetime.strptime(s, "%Y-%m-%d %H:%M:%S").replace(tzinfo=timezone.utc)
+        return datetime.strptime(s, "%Y-%m-%d %H:%M:%S")
     except Exception:
         return None
 
@@ -56,10 +52,10 @@ def hour_filter(rows) -> List[Any]:
     kept = []
     for r in rows:
         ts = r.created_at
-        dt = _parse_dt_utc(ts)
+        dt = _parse_dt_local(ts)
         if not dt:
             continue
-        if 6 <= dt.astimezone(MYT_TZ).hour <= 23:
+        if 6 <= dt.hour <= 23:
             kept.append(r)
     return kept
 
@@ -67,11 +63,15 @@ def hour_filter(rows) -> List[Any]:
 def final_amount_filter(rows) -> List[Any]:
     kept = []
     for r in rows:
-        try:
-            if float(r.final_amount, 0) >= 75.0:
-                kept.append(r)
-        except Exception:
+        final_amount_raw = getattr(r, "final_amount", None)
+        if final_amount_raw is None:
             continue
+        try:
+            amount = float(str(final_amount_raw).strip())
+        except (TypeError, ValueError):
+            continue
+        if amount >= 75.0:
+            kept.append(r)
     return kept
 
 
@@ -89,7 +89,7 @@ def year_filter(rows, min_year: int = 2024, max_year: int = 2025) -> List[Any]:
     return kept
 
 
-FilterFn = Callable[List[Any], List[Any]]
+FilterFn = Callable[[List[Any]], List[Any]]
 FilterRegistry = Dict[Tuple[int, int, str], FilterFn]
 
 

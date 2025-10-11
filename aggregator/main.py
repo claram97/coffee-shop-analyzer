@@ -6,6 +6,23 @@ from configparser import ConfigParser
 from aggregator import Aggregator
 
 
+def resolve_config_path() -> str:
+    candidates = []
+    env_cfg_path = os.getenv("CONFIG_PATH")
+    if env_cfg_path:
+        candidates.append(env_cfg_path)
+    env_cfg = os.getenv("CFG")
+    if env_cfg:
+        candidates.append(env_cfg)
+    candidates.extend(("/config/config.ini", "./config.ini", "/app_config/config.ini"))
+
+    for path in candidates:
+        if path and os.path.exists(path):
+            return os.path.abspath(path)
+
+    return os.path.abspath(candidates[0])
+
+
 def initialize_config():
     """Parse env variables or config file to find program config params
 
@@ -16,9 +33,7 @@ def initialize_config():
     If parsing succeeded, the function returns a ConfigParser object
     with config parameters
     """
-
     config = ConfigParser(os.environ)
-    # If config.ini does not exists original config object is not modified
     config.read("config.ini")
 
     config_params = {}
@@ -27,7 +42,7 @@ def initialize_config():
             "LOGGING_LEVEL", config["DEFAULT"]["LOGGING_LEVEL"]
         )
         config_params["aggregator_id"] = os.getenv(
-            "AGGREGATOR_ID", config.get("DEFAULT", "AGGREGATOR_ID", fallback="2")
+            "AGGREGATOR_ID", config.get("DEFAULT", "AGGREGATOR_ID", fallback="0")
         )
 
     except KeyError as e:
@@ -78,4 +93,3 @@ def initialize_log(logging_level):
 
 if __name__ == "__main__":
     main()
-

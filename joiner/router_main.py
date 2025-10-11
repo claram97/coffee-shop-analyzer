@@ -120,6 +120,8 @@ def main():
     ap.add_argument("--log-level", default=os.environ.get("LOG_LEVEL", "INFO"))
     args = ap.parse_args()
 
+    jr_index = int(os.environ["JOINER_ROUTER_INDEX"])
+
     logging.basicConfig(
         level=getattr(logging, args.log_level.upper(), logging.INFO),
         format="%(asctime)s %(levelname)s [joiner-router] %(message)s",
@@ -159,9 +161,9 @@ def main():
         (Opcodes.NEW_STORES, "stores"),
     ]
     for tid, tname in tables_for_input:
-        parts = cfg.agg_partitions(tname)
+        parts = cfg.workers.aggregators
         for pid in range(parts):
-            q = cfg.aggregator_to_joiner_router_queue(tname, pid)
+            q = cfg.aggregator_to_joiner_router_queue(tname, pid, jr_index)
             in_queues.append(q)
 
     log.info("Entradas (N=%d): %s", len(in_queues), ", ".join(in_queues))
