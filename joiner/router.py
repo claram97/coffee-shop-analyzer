@@ -202,30 +202,19 @@ class JoinerRouter:
             return
 
         inner = getattr(db, "batch_msg", None)
-        rows = (inner.rows or []) if (inner and hasattr(inner, "rows")) else []
-        log.info(
-            "recv DataBatch table=%s queries=%s rows=%d", tname, queries, len(rows)
-        )
-        if log.isEnabledFor(logging.DEBUG) and rows:
-            sample = rows[0]
-            keys = (
-                [k for k in dir(sample) if not k.startswith("_")]
-                if not isinstance(sample, dict)
-                else list(sample.keys())
-            )
-            log.debug("sample keys: %s", keys[:8])
+        log.debug("recv DataBatch table=%s queries=%s", tname, queries)
 
         if is_broadcast_table(table_id, queries):
             log.info("broadcast table=%s shards=%d", tname, cfg.joiner_shards)
             self._broadcast(cfg, raw)
             return
 
+        rows = (inner.rows or []) if (inner and hasattr(inner, "rows")) else []
         if not rows:
             log.debug("empty rows → shard=0 (metadata-only) table=%s", tname)
             self._publish(cfg, shard=0, raw=raw)
             return
 
-        # Bucket por shard
         buckets: Dict[int, List[Any]] = {}
         for r in rows:
             k = _shard_key_for_row(table_id, r, queries)
@@ -236,12 +225,13 @@ class JoinerRouter:
 
         if log.isEnabledFor(logging.INFO):
             sizes = {sh: len(rs) for sh, rs in buckets.items()}
-            log.info("shard plan table=%s -> %s", tname, sizes)
+            log.debug("shard plan table=%s -> %s", tname, sizes)
 
         for shard, shard_rows in buckets.items():
             if not shard_rows:
                 continue
-            db_sh = copy.deepcopy(db)
+            db_sh = copy.copy(db)
+            db_sh.query_ids = db.query_ids
             if 1 not in queries:
                 db_sh.shards_info = getattr(db, "shards_info", []) + [
                     (cfg.joiner_shards, shard)
@@ -270,12 +260,17 @@ class JoinerRouter:
         self._part_counter[key] = next_idx
         recvd.add(next_idx)
 
-        log.info("EOF recv table=%s progress=%d/%d", tname, len(recvd), cfg.agg_shards)
+        log.info(
+            "EOF recv key=%s progress=%d/%d",
+            key,
+            len(recvd),
+            cfg.agg_shards * self._fr_replicas,
+        )
 
         if len(recvd) >= cfg.agg_shards * self._fr_replicas:
             log.info(
-                "EOF threshold reached for table=%s → broadcast to %d shards",
-                tname,
+                "EOF threshold reached for key=%s → broadcast to %d shards",
+                key,
                 cfg.joiner_shards,
             )
             self._broadcast(cfg, raw_eof, shards=cfg.joiner_shards)
