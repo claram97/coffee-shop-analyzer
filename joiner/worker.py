@@ -1,5 +1,3 @@
-ahora?
-
 # joiner/worker.py
 from __future__ import annotations
 
@@ -18,12 +16,22 @@ from typing import Any, Callable, Dict, List, Optional, Set, Tuple, Union
 from middleware.middleware_client import MessageMiddleware
 from protocol.constants import Opcodes
 from protocol.databatch import DataBatch
-from protocol.entities import (RawMenuItems, RawStore, RawTransaction,
-                               RawTransactionItem, RawTransactionItemMenuItem,
-                               RawTransactionStore, RawTransactionStoreUser,
-                               RawUser)
-from protocol.messages import (EOFMessage, NewTransactionItemsMenuItems,
-                               NewTransactionStores, NewTransactionStoresUsers)
+from protocol.entities import (
+    RawMenuItems,
+    RawStore,
+    RawTransaction,
+    RawTransactionItem,
+    RawTransactionItemMenuItem,
+    RawTransactionStore,
+    RawTransactionStoreUser,
+    RawUser,
+)
+from protocol.messages import (
+    EOFMessage,
+    NewTransactionItemsMenuItems,
+    NewTransactionStores,
+    NewTransactionStoresUsers,
+)
 
 _RecordPtr = Tuple[int, int]
 
@@ -170,9 +178,12 @@ class JoinerWorker:
         data_dir: str = "./data/joiner",
         logger=None,
         shard_index: int = 0,
+        out_factory: Optional[Callable[[], MessageMiddleware]] = None,
     ):
         self._in = in_mw
         self._out = out_results_mw
+        self._out_factory = out_factory
+        self._out_lock = threading.Lock()
         self._store = FastSpool(os.path.join(data_dir, "joiner.shelve"), shards=64)
 
         self._cache_stores: Dict[str, Dict[str, RawStore]] = {}
@@ -243,7 +254,9 @@ class JoinerWorker:
             try:
                 eof = EOFMessage.deserialize_from_bytes(body)
                 self._log.info(
-                    "EOF recibido table_type=%s", getattr(eof, "table_type", "?")
+                    "EOF recibido table_type=%s cid=%s",
+                    getattr(eof, "table_type", "?"),
+                    getattr(eof, "client_id", "?"),
                 )
                 return "eof", eof
             except Exception as e:
@@ -278,7 +291,9 @@ class JoinerWorker:
         mw = self._in.get(table_id)
         try:
             mw.send(raw)
-            self._log.debug("requeue → same queue table_id=%s bytes=%d", table_id, len(raw))
+            self._log.debug(
+                "requeue → same queue table_id=%s bytes=%d", table_id, len(raw)
+            )
         except Exception as e:
             self._log.error("requeue failed table_id=%s: %s", table_id, e)
 
@@ -301,7 +316,7 @@ class JoinerWorker:
             getattr(self, "_shard", "?"),
             getattr(db, "shards_info", "[]") if db else "?",
             list(getattr(db, "query_ids", []) or []) if db else [],
-            cid
+            cid,
         )
         rows: List[RawMenuItems] = (
             (db.batch_msg.rows or []) if getattr(db, "batch_msg", None) else []
@@ -329,7 +344,7 @@ class JoinerWorker:
             getattr(self, "_shard", "?"),
             getattr(db, "shards_info", "[]") if db else "?",
             list(getattr(db, "query_ids", []) or []) if db else [],
-            cid
+            cid,
         )
         rows: List[RawStore] = (
             (db.batch_msg.rows or []) if getattr(db, "batch_msg", None) else []
@@ -358,7 +373,7 @@ class JoinerWorker:
             getattr(self, "_shard", "?"),
             getattr(db, "shards_info", "[]") if db else "?",
             list(getattr(db, "query_ids", []) or []) if db else [],
-            cid
+            cid,
         )
 
         if not self._phase_ready(Opcodes.NEW_TRANSACTION_ITEMS, cid):
@@ -439,7 +454,7 @@ class JoinerWorker:
             getattr(self, "_shard", "?"),
             getattr(db, "shards_info", "[]") if db else "?",
             list(getattr(db, "query_ids", []) or []) if db else [],
-            cid
+            cid,
         )
 
         if not self._phase_ready(Opcodes.NEW_TRANSACTION, cid):
@@ -453,7 +468,7 @@ class JoinerWorker:
         )
 
         if Q1 in qset:
-            self._log.info("TX Q1 passthrough rows=%d", len(tx_rows))
+            self._log.debug("TX Q1 passthrough rows=%d", len(tx_rows))
             self._send(db)
             return
 
@@ -481,7 +496,9 @@ class JoinerWorker:
             )
 
         if Q3 in qset:
-            self._log.info("JOIN Q3: in=%d matched=%d", len(tx_rows), len(joined_tx_st))
+            self._log.debug(
+                "JOIN Q3: in=%d matched=%d", len(tx_rows), len(joined_tx_st)
+            )
             msg_join = NewTransactionStores()
             msg_join.rows = joined_tx_st
             batch_status = getattr(db.batch_msg, "batch_status", 0)
@@ -514,7 +531,7 @@ class JoinerWorker:
                 by_user[uid].append(r)
 
             total_users = len(by_user) if by_user else 0
-            self._log.info(
+            self._log.debug(
                 "JOIN Q4 stage1: users=%d txxstore=%d", total_users, len(joined_tx_st)
             )
 
@@ -533,9 +550,9 @@ class JoinerWorker:
                 template.meta[total_u8] = idx_u8
                 template.batch_bytes = template.batch_msg.to_bytes()
                 template_raw = template.to_bytes()
-                key = f"{client_id}::{uid}"
+                key = f"{cid}:{uid}"
                 self._store.append_list("q4_by_user", key, (template_raw, lst))
-                self._log.info(
+                self._log.debug(
                     "Q4 stash key=%s rows=%d chunk=%d/%d", key, len(lst), idx + 1, total
                 )
             return
@@ -562,7 +579,7 @@ class JoinerWorker:
             getattr(self, "_shard", "?"),
             getattr(db, "shards_info", "[]") if db else "?",
             list(getattr(db, "query_ids", []) or []) if db else [],
-            cid
+            cid,
         )
 
         if not self._phase_ready(Opcodes.NEW_USERS, cid):
@@ -583,7 +600,7 @@ class JoinerWorker:
                 if not items:
                     continue
 
-                self._log.info(
+                self._log.debug(
                     "Q4 stage2 join key=%s pending_chunks=%d", key, len(items)
                 )
                 for template_raw, txst_rows in items:
@@ -611,7 +628,9 @@ class JoinerWorker:
                     )
                     out_db.table_ids = [Opcodes.NEW_TRANSACTION_STORES_USERS]
                     out_db.batch_msg = msg_join
-                    self._log.info("Q4 out rows=%d for uid=%s cid=%s", len(out_rows), uid, cid)
+                    self._log.debug(
+                        "Q4 out rows=%d for uid=%s cid=%s", len(out_rows), uid, cid
+                    )
                     self._send(out_db)
 
     def _on_table_eof(self, table_id: int, client_id: str) -> bool:
@@ -635,7 +654,10 @@ class JoinerWorker:
             self._part_counter.pop(key, None)
             self._eof.add(key)
             self._log.info(
-                "EOF marcado table_id=%s cid=%s; eof_set=%s", table_id, client_id, sorted(self._eof)
+                "EOF marcado table_id=%s cid=%s; eof_set=%s",
+                table_id,
+                client_id,
+                sorted(self._eof),
             )
             return True
 
@@ -662,6 +684,38 @@ class JoinerWorker:
                 out_db.batch_msg = msg_join
                 self._log.info("Q4 (sin user) out rows=%d key=%s", len(txst_rows), key)
                 self._send(out_db)
+
+    def _safe_send(self, raw: bytes):
+        # 1) serializa accesos al canal
+        with self._out_lock:
+            try:
+                self._out.send(raw)
+                return
+            except Exception as e:
+                self._log.warning("send failed once: %s; recreating publisher", e)
+
+                # 2) si el canal se cerró, recrea y reintenta una vez
+                try:
+                    # si el wrapper tiene is_closed(), verificalo para log
+                    if getattr(self._out, "is_closed", None):
+                        self._log.debug("out channel closed? %s", self._out.is_closed())
+
+                    if self._out_factory is not None:
+                        self._out = self._out_factory()
+                    else:
+                        # fallback: intenta reopen si existe
+                        if hasattr(self._out, "reopen"):
+                            self._out.reopen()
+                        else:
+                            raise RuntimeError(
+                                "No out_factory / reopen() to recreate publisher"
+                            )
+
+                    self._out.send(raw)
+                    return
+                except Exception as e2:
+                    self._log.error("SEND failed after recreate: %s", e2)
+                    raise
 
     def _send(self, db: DataBatch):
         batch_num = getattr(db, "batch_number", "?")
@@ -692,7 +746,7 @@ class JoinerWorker:
             db.batch_bytes = db.batch_msg.to_bytes()
         raw = db.to_bytes()
         try:
-            self._out.send(raw)
+            self._safe_send(raw)
             self._log.debug(
                 "SEND ok bytes=%d table=%s queries=%s",
                 len(raw),
