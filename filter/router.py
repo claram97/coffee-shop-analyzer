@@ -198,8 +198,8 @@ class FilterRouter:
         self._pol = policy
         self._cfg = table_cfg
         self._log = logging.getLogger("filter-router")
-        self._pending_batches: Dict[tuple[str, str, str], int] = defaultdict(int)
-        self._pending_eof: Dict[tuple[str, str, str], EOFMessage] = {}
+        self._pending_batches: Dict[tuple[str, str], int] = defaultdict(int)
+        self._pending_eof: Dict[tuple[str, str], EOFMessage] = {}
 
     def process_message(self, msg: Any) -> None:
         try:
@@ -219,13 +219,12 @@ class FilterRouter:
         mask = int(getattr(batch, "reserved_u16", 0))
         bn = int(getattr(batch, "batch_number", 0))
         cid = getattr(batch, "client_id", "")
-        rid = getattr(batch, "run_id", "")
         if not table:
             self._log.warning("Batch sin table_id válido. bn=%s", bn)
             return
 
         self._log.debug(
-            "recv DataBatch table=%s queries=%s rows=%d mask=%s shards_info=%s bn=%s cid=%s rid=%s",
+            "recv DataBatch table=%s queries=%s rows=%d mask=%s shards_info=%s bn=%s cid=%s",
             table,
             queries,
             len(rows),
@@ -233,7 +232,6 @@ class FilterRouter:
             getattr(batch, "shards_info", []),
             bn,
             cid,
-            rid,
         )
         if self._log.isEnabledFor(logging.DEBUG) and rows:
             sample = rows[0]
@@ -243,7 +241,7 @@ class FilterRouter:
                 sk = [k for k in dir(sample) if not k.startswith("_")][:8]
             self._log.debug("sample_row_keys=%s", sk)
 
-        key = (cid, rid, table)
+        key = (cid, table)
 
         if mask == 0:
             self._pending_batches[table] += 1
