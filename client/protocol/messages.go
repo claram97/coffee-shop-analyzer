@@ -4,6 +4,8 @@ import (
 	"bufio"
 	"encoding/binary"
 	"io"
+	"github.com/op/go-logging"
+	"fmt"
 )
 
 // Finished is a client→server message that indicates the agency finished
@@ -137,12 +139,109 @@ func (msg *QueryResult) readFrom(reader *bufio.Reader) error {
 	return nil
 }
 
+type Query2Result struct {
+	Month    string
+	Name     string
+	Quantity int32
+	Revenue  float64
+	OpCode   byte
+	Results  []Query2Result
+}
+
+func (msg *Query2Result) GetOpCode() byte  { return msg.OpCode }
+func (msg *Query2Result) GetLength() int32 { return 0 } // Not directly used
+
+func (msg *Query2Result) readFrom(reader *bufio.Reader) error {
+	// Leer cantidad de filas
+	var nRows int32
+	if err := binary.Read(reader, binary.LittleEndian, &nRows); err != nil {
+		return err
+	}
+
+	var results []Query2Result
+	for rowIdx := int32(0); rowIdx < nRows; rowIdx++ {
+		var batchNumber int64
+		if err := binary.Read(reader, binary.LittleEndian, &batchNumber); err != nil {
+			return err
+		}
+		var status byte
+		if err := binary.Read(reader, binary.LittleEndian, &status); err != nil {
+			return err
+		}
+
+		// Leer cantidad de pares clave-valor
+		var nPairs int32
+		if err := binary.Read(reader, binary.LittleEndian, &nPairs); err != nil {
+			return err
+		}
+
+		var month, name, quantityStr, revenueStr string
+		for i := int32(0); i < nPairs; i++ {
+			// Leer clave
+			var keyLen int32
+			if err := binary.Read(reader, binary.LittleEndian, &keyLen); err != nil {
+				return err
+			}
+			keyBytes := make([]byte, keyLen)
+			if _, err := io.ReadFull(reader, keyBytes); err != nil {
+				return err
+			}
+			key := string(keyBytes)
+
+			// Leer valor
+			var valLen int32
+			if err := binary.Read(reader, binary.LittleEndian, &valLen); err != nil {
+				return err
+			}
+			valBytes := make([]byte, valLen)
+			if _, err := io.ReadFull(reader, valBytes); err != nil {
+				return err
+			}
+			val := string(valBytes)
+
+			switch key {
+			case "month":
+				month = val
+			case "name":
+				name = val
+			case "quantity":
+				quantityStr = val
+			case "revenue":
+				revenueStr = val
+			}
+		}
+
+		var quantity int32
+		if len(quantityStr) > 0 {
+			fmt.Sscanf(quantityStr, "%d", &quantity)
+		}
+		var revenue float64
+		if len(revenueStr) > 0 {
+			fmt.Sscanf(revenueStr, "%f", &revenue)
+		}
+
+		result := Query2Result{
+			Month:    month,
+			Name:     name,
+			Quantity: quantity,
+			Revenue:  revenue,
+			OpCode:   msg.OpCode,
+		}
+		results = append(results, result)
+	}
+
+	// Guardar los resultados en el struct
+	msg.Results = results
+	msg.OpCode = 21 // Asignar el opcode correspondiente
+	return nil
+}
+
 // ReadMessage reads exactly one framed server response from reader.
 // It consumes the opcode, dispatches to the message parser (which
 // validates and consumes the body), and returns the parsed message.
 // On invalid opcode or framing, a ProtocolError is returned; on I/O
 // issues, the underlying error is returned.
-func ReadMessage(reader *bufio.Reader) (Readable, error) {
+func ReadMessage(reader *bufio.Reader, logger *logging.Logger) (Readable, error) {
 	var opcode byte
 	var err error
 	if opcode, err = reader.ReadByte(); err != nil {
@@ -166,6 +265,52 @@ func ReadMessage(reader *bufio.Reader) (Readable, error) {
 			var msg DataBatch
 			err := msg.readFrom(reader)
 			return &msg, err
+		}
+	case 21:
+		{
+			// var length int32
+			// if err := binary.Read(reader, binary.LittleEndian, &length); err != nil {
+			// 	return nil, err
+			// }
+			var msg Query2Result
+			err := msg.readFrom(reader)
+			logger.Infof("action: query_result_received | result: query_2 | opcode: %d | rows: %d", msg.GetOpCode(), len(msg.Results))
+			return &msg, err
+			// return nil, &ProtocolError{"opcode is 21: query 2. length: " + fmt.Sprintf("%d", length), opcode}
+		}
+	case 22:
+		{
+			var length int32
+			if err := binary.Read(reader, binary.LittleEndian, &length); err != nil {
+				return nil, err
+			}
+			// Opcional: validar que length == esperado
+			// var msg QueryResult1
+			// err := msg.readFrom(reader)
+			return nil, &ProtocolError{"opcode is 22: query 3. length: " + fmt.Sprintf("%d", length), opcode}
+
+		}
+	case 23:
+		{
+			var length int32
+			if err := binary.Read(reader, binary.LittleEndian, &length); err != nil {
+				return nil, err
+			}
+			// Opcional: validar que length == esperado
+			// var msg QueryResult1
+			// err := msg.readFrom(reader)
+			return nil, &ProtocolError{"opcode is 23: query 4. length: " + fmt.Sprintf("%d", length), opcode}
+		}
+	case 20:
+		{
+			var length int32
+			if err := binary.Read(reader, binary.LittleEndian, &length); err != nil {
+				return nil, err
+			}
+			// Opcional: validar que length == esperado
+			// var msg QueryResult1
+			// err := msg.readFrom(reader)
+			return nil, &ProtocolError{"opcode is 20: query 1. length: " + fmt.Sprintf("%d", length), opcode}
 		}
 	default:
 		return nil, &ProtocolError{"invalid opcode", opcode}

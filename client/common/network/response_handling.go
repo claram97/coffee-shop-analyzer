@@ -47,18 +47,33 @@ func (rh *ResponseHandler) handleReadError(err error) bool {
 func (rh *ResponseHandler) handleResponseMessage(msg interface{}) {
 	// Use type assertion to access the GetOpCode() method
 	if respMsg, ok := msg.(interface{ GetOpCode() byte }); ok {
-		switch respMsg.GetOpCode() {
+		opcode := respMsg.GetOpCode()
+		if opcode != protocol.BatchRecvSuccessOpCode && opcode != protocol.BatchRecvFailOpCode {
+			rh.log.Infof("action: response_received | where: response_handling | opcode: %d", opcode)
+		}
+		switch opcode {
 		case protocol.BatchRecvSuccessOpCode:
 			rh.log.Debug("action: batch_enviado | result: success")
 		case protocol.BatchRecvFailOpCode:
 			rh.log.Error("action: batch_enviado | result: fail")
+		case 21:
+			rh.log.Infof("action: query_2_result_received | result: success")
+		case 20:
+			rh.log.Infof("action: query_1_result_received | result: success")
+		case 22:
+			rh.log.Infof("action: query_3_result_received | result: success")
+		case 23:
+			rh.log.Infof("action: query_4_result_received | result: success")
+		case 29:
+			rh.log.Error("action: query_result_received | result: error")
 		case protocol.OpCodeDataBatch:
+			rh.log.Infof("action: query_result_received as OpCodeDataBatch")
 			// Try to cast to DataBatch to get inner message type
-			if dataBatch, ok := respMsg.(*protocol.DataBatch); ok {
-				rh.handleQueryResult(dataBatch)
-			} else {
-				rh.log.Warning("action: response_received | result: unexpected_format | type: databatch")
-			}
+			// if dataBatch, ok := respMsg.(*protocol.DataBatch); ok {
+			// 	rh.handleQueryResult(dataBatch)
+			// } else {
+			// 	rh.log.Warning("action: response_received | result: unexpected_format | type: databatch")
+			// }
 		}
 	}
 }
@@ -90,13 +105,19 @@ func (rh *ResponseHandler) handleQueryResult(dataBatch *protocol.DataBatch) {
 // responseReaderLoop executes the main response reading loop
 func (rh *ResponseHandler) responseReaderLoop(reader *bufio.Reader) {
 	for {
-		msg, err := protocol.ReadMessage(reader)
+		msg, err := protocol.ReadMessage(reader, rh.log)
+		
 		if err != nil {
 			if rh.handleReadError(err) {
 				break
 			}
 			continue
 		}
+		opcode := msg.(interface{ GetOpCode() byte }).GetOpCode()
+		if opcode != protocol.BatchRecvSuccessOpCode && opcode != protocol.BatchRecvFailOpCode {
+			rh.log.Infof("action: response_received | where: response_reading_loop| opcode: %d", opcode)
+		}
+
 		rh.handleResponseMessage(msg)
 	}
 }

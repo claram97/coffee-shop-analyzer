@@ -57,7 +57,7 @@ def recv_msg(sock: socket.socket):
         msg = NewUsers()
     elif opcode == Opcodes.EOF:
         msg = EOFMessage()
-    elif opcode == Opcodes.DATA_BATCH:
+    elif opcode == Opcodes.DATA_BATCH: # Esto no lo debería mandar nunca el cliente mMMMMM
         msg = DataBatch()
     else:
         # If the opcode is not recognized, it's a protocol violation

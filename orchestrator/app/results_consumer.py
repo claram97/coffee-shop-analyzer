@@ -23,9 +23,10 @@ class ResultsConsumer:
         """
         self.queue_name = queue_name
         self.host = host
-        self.client_connections = {}  # Map of query_id -> client_connection
+        self.client_connection = None
         self.middleware = None
         self.stopping = False
+        self.queries_sent = set()
         self.client_lock = threading.Lock()
         
     def start(self):
@@ -51,35 +52,32 @@ class ResultsConsumer:
                 logging.warning(f"action: results_consumer_stop | result: already_disconnected | error: {e}")
             except Exception as e:
                 logging.error(f"action: results_consumer_stop | result: fail | error: {e}")
-    
-    def register_client_for_query(self, query_id, client_connection):
+
+    def register_client(self, client_connection):
         """Register a client connection to receive results for a specific query.
         
         Args:
-            query_id: The query ID to associate with this client
             client_connection: The client socket or connection object
         """
         with self.client_lock:
-            self.client_connections[query_id] = client_connection
-            logging.info(f"action: client_registered | result: success | query_id: {query_id}")
-    
-    def unregister_client_for_query(self, query_id):
-        """Unregister a client from receiving results for a query.
-        
-        Args:
-            query_id: The query ID to unregister
+            if self.client_connection is None:
+                self.client_connection = client_connection
+                logging.info(f"action: client_registered | result: success")
+
+    def unregister_client(self):
+        """Unregister the client from receiving results.
         """
         with self.client_lock:
-            if query_id in self.client_connections:
-                del self.client_connections[query_id]
-                logging.info(f"action: client_unregistered | result: success | query_id: {query_id}")
-    
+            self.client_connection = None
+            logging.info(f"action: client_unregistered | result: success")
+
     def _process_result(self, body):
         """Process a result message from the queue.
         
         Args:
             body: Raw message bytes from the queue
         """
+        logging.info(f"action: result_message_received | result: processing: {body[:50]}...")
         try:
             # Parse the DataBatch wrapper
             if not body or body[0] != Opcodes.DATA_BATCH:
@@ -134,8 +132,7 @@ class ResultsConsumer:
                 except Exception as e:
                     logging.warning(f"action: log_row_data | result: fail | error: {str(e)}")
             
-            # Forward the result to the client
-            self._forward_result_to_client(query_id, body)
+            self._forward_result_to_client(query_id, data_batch.batch_msg.to_bytes())
             
         except Exception as e:
             logging.error(f"action: process_result | result: fail | error: {str(e)}")
@@ -169,7 +166,7 @@ class ResultsConsumer:
         """
         client_conn = None
         with self.client_lock:
-            client_conn = self.client_connections.get(query_id)
+            client_conn = self.client_connection
             
         if not client_conn:
             logging.warning(f"action: forward_result | result: no_client | query_id: {query_id}")
@@ -178,21 +175,13 @@ class ResultsConsumer:
         try:
             # Send the raw bytes to the client
             client_conn.sendall(result_bytes)
+            self.queries_sent.add(query_id)
             bytes_sent = len(result_bytes)
             logging.info(f"action: forward_result | result: success | query_id: {query_id} | bytes_sent: {bytes_sent}")
-            
-            # Check if this is an EOF batch - if so, we can unregister the client
-            try:
-                data_batch = DataBatch.deserialize_from_bytes(result_bytes)
-                batch_status = getattr(data_batch.batch_msg, "batch_status", None)
-                
-                if batch_status == BatchStatus.EOF:
-                    logging.info(f"action: eof_result_forwarded | query_id: {query_id} | unregistering_client: true")
-                    self.unregister_client_for_query(query_id)
-            except Exception as e:
-                logging.warning(f"action: check_eof | result: fail | query_id: {query_id} | error: {str(e)}")
-            
+            if len(self.queries_sent) == 4:
+                logging.info("action: all_queries_sent | result: success | unregistering_client")
+                self.unregister_client()
         except Exception as e:
             logging.error(f"action: forward_result | result: fail | query_id: {query_id} | error: {str(e)}")
             # Clean up the connection on error
-            self.unregister_client_for_query(query_id)
+            self.unregister_client()

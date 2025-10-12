@@ -83,14 +83,17 @@ class Orchestrator:
 
         self.message_handler.register_processor(Opcodes.EOF, self._process_eof_message)
 
-        for opcode in range(1, 5):
-            self.message_handler.register_processor(opcode, self._process_query_request)
+        # for opcode in range(1, 5):
+        #     self.message_handler.register_processor(opcode, self._process_query_request)
 
     def _handle_message(self, msg, client_sock) -> bool:
         return self.message_handler.handle_message(msg, client_sock)
 
     def _process_data_message(self, msg, client_sock) -> bool:
         try:
+    
+            self.results_consumer.register_client(client_sock)
+
             status_text = self.message_handler.get_status_text(
                 getattr(msg, "batch_status", 0)
             )
@@ -107,22 +110,22 @@ class Orchestrator:
         except Exception as e:
             return ResponseHandler.handle_processing_error(msg, client_sock, e)
 
-    def register_client_for_query(self, query_id, client_sock):
-        self.results_consumer.register_client_for_query(query_id, client_sock)
-        logging.info("action: client_registered_for_query | query_id: %s", query_id)
+    # def register_client_for_query(self, query_id, client_sock):
+    #     self.results_consumer.register_client_for_query(query_id, client_sock)
+    #     logging.info("action: client_registered_for_query | query_id: %s", query_id)
 
-    def _process_query_request(self, msg, client_sock) -> bool:
-        try:
-            query_id = str(msg.opcode)
-            self.register_client_for_query(query_id, client_sock)
-            ResponseHandler.send_success(client_sock)
-            logging.info("action: query_request_received | query_id: %s", query_id)
-            return True
-        except Exception as e:
-            logging.error(
-                "action: query_request_processing | result: fail | error: %s", e
-            )
-            return ResponseHandler.handle_processing_error(msg, client_sock, e)
+    # def _process_query_request(self, msg, client_sock) -> bool:
+    #     try:
+    #         query_id = str(msg.opcode)
+    #         self.register_client_for_query(query_id, client_sock)
+    #         ResponseHandler.send_success(client_sock)
+    #         logging.info("action: query_request_received | query_id: %s", query_id)
+    #         return True
+    #     except Exception as e:
+    #         logging.error(
+    #             "action: query_request_processing | result: fail | error: %s", e
+    #         )
+    #         return ResponseHandler.handle_processing_error(msg, client_sock, e)
 
     def _process_filtered_batch(self, msg, status_text: str):
         """Filtra, empaqueta y publica el DataBatch al exchange del Filter Router."""
