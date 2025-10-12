@@ -74,7 +74,7 @@ class _Shard:
 
 class FastSpool:
     """
-    Append-only binario shardeado por uid, client_id y run_id.
+    Append-only binario shardeado por uid, client_id.
     """
 
     def __init__(self, root_dir: str, shards: int = 64):
@@ -262,7 +262,7 @@ class JoinerWorker:
         self._log.warning("Opcode no deseado: %s", opcode)
         return "bad", opcode
 
-    def _phase_ready(self, table_id: int, client_id: str, run_id: str) -> bool:
+    def _phase_ready(self, table_id: int, client_id: str) -> bool:
         need = []
         if table_id == Opcodes.NEW_TRANSACTION_ITEMS:
             need = [Opcodes.NEW_MENU_ITEMS, Opcodes.NEW_STORES]
@@ -272,7 +272,7 @@ class JoinerWorker:
             need = [Opcodes.NEW_TRANSACTION]
         else:
             need = []
-        return all((t, client_id, run_id) in self._eof for t in need)
+        return all((t, client_id) in self._eof for t in need)
 
     def _requeue(self, table_id: int, raw: bytes):
         mw = self._in.get(table_id)
@@ -289,27 +289,25 @@ class JoinerWorker:
             self._on_table_eof(
                 _eof_table_id(eof),
                 getattr(eof, "client_id", ""),
-                getattr(eof, "run_id", "")
             )
             return
         if kind != "db":
             return
         db: DataBatch = msg
         cid = getattr(db, "client_id", "")
-        rid = getattr(db, "run_id", "")
         self._log.debug(
-            "IN: menu_items batch_number=%s shard=%s shards_info=%s queries=%s cid=%s rid=%s",
+            "IN: menu_items batch_number=%s shard=%s shards_info=%s queries=%s cid=%s",
             getattr(db, "batch_number", "?") if db else "?",
             getattr(self, "_shard", "?"),
             getattr(db, "shards_info", "[]") if db else "?",
             list(getattr(db, "query_ids", []) or []) if db else [],
-            cid, rid
+            cid
         )
         rows: List[RawMenuItems] = (
             (db.batch_msg.rows or []) if getattr(db, "batch_msg", None) else []
         )
         idx = index_by_attr(rows, "product_id")
-        self._cache_menu[(cid, rid)] = idx
+        self._cache_menu[(cid)] = idx
         self._log.info("Cache menu_items idx_size=%d", len(idx))
 
     def _on_raw_stores(self, raw: bytes):
@@ -319,27 +317,25 @@ class JoinerWorker:
             self._on_table_eof(
                 _eof_table_id(eof),
                 getattr(eof, "client_id", ""),
-                getattr(eof, "run_id", "")
             )
             return
         if kind != "db":
             return
         db: DataBatch = msg
         cid = getattr(db, "client_id", "")
-        rid = getattr(db, "run_id", "")
         self._log.debug(
-            "IN: stores batch_number=%s shard=%s shards_info=%s queries=%s cid=%s rid=%s",
+            "IN: stores batch_number=%s shard=%s shards_info=%s queries=%s cid=%s",
             getattr(db, "batch_number", "?") if db else "?",
             getattr(self, "_shard", "?"),
             getattr(db, "shards_info", "[]") if db else "?",
             list(getattr(db, "query_ids", []) or []) if db else [],
-            cid, rid
+            cid
         )
         rows: List[RawStore] = (
             (db.batch_msg.rows or []) if getattr(db, "batch_msg", None) else []
         )
         idx = index_by_attr(rows, "store_id")
-        self._cache_stores[(cid, rid)] = idx
+        self._cache_stores[(cid)] = idx
         self._log.info("Cache stores idx_size=%d", len(idx))
 
     def _on_raw_ti(self, raw: bytes):
@@ -349,26 +345,24 @@ class JoinerWorker:
             self._on_table_eof(
                 _eof_table_id(eof),
                 getattr(eof, "client_id", ""),
-                getattr(eof, "run_id", "")
             )
             return
         if kind != "db":
             return
         db: DataBatch = msg
         cid = getattr(db, "client_id", "")
-        rid = getattr(db, "run_id", "")
 
         self._log.debug(
-            "IN: transaction_items batch_number=%s shard=%s shards_info=%s queries=%s cid=%s rid=%s",
+            "IN: transaction_items batch_number=%s shard=%s shards_info=%s queries=%s cid=%s",
             getattr(db, "batch_number", "?") if db else "?",
             getattr(self, "_shard", "?"),
             getattr(db, "shards_info", "[]") if db else "?",
             list(getattr(db, "query_ids", []) or []) if db else [],
-            cid, rid
+            cid
         )
 
-        if not self._phase_ready(Opcodes.NEW_TRANSACTION_ITEMS, cid, rid):
-            self._log.debug("TI fase NO lista → requeue (cid=%s rid=%s)", cid, rid)
+        if not self._phase_ready(Opcodes.NEW_TRANSACTION_ITEMS, cid):
+            self._log.debug("TI fase NO lista → requeue (cid=%s)", cid)
             self._requeue(Opcodes.NEW_TRANSACTION_ITEMS, raw)
             return
 
@@ -377,7 +371,7 @@ class JoinerWorker:
             self._send(db)
             return
 
-        menu_idx: Optional[Dict[str, RawMenuItems]] = self._cache_menu.get((cid, rid))
+        menu_idx: Optional[Dict[str, RawMenuItems]] = self._cache_menu.get((cid))
         if not menu_idx:
             self._log.warning("Menu cache no disponible aún; drop batch TI")
             return
@@ -432,26 +426,24 @@ class JoinerWorker:
             self._on_table_eof(
                 _eof_table_id(eof),
                 getattr(eof, "client_id", ""),
-                getattr(eof, "run_id", "")
             )
             return
         if kind != "db":
             return
         db: DataBatch = msg
         cid = getattr(db, "client_id", "")
-        rid = getattr(db, "run_id", "")
 
         self._log.debug(
-            "IN: transactions batch_number=%s shard=%s shards_info=%s queries=%s cid=%s rid=%s",
+            "IN: transactions batch_number=%s shard=%s shards_info=%s queries=%s cid=%s",
             getattr(db, "batch_number", "?") if db else "?",
             getattr(self, "_shard", "?"),
             getattr(db, "shards_info", "[]") if db else "?",
             list(getattr(db, "query_ids", []) or []) if db else [],
-            cid, rid
+            cid
         )
 
-        if not self._phase_ready(Opcodes.NEW_TRANSACTION, cid, rid):
-            self._log.debug("TX fase NO lista → requeue (cid=%s rid=%s)", cid, rid)
+        if not self._phase_ready(Opcodes.NEW_TRANSACTION, cid):
+            self._log.debug("TX fase NO lista → requeue (cid=%s)", cid)
             self._requeue(Opcodes.NEW_TRANSACTION, raw)
             return
 
@@ -465,7 +457,7 @@ class JoinerWorker:
             self._send(db)
             return
 
-        stores_idx: Optional[Dict[str, RawStore]] = self._cache_stores.get((cid, rid))
+        stores_idx: Optional[Dict[str, RawStore]] = self._cache_stores.get((cid))
         if not stores_idx:
             self._log.info("Stores cache no disponible aún; drop batch TX")
             return
@@ -541,7 +533,7 @@ class JoinerWorker:
                 template.meta[total_u8] = idx_u8
                 template.batch_bytes = template.batch_msg.to_bytes()
                 template_raw = template.to_bytes()
-                key = f"{client_id}:{run_id}:{uid}"
+                key = f"{client_id}::{uid}"
                 self._store.append_list("q4_by_user", key, (template_raw, lst))
                 self._log.info(
                     "Q4 stash key=%s rows=%d chunk=%d/%d", key, len(lst), idx + 1, total
@@ -557,26 +549,24 @@ class JoinerWorker:
             self._on_table_eof(
                 _eof_table_id(eof),
                 getattr(eof, "client_id", ""),
-                getattr(eof, "run_id", "")
             )
             return
         if kind != "db":
             return
         db: DataBatch = msg
         cid = getattr(db, "client_id", "")
-        rid = getattr(db, "run_id", "")
 
         self._log.debug(
-            "IN: users batch_number=%s shard=%s shards_info=%s queries=%s cid=%s rid=%s",
+            "IN: users batch_number=%s shard=%s shards_info=%s queries=%s cid=%s",
             getattr(db, "batch_number", "?") if db else "?",
             getattr(self, "_shard", "?"),
             getattr(db, "shards_info", "[]") if db else "?",
             list(getattr(db, "query_ids", []) or []) if db else [],
-            cid, rid
+            cid
         )
 
-        if not self._phase_ready(Opcodes.NEW_USERS, cid, rid):
-            self._log.debug("U fase NO lista → requeue (cid=%s rid=%s)", cid, rid)
+        if not self._phase_ready(Opcodes.NEW_USERS, cid):
+            self._log.debug("U fase NO lista → requeue (cid=%s)", cid)
             self._requeue(Opcodes.NEW_USERS, raw)
             return
 
@@ -588,7 +578,7 @@ class JoinerWorker:
             uidx = index_by_attr(users, "user_id")
 
             for uid, u in uidx.items():
-                key = f"{cid}:{rid}:{uid}"
+                key = f"{cid}:{uid}"
                 items = self._store.pop_all("q4_by_user", key)
                 if not items:
                     continue
@@ -621,11 +611,11 @@ class JoinerWorker:
                     )
                     out_db.table_ids = [Opcodes.NEW_TRANSACTION_STORES_USERS]
                     out_db.batch_msg = msg_join
-                    self._log.info("Q4 out rows=%d for uid=%s cid=%s rid=%s", len(out_rows), uid, cid, rid)
+                    self._log.info("Q4 out rows=%d for uid=%s cid=%s", len(out_rows), uid, cid)
                     self._send(out_db)
 
-    def _on_table_eof(self, table_id: int, client_id: str, run_id: str) -> bool:
-        key = (table_id, client_id, run_id)
+    def _on_table_eof(self, table_id: int, client_id: str) -> bool:
+        key = (table_id, client_id)
         tname = ID_TO_NAME.get(table_id, f"#{table_id}")
         recvd = self._pending_eofs.setdefault(key, set())
         next_idx = self._part_counter.get(key, 0) + 1
@@ -633,10 +623,9 @@ class JoinerWorker:
         recvd.add(next_idx)
 
         log.info(
-            "EOF recv table=%s cid=%s rid=%s progress=%d/%d",
+            "EOF recv table=%s cid=%s progress=%d/%d",
             tname,
             client_id,
-            run_id,
             len(recvd),
             self._router_replicas,
         )
@@ -646,18 +635,18 @@ class JoinerWorker:
             self._part_counter.pop(key, None)
             self._eof.add(key)
             self._log.info(
-                "EOF marcado table_id=%s cid=%s rid=%s; eof_set=%s", table_id, client_id, run_id, sorted(self._eof)
+                "EOF marcado table_id=%s cid=%s; eof_set=%s", table_id, client_id, sorted(self._eof)
             )
             return True
 
         return False
 
-    def _flush_remaining_q4_without_user(self, client_id, run_id):
+    def _flush_remaining_q4_without_user(self, client_id):
         keys = self._store.keys_with_prefix("q4_by_user")
         if keys:
             self._log.info("Flush Q4 sin user: keys_pendientes=%d", len(keys))
         for key in keys:
-            if not key.startswith(f"{client_id}:{run_id}"):
+            if not key.startswith(f"{client_id}"):
                 continue
             for template_raw, txst_rows in self._store.pop_all("q4_by_user", key):
                 out_db = DataBatch.deserialize_from_bytes(template_raw)
