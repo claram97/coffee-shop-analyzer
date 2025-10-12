@@ -3,16 +3,19 @@ package common
 import (
 	"bufio"
 	"context"
+	"encoding/binary"
 	"errors"
+	"fmt"
 	"io"
 	"net"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/op/go-logging"
 
-	// Import protocol definitions
 	protocol "github.com/7574-sistemas-distribuidos/docker-compose-init/client/protocol"
+	"github.com/google/uuid"
 )
 
 // ResponseHandler handles server response communication
@@ -144,17 +147,35 @@ func NewFinishedMessageSender(conn net.Conn, clientID string, logger *logging.Lo
 // SendFinished sends FINISHED message with the numeric agency ID.
 // It logs success or failure for each write. On any serialization/I/O error it logs and returns.
 func (fms *FinishedMessageSender) SendFinished() {
-	agencyId, err := strconv.Atoi(fms.clientID)
+	agencyID, err := deriveFinishedAgencyID(fms.clientID)
 	if err != nil {
-		fms.log.Errorf("action: send_finished | result: fail | error: %v", err)
+		fms.log.Warningf("action: send_finished | result: skip | reason: %v", err)
 		return
 	}
 
-	finishedMsg := protocol.Finished{AgencyId: int32(agencyId)}
+	finishedMsg := protocol.Finished{AgencyId: agencyID}
 	if _, err := finishedMsg.WriteTo(fms.conn); err != nil {
 		fms.log.Errorf("action: send_finished | result: fail | error: %v", err)
 		return
 	}
 
-	fms.log.Infof("action: send_finished | result: success | agencyId: %d", int32(agencyId))
+	fms.log.Infof("action: send_finished | result: success | agencyId: %d", agencyID)
+}
+
+func deriveFinishedAgencyID(rawID string) (int32, error) {
+	trimmed := strings.TrimSpace(rawID)
+	if trimmed == "" {
+		return 0, fmt.Errorf("client id empty")
+	}
+
+	if numeric, err := strconv.Atoi(trimmed); err == nil {
+		return int32(numeric), nil
+	}
+
+	parsed, err := uuid.Parse(trimmed)
+	if err != nil {
+		return 0, fmt.Errorf("invalid client id for FINISHED message: %w", err)
+	}
+
+	return int32(binary.BigEndian.Uint32(parsed[0:4])), nil
 }

@@ -1,6 +1,9 @@
 # github.com/fsnotify/fsnotify v1.4.9
 ## explicit; go 1.13
 github.com/fsnotify/fsnotify
+# github.com/google/uuid v1.1.2
+## explicit
+github.com/google/uuid
 # github.com/hashicorp/hcl v1.0.0
 ## explicit
 github.com/hashicorp/hcl
@@ -27,10 +30,8 @@ github.com/op/go-logging
 github.com/pelletier/go-toml
 # github.com/pkg/errors v0.9.1
 ## explicit
-github.com/pkg/errors
 # github.com/sirupsen/logrus v1.8.1
 ## explicit; go 1.13
-github.com/sirupsen/logrus
 # github.com/spf13/afero v1.6.0
 ## explicit; go 1.13
 github.com/spf13/afero
@@ -54,7 +55,6 @@ github.com/subosito/gotenv
 ## explicit; go 1.17
 golang.org/x/sys/internal/unsafeheader
 golang.org/x/sys/unix
-golang.org/x/sys/windows
 # golang.org/x/text v0.3.5
 ## explicit; go 1.11
 golang.org/x/text/transform

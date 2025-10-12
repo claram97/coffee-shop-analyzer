@@ -33,15 +33,30 @@ class Orchestrator:
         self._publishers: dict[str, MessageMiddlewareExchange] = {}
 
         self.message_handler = MessageHandler()
+        self._client_ids: dict[object, str] = {}
 
         results_queue = os.getenv("RESULTS_QUEUE", "orchestrator_results_queue")
         self.results_consumer = ResultsConsumer(results_queue, rabbitmq_host)
 
-        self.server_manager = ServerManager(port, listen_backlog, self._handle_message)
+        self.server_manager = ServerManager(
+            port,
+            listen_backlog,
+            self._handle_message,
+            self._cleanup_client,
+        )
 
         self._host = rabbitmq_host
 
         self._setup_message_processors()
+
+    def _get_client_id(self, client_sock) -> Optional[str]:
+        return self._client_ids.get(client_sock)
+
+    def _register_client(self, client_sock, client_id: str):
+        self._client_ids[client_sock] = client_id
+
+    def _cleanup_client(self, client_sock):
+        self._client_ids.pop(client_sock, None)
 
     def _publisher_for_rk(self, rk: str) -> MessageMiddlewareExchange:
         pub = self._publishers.get(rk)
@@ -87,7 +102,33 @@ class Orchestrator:
             self.message_handler.register_processor(opcode, self._process_query_request)
 
     def _handle_message(self, msg, client_sock) -> bool:
-        return self.message_handler.handle_message(msg, client_sock)
+        if msg.opcode == Opcodes.CLIENT_HELLO:
+            client_id = getattr(msg, "client_id", None)
+            if not client_id:
+                logging.error("action: client_hello | result: fail | reason: missing_client_id")
+                ResponseHandler.send_failure(client_sock)
+                return False
+
+            self._register_client(client_sock, client_id)
+            logging.info(
+                "action: client_hello | result: success | client_id: %s | fileno: %s",
+                client_id,
+                client_sock.fileno(),
+            )
+            ResponseHandler.send_success(client_sock)
+            return True
+
+        client_id = self._get_client_id(client_sock)
+        if not client_id:
+            logging.error(
+                "action: message_received | result: fail | reason: missing_handshake | opcode: %s",
+                msg.opcode,
+            )
+            ResponseHandler.send_failure(client_sock)
+            return False
+
+        setattr(msg, "client_id", client_id)
+        return self.message_handler.handle_message(msg, client_sock, client_id=client_id)
 
     def _process_data_message(self, msg, client_sock) -> bool:
         try:
@@ -107,14 +148,27 @@ class Orchestrator:
         except Exception as e:
             return ResponseHandler.handle_processing_error(msg, client_sock, e)
 
-    def register_client_for_query(self, query_id, client_sock):
-        self.results_consumer.register_client_for_query(query_id, client_sock)
-        logging.info("action: client_registered_for_query | query_id: %s", query_id)
+    def register_client_for_query(self, query_id, client_sock, client_id: str):
+        self.results_consumer.register_client_for_query(query_id, client_sock, client_id)
+        logging.info(
+            "action: client_registered_for_query | query_id: %s | client_id: %s",
+            query_id,
+            client_id,
+        )
 
     def _process_query_request(self, msg, client_sock) -> bool:
         try:
             query_id = str(msg.opcode)
-            self.register_client_for_query(query_id, client_sock)
+            client_id = self._get_client_id(client_sock)
+            if not client_id:
+                logging.error(
+                    "action: query_request_received | result: fail | reason: missing_client_id | query_id: %s",
+                    query_id,
+                )
+                ResponseHandler.send_failure(client_sock)
+                return False
+
+            self.register_client_for_query(query_id, client_sock, client_id)
             ResponseHandler.send_success(client_sock)
             logging.info("action: query_request_received | query_id: %s", query_id)
             return True
@@ -127,7 +181,11 @@ class Orchestrator:
     def _process_filtered_batch(self, msg, status_text: str):
         """Filtra, empaqueta y publica el DataBatch al exchange del Filter Router."""
         try:
-            filtered_batch = create_filtered_data_batch(msg)
+            client_id = getattr(msg, "client_id", None)
+            if not client_id:
+                raise RuntimeError("missing client_id for filtered batch")
+
+            filtered_batch = create_filtered_data_batch(msg, client_id)
             batch_bytes = filtered_batch.to_bytes()
 
             bn = int(getattr(filtered_batch, "batch_number", 0) or 0)
