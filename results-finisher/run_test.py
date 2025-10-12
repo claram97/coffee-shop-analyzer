@@ -1,11 +1,11 @@
-import pytest
+import pytest  # type: ignore[import-not-found]
 import threading
 import time
 import json
 import os
 import random
 from queue import Queue, Empty
-import pandas as pd
+import pandas as pd  # type: ignore[import-not-found]
 import io
 
 # Add the project root to the Python path
@@ -15,6 +15,8 @@ sys.path.insert(0, project_root)
 
 from middleware.middleware_client import MessageMiddlewareQueue
 from protocol import DataBatch, BatchStatus, Opcodes
+
+TEST_CLIENT_ID = "00000000-0000-0000-0000-0000000000aa"
 from protocol.messages import (
     NewTransactions, NewStores, NewUsers, NewMenuItems, NewTransactionItems,
     NewTransactionStores, NewTransactionItemsMenuItems, NewTransactionStoresUsers
@@ -76,7 +78,18 @@ def generate_mock_data():
         data['transaction_items'][col] = 0.0
     return data
 
-def create_data_batch(query_id, TableMsgClass, rows, batch_num, is_eof=False, table_ids=None, shard_num=0, total_shards=0, copy_num=1, total_copies=1):
+def create_data_batch(
+    query_id,
+    TableMsgClass,
+    rows,
+    batch_num,
+    is_eof=False,
+    table_ids=None,
+    shard_num=0,
+    total_shards=0,
+    copy_num=1,
+    total_copies=1,
+):
     table_msg = TableMsgClass()
     table_msg.amount = len(rows)
     table_msg.batch_number = batch_num
@@ -98,14 +111,16 @@ def create_data_batch(query_id, TableMsgClass, rows, batch_num, is_eof=False, ta
     
     meta = {total_copies: copy_num} if total_copies > 0 else {}
 
+    shard_total = int(total_shards) if total_shards and total_shards > 0 else 1
+    shard_index = int(shard_num) if shard_num and shard_num >= 0 else 0
+
     batch = DataBatch(
-        opcode=Opcodes.DATA_BATCH,
         query_ids=[query_id],
         meta=meta,
         table_ids=table_ids,
         batch_bytes=DataBatch.make_embedded(table_msg.opcode, bytes(body_buf)),
-        total_shards=total_shards,
-        shard_num=shard_num
+        shards_info=[(shard_total, shard_index)],
+        client_id=TEST_CLIENT_ID,
     )
     batch.batch_number = batch_num
     return batch.to_bytes()

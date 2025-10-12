@@ -275,8 +275,8 @@ services:
       filter-router-0:
         condition: service_started
 
-  joiner-router:
-    container_name: joiner-router
+  joiner-router-0:
+    container_name: joiner-router-0
     build:
       context: .
       dockerfile: joiner/Dockerfile.router
@@ -284,6 +284,67 @@ services:
       - PYTHONUNBUFFERED=1
       - LOG_LEVEL=INFO
       - CONFIG_PATH=/config/config.ini
+      - JOINER_ROUTER_INDEX=0
+    networks:
+      - testing_net
+    volumes:
+      - ./app_config/config.ini:/config/config.ini:ro
+    depends_on:
+      rabbitmq:
+        condition: service_healthy
+      aggregator-0:
+        condition: service_started
+
+  joiner-router-1:
+    container_name: joiner-router-1
+    build:
+      context: .
+      dockerfile: joiner/Dockerfile.router
+    environment:
+      - PYTHONUNBUFFERED=1
+      - LOG_LEVEL=INFO
+      - CONFIG_PATH=/config/config.ini
+      - JOINER_ROUTER_INDEX=1
+    networks:
+      - testing_net
+    volumes:
+      - ./app_config/config.ini:/config/config.ini:ro
+    depends_on:
+      rabbitmq:
+        condition: service_healthy
+      aggregator-0:
+        condition: service_started
+
+  joiner-router-2:
+    container_name: joiner-router-2
+    build:
+      context: .
+      dockerfile: joiner/Dockerfile.router
+    environment:
+      - PYTHONUNBUFFERED=1
+      - LOG_LEVEL=INFO
+      - CONFIG_PATH=/config/config.ini
+      - JOINER_ROUTER_INDEX=2
+    networks:
+      - testing_net
+    volumes:
+      - ./app_config/config.ini:/config/config.ini:ro
+    depends_on:
+      rabbitmq:
+        condition: service_healthy
+      aggregator-0:
+        condition: service_started
+
+  joiner-router-3:
+    container_name: joiner-router-3
+    build:
+      context: .
+      dockerfile: joiner/Dockerfile.router
+    environment:
+      - PYTHONUNBUFFERED=1
+      - LOG_LEVEL=INFO
+      - CONFIG_PATH=/config/config.ini
+      - JOINER_ROUTER_INDEX=3
     networks:
       - testing_net
     volumes:
@@ -311,7 +372,7 @@ services:
     depends_on:
       rabbitmq:
         condition: service_healthy
-      joiner-router:
+      joiner-router-0:
         condition: service_started
 
   joiner-worker-1:
@@ -331,7 +392,7 @@ services:
     depends_on:
       rabbitmq:
         condition: service_healthy
-      joiner-router:
+      joiner-router-0:
         condition: service_started
 
   joiner-worker-2:
@@ -351,7 +412,7 @@ services:
     depends_on:
       rabbitmq:
         condition: service_healthy
-      joiner-router:
+      joiner-router-0:
         condition: service_started
 
   joiner-worker-3:
@@ -371,7 +432,7 @@ services:
     depends_on:
       rabbitmq:
         condition: service_healthy
-      joiner-router:
+      joiner-router-0:
         condition: service_started
 
   results-router:

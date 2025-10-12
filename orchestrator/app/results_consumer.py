@@ -23,7 +23,7 @@ class ResultsConsumer:
         """
         self.queue_name = queue_name
         self.host = host
-        self.client_connections = {}  # Map of query_id -> client_connection
+        self.client_connections = {}  # Map of (client_id, query_id) -> client_connection
         self.middleware = None
         self.stopping = False
         self.client_lock = threading.Lock()
@@ -52,7 +52,7 @@ class ResultsConsumer:
             except Exception as e:
                 logging.error(f"action: results_consumer_stop | result: fail | error: {e}")
     
-    def register_client_for_query(self, query_id, client_connection):
+    def register_client_for_query(self, query_id, client_connection, client_id: str):
         """Register a client connection to receive results for a specific query.
         
         Args:
@@ -60,19 +60,28 @@ class ResultsConsumer:
             client_connection: The client socket or connection object
         """
         with self.client_lock:
-            self.client_connections[query_id] = client_connection
-            logging.info(f"action: client_registered | result: success | query_id: {query_id}")
+            self.client_connections[(client_id, query_id)] = client_connection
+            logging.info(
+                "action: client_registered | result: success | query_id: %s | client_id: %s",
+                query_id,
+                client_id,
+            )
     
-    def unregister_client_for_query(self, query_id):
+    def unregister_client_for_query(self, query_id, client_id: str):
         """Unregister a client from receiving results for a query.
         
         Args:
             query_id: The query ID to unregister
         """
         with self.client_lock:
-            if query_id in self.client_connections:
-                del self.client_connections[query_id]
-                logging.info(f"action: client_unregistered | result: success | query_id: {query_id}")
+            key = (client_id, query_id)
+            if key in self.client_connections:
+                del self.client_connections[key]
+                logging.info(
+                    "action: client_unregistered | result: success | query_id: %s | client_id: %s",
+                    query_id,
+                    client_id,
+                )
     
     def _process_result(self, body):
         """Process a result message from the queue.
@@ -93,6 +102,13 @@ class ResultsConsumer:
                 return
                 
             query_id = str(data_batch.query_ids[0])
+            client_id = getattr(data_batch, "client_id", None)
+            if not client_id:
+                logging.warning(
+                    "action: process_result | result: missing_client_id | query_id: %s",
+                    query_id,
+                )
+                return
             
             # Log detailed information about the result
             inner_opcode = getattr(data_batch.batch_msg, "opcode", "unknown")
@@ -135,7 +151,7 @@ class ResultsConsumer:
                     logging.warning(f"action: log_row_data | result: fail | error: {str(e)}")
             
             # Forward the result to the client
-            self._forward_result_to_client(query_id, body)
+            self._forward_result_to_client(client_id, query_id, body)
             
         except Exception as e:
             logging.error(f"action: process_result | result: fail | error: {str(e)}")
@@ -160,7 +176,7 @@ class ResultsConsumer:
         
 
             
-    def _forward_result_to_client(self, query_id, result_bytes):
+    def _forward_result_to_client(self, client_id: str, query_id: str, result_bytes):
         """Forward the result to the appropriate client.
         
         Args:
@@ -169,17 +185,26 @@ class ResultsConsumer:
         """
         client_conn = None
         with self.client_lock:
-            client_conn = self.client_connections.get(query_id)
+            client_conn = self.client_connections.get((client_id, query_id))
             
         if not client_conn:
-            logging.warning(f"action: forward_result | result: no_client | query_id: {query_id}")
+            logging.warning(
+                "action: forward_result | result: no_client | query_id: %s | client_id: %s",
+                query_id,
+                client_id,
+            )
             return
             
         try:
             # Send the raw bytes to the client
             client_conn.sendall(result_bytes)
             bytes_sent = len(result_bytes)
-            logging.info(f"action: forward_result | result: success | query_id: {query_id} | bytes_sent: {bytes_sent}")
+            logging.info(
+                "action: forward_result | result: success | query_id: %s | client_id: %s | bytes_sent: %d",
+                query_id,
+                client_id,
+                bytes_sent,
+            )
             
             # Check if this is an EOF batch - if so, we can unregister the client
             try:
@@ -187,12 +212,21 @@ class ResultsConsumer:
                 batch_status = getattr(data_batch.batch_msg, "batch_status", None)
                 
                 if batch_status == BatchStatus.EOF:
-                    logging.info(f"action: eof_result_forwarded | query_id: {query_id} | unregistering_client: true")
-                    self.unregister_client_for_query(query_id)
+                    logging.info(
+                        "action: eof_result_forwarded | query_id: %s | client_id: %s | unregistering_client: true",
+                        query_id,
+                        client_id,
+                    )
+                    self.unregister_client_for_query(query_id, client_id)
             except Exception as e:
                 logging.warning(f"action: check_eof | result: fail | query_id: {query_id} | error: {str(e)}")
             
         except Exception as e:
-            logging.error(f"action: forward_result | result: fail | query_id: {query_id} | error: {str(e)}")
+            logging.error(
+                "action: forward_result | result: fail | query_id: %s | client_id: %s | error: %s",
+                query_id,
+                client_id,
+                str(e),
+            )
             # Clean up the connection on error
-            self.unregister_client_for_query(query_id)
+            self.unregister_client_for_query(query_id, client_id)

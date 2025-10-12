@@ -5,7 +5,9 @@ according to a custom protocol.
 """
 
 import logging
-from typing import Dict, List
+import struct
+from collections import OrderedDict
+from typing import Dict, List, Sequence, Tuple
 
 
 def serialize_header(n_rows: int, batch_number: int, batch_status: int) -> bytearray:
@@ -32,56 +34,55 @@ def serialize_header(n_rows: int, batch_number: int, batch_status: int) -> bytea
     return body
 
 
-def serialize_key_value_pair(key: str, value: str) -> bytearray:
-    """
-    Serializes a single key-value pair into the format [string key][string value].
-
-    A "string" is represented as a 4-byte little-endian length prefix
-    followed by the UTF-8 encoded bytes of the string.
-
-    Args:
-        key: The key to serialize.
-        value: The value to serialize. It will be converted to a string.
-
-    Returns:
-        A bytearray containing the serialized key-value pair.
-    """
-    pair_bytes = bytearray()
-
-    # Serialize key: [i32 length][bytes]
-    key_bytes = key.encode("utf-8")
-    pair_bytes.extend(len(key_bytes).to_bytes(4, "little", signed=True))
-    pair_bytes.extend(key_bytes)
-
-    # Serialize value: [i32 length][bytes]
-    value_bytes = str(value).encode("utf-8")
-    pair_bytes.extend(len(value_bytes).to_bytes(4, "little", signed=True))
-    pair_bytes.extend(value_bytes)
-    return pair_bytes
+_KEY_METADATA_CACHE: OrderedDict[Tuple[str, ...], Tuple[Tuple[str, bytes], ...]] = OrderedDict()
+_KEY_METADATA_CACHE_SIZE = 32
 
 
-def serialize_row(row: Dict, required_keys: List[str]) -> bytearray:
-    """
-    Serializes a dictionary (row) into a binary format.
+def _key_metadata(required_keys: Tuple[str, ...]) -> Tuple[Tuple[str, bytes], ...]:
+    cached = _KEY_METADATA_CACHE.get(required_keys)
+    if cached is not None:
+        _KEY_METADATA_CACHE.move_to_end(required_keys)
+        return cached
 
-    The row format is: [i32 n_pairs][pair_1][pair_2]...[pair_n]
-
-    Args:
-        row: A dictionary representing a single row of data.
-        required_keys: A list of keys to include from the row. If a key is
-                       missing from the row, its value will be an empty string.
-
-    Returns:
-        A bytearray containing the serialized row.
-    """
-    row_bytes = bytearray()
-    # [i32 n_pairs]: Number of key-value pairs to follow
-    row_bytes.extend(len(required_keys).to_bytes(4, "little", signed=True))
-
-    # Serialize each required key-value pair
+    entries: list[tuple[str, bytes]] = []
     for key in required_keys:
-        value = row.get(key, "")
-        row_bytes.extend(serialize_key_value_pair(key, value))
+        key_bytes = key.encode("utf-8")
+        prefix = struct.pack("<I", len(key_bytes)) + key_bytes
+        entries.append((key, prefix))
+
+    result = tuple(entries)
+    _KEY_METADATA_CACHE[required_keys] = result
+    _KEY_METADATA_CACHE.move_to_end(required_keys)
+
+    if len(_KEY_METADATA_CACHE) > _KEY_METADATA_CACHE_SIZE:
+        _KEY_METADATA_CACHE.popitem(last=False)
+
+    return result
+
+
+def _serialize_row(row: Dict, metadata: Sequence[Tuple[str, bytes]]) -> bytearray:
+    pair_count = len(metadata)
+    prepared_values: list[Tuple[bytes, bytes]] = []
+    total_length = 4  # Initial bytes for pair count
+
+    for key, key_prefix in metadata:
+        value_bytes = str(row.get(key, "")).encode("utf-8")
+        prepared_values.append((key_prefix, value_bytes))
+        total_length += len(key_prefix) + 4 + len(value_bytes)
+
+    row_bytes = bytearray(total_length)
+    mv = memoryview(row_bytes)
+    struct.pack_into("<I", mv, 0, pair_count)
+    offset = 4
+
+    for key_prefix, value_bytes in prepared_values:
+        prefix_len = len(key_prefix)
+        mv[offset : offset + prefix_len] = key_prefix
+        offset += prefix_len
+        struct.pack_into("<I", mv, offset, len(value_bytes))
+        offset += 4
+        mv[offset : offset + len(value_bytes)] = value_bytes
+        offset += len(value_bytes)
 
     return row_bytes
 
@@ -112,9 +113,11 @@ def serialize_filtered_data(
     # Start with the common header
     body = serialize_header(n_rows, batch_number, batch_status)
 
+    metadata = _key_metadata(tuple(required_keys))
+
     # Append each serialized row
     for row in filtered_rows:
-        body.extend(serialize_row(row, required_keys))
+        body.extend(_serialize_row(row, metadata))
 
     logging.debug(
         f"action: serialize_{table_name} | rows: {n_rows} | body_size: {len(body)} bytes"

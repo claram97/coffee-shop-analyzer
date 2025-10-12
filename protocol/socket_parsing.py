@@ -33,13 +33,19 @@ def recv_exact(sock: socket.socket, n: int) -> bytes:
     if n == 0:
         return b""
     
-    data = b""
-    while len(data) < n:
-        chunk = sock.recv(n - len(data))
-        if not chunk:
-            raise EOFError(f"socket closed while reading, expected {n} bytes, got {len(data)}")
-        data += chunk
-    return data
+    buffer = bytearray(n)
+    view = memoryview(buffer)
+    received = 0
+
+    while received < n:
+        chunk_size = sock.recv_into(view[received:], n - received)
+        if chunk_size == 0:
+            raise EOFError(
+                f"socket closed while reading, expected {n} bytes, got {received}"
+            )
+        received += chunk_size
+
+    return bytes(buffer)
 
 
 def read_u8(sock: socket.socket) -> int:
