@@ -3,9 +3,10 @@ package common
 import (
 	"bufio"
 	"encoding/binary"
-	"io"
-	"github.com/op/go-logging"
 	"fmt"
+	"io"
+
+	"github.com/op/go-logging"
 )
 
 // Finished is a client→server message that indicates the agency finished
@@ -81,15 +82,64 @@ func (msg *BatchRecvFail) readFrom(reader *bufio.Reader) error {
 }
 
 // DataBatch represents a batch of data containing another message inside.
+type ShardInfo struct {
+	Total byte
+	Index byte
+}
+
+type QueryResultTable struct {
+	OpCode      byte
+	BatchNumber int64
+	BatchStatus byte
+	Rows        []map[string]string
+}
+
+func (t *QueryResultTable) GetOpCode() byte  { return t.OpCode }
+func (t *QueryResultTable) GetLength() int32 { return 0 }
+
+func (t *QueryResultTable) readFrom(reader *bufio.Reader) error {
+	var length int32
+	if err := binary.Read(reader, binary.LittleEndian, &length); err != nil {
+		return err
+	}
+	if length < 0 {
+		return &ProtocolError{"negative body length", t.OpCode}
+	}
+
+	body := make([]byte, length)
+	if _, err := io.ReadFull(reader, body); err != nil {
+		return err
+	}
+
+	return t.populateFromBody(body)
+}
+
+func (t *QueryResultTable) populateFromBody(body []byte) error {
+	batchNumber, status, rows, err := parseTableMessageBody(body, t.OpCode)
+	if err != nil {
+		return err
+	}
+
+	t.BatchNumber = batchNumber
+	t.BatchStatus = status
+	t.Rows = rows
+	return nil
+}
+
 type DataBatch struct {
 	OpCode      byte
 	QueryIDs    []int32
 	TableIDs    []byte
-	InnerMsg    Readable
 	BatchNum    int64
+	Reserved    uint16
+	MetaData    map[int32]int32
+	ShardsInfo  []ShardInfo
 	TotalShards int32
 	ShardNum    int32
-	MetaData    map[int32]int32
+	InnerOpcode byte
+	InnerLength int32
+	InnerRaw    []byte
+	ResultTable *QueryResultTable
 }
 
 func (msg *DataBatch) GetOpCode() byte  { return OpCodeDataBatch }
@@ -97,143 +147,230 @@ func (msg *DataBatch) GetLength() int32 { return 0 } // Not directly used
 
 // readFrom consumes the DataBatch body including its inner message
 func (msg *DataBatch) readFrom(reader *bufio.Reader) error {
-	// Read length as int32
 	var length int32
 	if err := binary.Read(reader, binary.LittleEndian, &length); err != nil {
 		return err
 	}
-
-	// Read initial part of body to determine structure
-	// For now, just skip to the inner message by finding its opcode
-	innerOpcode, err := reader.ReadByte()
-	if err != nil {
-		return err
+	if length < 0 {
+		return &ProtocolError{"negative body length", OpCodeDataBatch}
 	}
-	
-	// Store the inner opcode for use in logging/handling
-	msg.OpCode = innerOpcode
 
-	// Skip the rest of the DataBatch structure, just read the result type for logging
-	// In a full implementation, we'd parse all fields properly
-	return nil
-}
-
-// QueryResult represents a generic query result
-type QueryResult struct {
-	OpCode     byte
-	ResultData interface{}
-}
-
-func (msg *QueryResult) GetOpCode() byte  { return msg.OpCode }
-func (msg *QueryResult) GetLength() int32 { return 0 } // Not directly used
-
-func (msg *QueryResult) readFrom(reader *bufio.Reader) error {
-	// Read length as int32
-	var length int32
-	if err := binary.Read(reader, binary.LittleEndian, &length); err != nil {
+	body := make([]byte, length)
+	if _, err := io.ReadFull(reader, body); err != nil {
 		return err
 	}
 
-	// For debugging, just skip the content
-	// In production, we would parse the specific result structure based on opcode
+	msg.OpCode = OpCodeDataBatch
+	msg.MetaData = make(map[int32]int32)
+
+	offset := 0
+	if length == 0 {
+		return &ProtocolError{"empty DataBatch body", OpCodeDataBatch}
+	}
+
+	// table_ids
+	if offset >= len(body) {
+		return &ProtocolError{"missing table ids length", OpCodeDataBatch}
+	}
+	tableCount := int(body[offset])
+	offset++
+	if len(body) < offset+tableCount {
+		return &ProtocolError{"truncated table ids", OpCodeDataBatch}
+	}
+	msg.TableIDs = append([]byte(nil), body[offset:offset+tableCount]...)
+	offset += tableCount
+
+	// query_ids
+	if offset >= len(body) {
+		return &ProtocolError{"missing query ids length", OpCodeDataBatch}
+	}
+	queryCount := int(body[offset])
+	offset++
+	if len(body) < offset+queryCount {
+		return &ProtocolError{"truncated query ids", OpCodeDataBatch}
+	}
+	msg.QueryIDs = make([]int32, queryCount)
+	for i := 0; i < queryCount; i++ {
+		msg.QueryIDs[i] = int32(body[offset])
+		offset++
+	}
+
+	// reserved
+	if len(body) < offset+2 {
+		return &ProtocolError{"missing reserved field", OpCodeDataBatch}
+	}
+	msg.Reserved = binary.LittleEndian.Uint16(body[offset : offset+2])
+	offset += 2
+
+	// batch number
+	if len(body) < offset+8 {
+		return &ProtocolError{"missing batch number", OpCodeDataBatch}
+	}
+	msg.BatchNum = int64(binary.LittleEndian.Uint64(body[offset : offset+8]))
+	offset += 8
+
+	// meta dictionary
+	if len(body) < offset+1 {
+		return &ProtocolError{"missing meta length", OpCodeDataBatch}
+	}
+	metaCount := int(body[offset])
+	offset++
+	for i := 0; i < metaCount; i++ {
+		if len(body) < offset+2 {
+			return &ProtocolError{"truncated meta entry", OpCodeDataBatch}
+		}
+		key := int32(body[offset])
+		val := int32(body[offset+1])
+		msg.MetaData[key] = val
+		offset += 2
+	}
+
+	// shards info
+	if len(body) < offset+1 {
+		return &ProtocolError{"missing shards length", OpCodeDataBatch}
+	}
+	shardCount := int(body[offset])
+	offset++
+	msg.ShardsInfo = make([]ShardInfo, shardCount)
+	for i := 0; i < shardCount; i++ {
+		if len(body) < offset+2 {
+			return &ProtocolError{"truncated shard entry", OpCodeDataBatch}
+		}
+		total := body[offset]
+		index := body[offset+1]
+		msg.ShardsInfo[i] = ShardInfo{Total: total, Index: index}
+		offset += 2
+	}
+	if shardCount > 0 {
+		msg.TotalShards = int32(msg.ShardsInfo[0].Total)
+		msg.ShardNum = int32(msg.ShardsInfo[0].Index)
+	} else {
+		msg.TotalShards = 1
+		msg.ShardNum = 0
+	}
+
+	if len(body) < offset+5 {
+		return &ProtocolError{"missing embedded message header", OpCodeDataBatch}
+	}
+
+	msg.InnerOpcode = body[offset]
+	offset++
+	innerLen := int32(binary.LittleEndian.Uint32(body[offset : offset+4]))
+	msg.InnerLength = innerLen
+	offset += 4
+	if innerLen < 0 {
+		return &ProtocolError{"negative embedded length", OpCodeDataBatch}
+	}
+
+	if len(body) < offset+int(innerLen) {
+		return &ProtocolError{"truncated embedded message", OpCodeDataBatch}
+	}
+
+	msg.InnerRaw = append([]byte(nil), body[offset:offset+int(innerLen)]...)
+	offset += int(innerLen)
+
+	if offset != len(body) {
+		return &ProtocolError{"extra bytes after embedded message", OpCodeDataBatch}
+	}
+
+	if isQueryResultOpcode(msg.InnerOpcode) {
+		table := &QueryResultTable{OpCode: msg.InnerOpcode}
+		if err := table.populateFromBody(msg.InnerRaw); err != nil {
+			return err
+		}
+		msg.ResultTable = table
+	}
+
 	return nil
 }
 
-type Query2Result struct {
-	Month    string
-	Name     string
-	Quantity int32
-	Revenue  float64
-	OpCode   byte
-	Results  []Query2Result
+func isQueryResultOpcode(opcode byte) bool {
+	switch opcode {
+	case OpCodeQueryResult1, OpCodeQueryResult2, OpCodeQueryResult3, OpCodeQueryResult4, OpCodeQueryResultError:
+		return true
+	default:
+		return false
+	}
 }
 
-func (msg *Query2Result) GetOpCode() byte  { return msg.OpCode }
-func (msg *Query2Result) GetLength() int32 { return 0 } // Not directly used
-
-func (msg *Query2Result) readFrom(reader *bufio.Reader) error {
-	// Leer cantidad de filas
-	var nRows int32
-	if err := binary.Read(reader, binary.LittleEndian, &nRows); err != nil {
-		return err
+func parseTableMessageBody(body []byte, opcode byte) (int64, byte, []map[string]string, error) {
+	offset := 0
+	if len(body) < 4 {
+		return 0, 0, nil, &ProtocolError{"missing row count", opcode}
 	}
 
-	var results []Query2Result
-	for rowIdx := int32(0); rowIdx < nRows; rowIdx++ {
-		var batchNumber int64
-		if err := binary.Read(reader, binary.LittleEndian, &batchNumber); err != nil {
-			return err
-		}
-		var status byte
-		if err := binary.Read(reader, binary.LittleEndian, &status); err != nil {
-			return err
-		}
+	nRows := int32(binary.LittleEndian.Uint32(body[offset : offset+4]))
+	if nRows < 0 {
+		return 0, 0, nil, &ProtocolError{"negative row count", opcode}
+	}
+	offset += 4
 
-		// Leer cantidad de pares clave-valor
-		var nPairs int32
-		if err := binary.Read(reader, binary.LittleEndian, &nPairs); err != nil {
-			return err
-		}
+	if len(body) < offset+8 {
+		return 0, 0, nil, &ProtocolError{"missing batch number", opcode}
+	}
+	batchNumber := int64(binary.LittleEndian.Uint64(body[offset : offset+8]))
+	offset += 8
 
-		var month, name, quantityStr, revenueStr string
-		for i := int32(0); i < nPairs; i++ {
-			// Leer clave
-			var keyLen int32
-			if err := binary.Read(reader, binary.LittleEndian, &keyLen); err != nil {
-				return err
+	if len(body) < offset+1 {
+		return 0, 0, nil, &ProtocolError{"missing batch status", opcode}
+	}
+	status := body[offset]
+	offset++
+
+	rows := make([]map[string]string, 0, nRows)
+	for i := int32(0); i < nRows; i++ {
+		if len(body) < offset+4 {
+			return 0, 0, nil, &ProtocolError{"missing pair count", opcode}
+		}
+		nPairs := int32(binary.LittleEndian.Uint32(body[offset : offset+4]))
+		if nPairs < 0 {
+			return 0, 0, nil, &ProtocolError{"negative pair count", opcode}
+		}
+		offset += 4
+
+		row := make(map[string]string, nPairs)
+		for j := int32(0); j < nPairs; j++ {
+			if len(body) < offset+4 {
+				return 0, 0, nil, &ProtocolError{"missing key length", opcode}
 			}
-			keyBytes := make([]byte, keyLen)
-			if _, err := io.ReadFull(reader, keyBytes); err != nil {
-				return err
+			keyLen := int32(binary.LittleEndian.Uint32(body[offset : offset+4]))
+			if keyLen < 0 {
+				return 0, 0, nil, &ProtocolError{"negative key length", opcode}
 			}
-			key := string(keyBytes)
+			offset += 4
 
-			// Leer valor
-			var valLen int32
-			if err := binary.Read(reader, binary.LittleEndian, &valLen); err != nil {
-				return err
+			if len(body) < offset+int(keyLen) {
+				return 0, 0, nil, &ProtocolError{"truncated key", opcode}
 			}
-			valBytes := make([]byte, valLen)
-			if _, err := io.ReadFull(reader, valBytes); err != nil {
-				return err
-			}
-			val := string(valBytes)
+			key := string(body[offset : offset+int(keyLen)])
+			offset += int(keyLen)
 
-			switch key {
-			case "month":
-				month = val
-			case "name":
-				name = val
-			case "quantity":
-				quantityStr = val
-			case "revenue":
-				revenueStr = val
+			if len(body) < offset+4 {
+				return 0, 0, nil, &ProtocolError{"missing value length", opcode}
 			}
+			valLen := int32(binary.LittleEndian.Uint32(body[offset : offset+4]))
+			if valLen < 0 {
+				return 0, 0, nil, &ProtocolError{"negative value length", opcode}
+			}
+			offset += 4
+
+			if len(body) < offset+int(valLen) {
+				return 0, 0, nil, &ProtocolError{"truncated value", opcode}
+			}
+			value := string(body[offset : offset+int(valLen)])
+			offset += int(valLen)
+
+			row[key] = value
 		}
 
-		var quantity int32
-		if len(quantityStr) > 0 {
-			fmt.Sscanf(quantityStr, "%d", &quantity)
-		}
-		var revenue float64
-		if len(revenueStr) > 0 {
-			fmt.Sscanf(revenueStr, "%f", &revenue)
-		}
-
-		result := Query2Result{
-			Month:    month,
-			Name:     name,
-			Quantity: quantity,
-			Revenue:  revenue,
-			OpCode:   msg.OpCode,
-		}
-		results = append(results, result)
+		rows = append(rows, row)
 	}
 
-	// Guardar los resultados en el struct
-	msg.Results = results
-	msg.OpCode = 21 // Asignar el opcode correspondiente
-	return nil
+	if offset != len(body) {
+		return 0, 0, nil, &ProtocolError{fmt.Sprintf("table message length mismatch: consumed=%d total=%d", offset, len(body)), opcode}
+	}
+
+	return batchNumber, status, rows, nil
 }
 
 // ReadMessage reads exactly one framed server response from reader.
@@ -266,51 +403,14 @@ func ReadMessage(reader *bufio.Reader, logger *logging.Logger) (Readable, error)
 			err := msg.readFrom(reader)
 			return &msg, err
 		}
-	case 21:
+	case OpCodeQueryResult1, OpCodeQueryResult2, OpCodeQueryResult3, OpCodeQueryResult4, OpCodeQueryResultError:
 		{
-			// var length int32
-			// if err := binary.Read(reader, binary.LittleEndian, &length); err != nil {
-			// 	return nil, err
-			// }
-			var msg Query2Result
+			msg := &QueryResultTable{OpCode: opcode}
 			err := msg.readFrom(reader)
-			logger.Infof("action: query_result_received | result: query_2 | opcode: %d | rows: %d", msg.GetOpCode(), len(msg.Results))
-			return &msg, err
-			// return nil, &ProtocolError{"opcode is 21: query 2. length: " + fmt.Sprintf("%d", length), opcode}
-		}
-	case 22:
-		{
-			var length int32
-			if err := binary.Read(reader, binary.LittleEndian, &length); err != nil {
-				return nil, err
+			if err == nil && logger != nil {
+				logger.Infof("action: query_result_received | opcode: %d | status: %d | rows: %d", msg.OpCode, msg.BatchStatus, len(msg.Rows))
 			}
-			// Opcional: validar que length == esperado
-			// var msg QueryResult1
-			// err := msg.readFrom(reader)
-			return nil, &ProtocolError{"opcode is 22: query 3. length: " + fmt.Sprintf("%d", length), opcode}
-
-		}
-	case 23:
-		{
-			var length int32
-			if err := binary.Read(reader, binary.LittleEndian, &length); err != nil {
-				return nil, err
-			}
-			// Opcional: validar que length == esperado
-			// var msg QueryResult1
-			// err := msg.readFrom(reader)
-			return nil, &ProtocolError{"opcode is 23: query 4. length: " + fmt.Sprintf("%d", length), opcode}
-		}
-	case 20:
-		{
-			var length int32
-			if err := binary.Read(reader, binary.LittleEndian, &length); err != nil {
-				return nil, err
-			}
-			// Opcional: validar que length == esperado
-			// var msg QueryResult1
-			// err := msg.readFrom(reader)
-			return nil, &ProtocolError{"opcode is 20: query 1. length: " + fmt.Sprintf("%d", length), opcode}
+			return msg, err
 		}
 	default:
 		return nil, &ProtocolError{"invalid opcode", opcode}

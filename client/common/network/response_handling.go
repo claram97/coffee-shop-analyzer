@@ -4,9 +4,11 @@ import (
 	"bufio"
 	"context"
 	"errors"
+	"fmt"
 	"io"
 	"net"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/op/go-logging"
@@ -45,60 +47,125 @@ func (rh *ResponseHandler) handleReadError(err error) bool {
 
 // handleResponseMessage processes a received response message
 func (rh *ResponseHandler) handleResponseMessage(msg interface{}) {
-	// Use type assertion to access the GetOpCode() method
-	if respMsg, ok := msg.(interface{ GetOpCode() byte }); ok {
-		opcode := respMsg.GetOpCode()
-		if opcode != protocol.BatchRecvSuccessOpCode && opcode != protocol.BatchRecvFailOpCode {
-			rh.log.Infof("action: response_received | where: response_handling | opcode: %d", opcode)
-		}
+	respMsg, ok := msg.(interface{ GetOpCode() byte })
+	if !ok {
+		rh.log.Warningf("action: response_received | result: unknown_message | type: %T", msg)
+		return
+	}
+
+	opcode := respMsg.GetOpCode()
+	if opcode != protocol.BatchRecvSuccessOpCode && opcode != protocol.BatchRecvFailOpCode {
+		rh.log.Infof("action: response_received | where: response_handling | opcode: %d", opcode)
+	}
+
+	switch typed := msg.(type) {
+	case *protocol.BatchRecvSuccess:
+		rh.log.Debug("action: batch_enviado | result: success")
+	case *protocol.BatchRecvFail:
+		rh.log.Error("action: batch_enviado | result: fail")
+	case *protocol.DataBatch:
+		rh.handleQueryResult(typed)
+	case *protocol.QueryResultTable:
+		rh.handleQueryResultTable("direct", "", typed)
+	default:
 		switch opcode {
-		case protocol.BatchRecvSuccessOpCode:
-			rh.log.Debug("action: batch_enviado | result: success")
-		case protocol.BatchRecvFailOpCode:
-			rh.log.Error("action: batch_enviado | result: fail")
-		case 21:
-			rh.log.Infof("action: query_2_result_received | result: success")
-		case 20:
-			rh.log.Infof("action: query_1_result_received | result: success")
-		case 22:
-			rh.log.Infof("action: query_3_result_received | result: success")
-		case 23:
-			rh.log.Infof("action: query_4_result_received | result: success")
-		case 29:
+		case protocol.OpCodeQueryResult1, protocol.OpCodeQueryResult2, protocol.OpCodeQueryResult3, protocol.OpCodeQueryResult4:
+			rh.log.Infof("action: query_result_received | result: success | opcode: %d", opcode)
+		case protocol.OpCodeQueryResultError:
 			rh.log.Error("action: query_result_received | result: error")
-		case protocol.OpCodeDataBatch:
-			rh.log.Infof("action: query_result_received as OpCodeDataBatch")
-			// Try to cast to DataBatch to get inner message type
-			// if dataBatch, ok := respMsg.(*protocol.DataBatch); ok {
-			// 	rh.handleQueryResult(dataBatch)
-			// } else {
-			// 	rh.log.Warning("action: response_received | result: unexpected_format | type: databatch")
-			// }
 		}
 	}
 }
 
 // handleQueryResult processes a query result message
 func (rh *ResponseHandler) handleQueryResult(dataBatch *protocol.DataBatch) {
-	// Log based on the inner message opcode
-	switch dataBatch.OpCode {
+	opcode := dataBatch.InnerOpcode
+	queryID := ""
+	if len(dataBatch.QueryIDs) > 0 {
+		queryID = strconv.Itoa(int(dataBatch.QueryIDs[0]))
+	}
+
+	if !isKnownQueryOpcode(opcode) {
+		rh.log.Warningf("action: query_result_received | result: unexpected_inner_message | opcode: %d", opcode)
+		return
+	}
+
+	rh.handleQueryResultTable("databatch", queryID, dataBatch.ResultTable)
+}
+
+func (rh *ResponseHandler) handleQueryResultTable(source, queryID string, table *protocol.QueryResultTable) {
+	if table == nil {
+		rh.log.Warningf("action: query_result_received | source: %s | query_id: %s | result: missing_table_payload", source, queryID)
+		return
+	}
+
+	opcodeName := queryOpcodeName(table.OpCode)
+	statusText := batchStatusText(table.BatchStatus)
+	rowCount := len(table.Rows)
+
+	fields := []string{
+		fmt.Sprintf("source: %s", source),
+		fmt.Sprintf("opcode: %d (%s)", table.OpCode, opcodeName),
+		fmt.Sprintf("status: %s", statusText),
+		fmt.Sprintf("rows: %d", rowCount),
+	}
+	if queryID != "" {
+		fields = append([]string{fmt.Sprintf("query_id: %s", queryID)}, fields...)
+	}
+
+	if table.OpCode == protocol.OpCodeQueryResultError {
+		rh.log.Errorf("action: query_result_received | %s", strings.Join(fields, " | "))
+	} else {
+		rh.log.Infof("action: query_result_received | %s", strings.Join(fields, " | "))
+	}
+
+	for idx, row := range table.Rows {
+		rh.log.Debugf("action: query_result_row | source: %s | query_id: %s | index: %d/%d | data: %+v", source, queryID, idx+1, rowCount, row)
+	}
+
+	if table.OpCode == protocol.OpCodeQueryResultError {
+		for _, row := range table.Rows {
+			rh.log.Errorf("action: query_result_error_detail | query_id: %s | code: %s | message: %s", queryID, row["error_code"], row["error_message"])
+		}
+	}
+}
+
+func queryOpcodeName(opcode byte) string {
+	switch opcode {
 	case protocol.OpCodeQueryResult1:
-		rh.log.Info("action: query_result_received | result: success | type: filtered_transactions")
-		rh.log.Debug("Query 1 result: Morning high-value transactions")
+		return "Q1 filtered_transactions"
 	case protocol.OpCodeQueryResult2:
-		rh.log.Info("action: query_result_received | result: success | type: product_metrics")
-		rh.log.Debug("Query 2 result: Product ranking by sales quantity and revenue")
+		return "Q2 product_metrics"
 	case protocol.OpCodeQueryResult3:
-		rh.log.Info("action: query_result_received | result: success | type: tpv_analysis")
-		rh.log.Debug("Query 3 result: Total Processing Volume by store and semester")
+		return "Q3 tpv_analysis"
 	case protocol.OpCodeQueryResult4:
-		rh.log.Info("action: query_result_received | result: success | type: top_customers")
-		rh.log.Debug("Query 4 result: Top 3 customers by purchase count per store")
+		return "Q4 top_customers"
 	case protocol.OpCodeQueryResultError:
-		rh.log.Error("action: query_result_received | result: error | type: query_error")
-		rh.log.Debug("Query execution failed with an error")
+		return "error"
 	default:
-		rh.log.Warning("action: query_result_received | result: unknown_type | opcode: %d", dataBatch.OpCode)
+		return fmt.Sprintf("unknown(%d)", opcode)
+	}
+}
+
+func batchStatusText(status byte) string {
+	switch status {
+	case protocol.BatchContinue:
+		return "CONTINUE"
+	case protocol.BatchEOF:
+		return "EOF"
+	case protocol.BatchCancel:
+		return "CANCEL"
+	default:
+		return fmt.Sprintf("UNKNOWN(%d)", status)
+	}
+}
+
+func isKnownQueryOpcode(opcode byte) bool {
+	switch opcode {
+	case protocol.OpCodeQueryResult1, protocol.OpCodeQueryResult2, protocol.OpCodeQueryResult3, protocol.OpCodeQueryResult4, protocol.OpCodeQueryResultError:
+		return true
+	default:
+		return false
 	}
 }
 
@@ -106,7 +173,7 @@ func (rh *ResponseHandler) handleQueryResult(dataBatch *protocol.DataBatch) {
 func (rh *ResponseHandler) responseReaderLoop(reader *bufio.Reader) {
 	for {
 		msg, err := protocol.ReadMessage(reader, rh.log)
-		
+
 		if err != nil {
 			if rh.handleReadError(err) {
 				break
