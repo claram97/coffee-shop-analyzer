@@ -175,18 +175,18 @@ class JoinerWorker:
         self._out = out_results_mw
         self._store = FastSpool(os.path.join(data_dir, "joiner.shelve"), shards=64)
 
-        self._cache_stores: Dict[Tuple[str,str], Dict[str, RawStore]] = {}
-        self._cache_menu: Dict[Tuple[str,str], Dict[str, RawMenuItems]] = {}
+        self._cache_stores: Dict[str, Dict[str, RawStore]] = {}
+        self._cache_menu: Dict[str, Dict[str, RawMenuItems]] = {}
 
-        self._eof: Set[Tuple[int, str, str]] = set()
+        self._eof: Set[Tuple[int, str]] = set()
         self._lock = threading.Lock()
         self._threads: Dict[int, threading.Thread] = {}
         self._log = logger or log
         self._shard = int(shard_index)
         self._router_replicas = router_replicas
 
-        self._pending_eofs: Dict[tuple[int, str, str], Set[int]] = {}
-        self._part_counter: Dict[tuple[int, str, str], int] = {}
+        self._pending_eofs: Dict[tuple[int, str], Set[int]] = {}
+        self._part_counter: Dict[tuple[int, str], int] = {}
 
     def _log_db(self, where: str, db: DataBatch):
         try:
