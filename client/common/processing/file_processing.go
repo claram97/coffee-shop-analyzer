@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"time"
 
 	"github.com/op/go-logging"
@@ -94,10 +95,10 @@ func (fp *FileProcessor) setupCSVReader(file *os.File) (*csv.Reader, error) {
 // Returns the last batch number used and any error
 func (fp *FileProcessor) processFileAsync(ctx context.Context, reader *csv.Reader, fileName string, processor *BatchProcessor, isLastFile bool, startingBatchNumber int64) (int64, error) {
 	type batchResult struct {
-		err        error
+		err         error
 		lastBatchNo int64
 	}
-	
+
 	writeDone := make(chan batchResult, 1)
 	go func() {
 		err, lastBatchNo := processor.BuildAndSendBatches(ctx, reader, startingBatchNumber, isLastFile)
@@ -154,7 +155,7 @@ func (fp *FileProcessor) ProcessTableType(ctx context.Context, dataDir, tableTyp
 		fp.log.Errorf("Error reading subdirectory %s: %v", subDirPath, err)
 		return err
 	}
-	
+
 	// Filter to only CSV files
 	var csvFiles []os.DirEntry
 	for _, entry := range files {
@@ -165,28 +166,28 @@ func (fp *FileProcessor) ProcessTableType(ctx context.Context, dataDir, tableTyp
 
 	// Initialize a table-wide batch counter
 	var tableBatchCounter int64 = 0
-	
+
 	// Process each file
 	for i, fileEntry := range csvFiles {
 		// Check if this is the last CSV file for this table type
 		isLastFile := (i == len(csvFiles)-1)
-		
+
 		if isLastFile {
 			fp.log.Infof("action: processing_file | file: %s | is_last_file: true | starting_batch: %d", fileEntry.Name(), tableBatchCounter)
 		} else {
 			fp.log.Infof("action: processing_file | file: %s | starting_batch: %d", fileEntry.Name(), tableBatchCounter)
 		}
-		
+
 		// Process the file with the current table batch counter
 		lastBatchNo, err := fp.ProcessFile(ctx, subDirPath, fileEntry.Name(), processor, isLastFile, tableBatchCounter)
 		if err != nil {
 			return err
 		}
-		
+
 		// Update the table batch counter for the next file
 		tableBatchCounter = lastBatchNo
 		fp.log.Infof("action: updated_batch_counter | table_type: %s | new_value: %d", tableType, tableBatchCounter)
-		
+
 		time.Sleep(1 * time.Second) // delay between files
 	}
 
@@ -226,9 +227,16 @@ func (fp *FileProcessor) ProcessAllTables(ctx context.Context, processorFactory 
 // sendEOFMessage sends an EOF message for the specified table type
 func (fp *FileProcessor) sendEOFMessage(processor *BatchProcessor, tableType string) error {
 	conn := processor.GetConnection() // Assuming BatchProcessor has a method to get connection
+	clientID := processor.GetClientID()
+	if strings.TrimSpace(clientID) == "" {
+		clientID = fp.clientID
+	}
 
 	// Build EOF message body
-	body := fp.buildEOFMessageBody(tableType)
+	body, err := fp.buildEOFMessageBody(tableType, clientID)
+	if err != nil {
+		return fmt.Errorf("failed to build EOF body: %w", err)
+	}
 	messageLength := int32(len(body))
 
 	// Send opcode (u8)
@@ -251,7 +259,7 @@ func (fp *FileProcessor) sendEOFMessage(processor *BatchProcessor, tableType str
 }
 
 // buildEOFMessageBody builds the body of an EOF message following TableMessage format
-func (fp *FileProcessor) buildEOFMessageBody(tableType string) []byte {
+func (fp *FileProcessor) buildEOFMessageBody(tableType string, clientID string) ([]byte, error) {
 	var body []byte
 
 	// TableMessage format: [nRows:i32][batchNumber:i64][status:u8][rows...]
@@ -294,5 +302,22 @@ func (fp *FileProcessor) buildEOFMessageBody(tableType string) []byte {
 	body = append(body, valueLengthBytes...)
 	body = append(body, valueBytes...)
 
-	return body
+	// Client ID flag and optional UUID payload
+	hasClientID := byte(0)
+	var clientUUIDBytes []byte
+	if strings.TrimSpace(clientID) != "" {
+		uuidBytes, err := network.UUIDStringToBytes(clientID)
+		if err != nil {
+			return nil, err
+		}
+		hasClientID = 1
+		clientUUIDBytes = uuidBytes[:]
+	}
+
+	body = append(body, hasClientID)
+	if hasClientID == 1 {
+		body = append(body, clientUUIDBytes...)
+	}
+
+	return body, nil
 }

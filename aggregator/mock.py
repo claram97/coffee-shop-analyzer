@@ -272,7 +272,8 @@ def create_mock_eof_databatch(id, table_type: str = "transactions") -> DataBatch
         eof_msg = EOFMessage()
         eof_msg.create_eof_message(
             batch_number=1,
-            table_type=table_type
+            table_type=table_type,
+            client_id=MOCK_CLIENT_ID,
         )
 
         # Crear DataBatch
