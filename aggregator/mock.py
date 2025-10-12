@@ -5,6 +5,9 @@ from queryid import QueryId
 from protocol.constants import Opcodes
 from protocol.databatch import DataBatch
 from protocol.entities import RawMenuItems, RawStore, RawTransaction, RawTransactionItem, RawUser
+
+MOCK_CLIENT_ID = "00000000-0000-0000-0000-00000000aaaa"
+
 from protocol.messages import EOFMessage, NewMenuItems, NewStores, NewTransactionItems, NewTransactions, NewUsers
 
 class QueryId(Enum):
@@ -52,7 +55,7 @@ def create_mock_transactions_databatch(id) -> DataBatch:
         transactions_msg.rows = mock_transactions
         
         # Crear DataBatch
-        databatch = DataBatch()
+        databatch = DataBatch(client_id=MOCK_CLIENT_ID)
         databatch.table_ids = [Opcodes.NEW_TRANSACTION]
         databatch.query_ids = [QueryId.FIRST_QUERY.value]
         databatch.shard_num = int(id)
@@ -65,7 +68,7 @@ def create_mock_transactions_databatch(id) -> DataBatch:
         
     except Exception as e:
         logging.error(f"Error creating mock DataBatch: {e}")
-        return DataBatch()
+        return DataBatch(client_id=MOCK_CLIENT_ID)
 
 def create_mock_transaction_items_databatch(id) -> DataBatch:
     """Create a mock DataBatch with real transaction items data for testing."""
@@ -99,7 +102,7 @@ def create_mock_transaction_items_databatch(id) -> DataBatch:
         transaction_items_msg.rows = mock_transaction_items
         
         # Crear DataBatch
-        databatch = DataBatch()
+        databatch = DataBatch(client_id=MOCK_CLIENT_ID)
         databatch.table_ids = [Opcodes.NEW_TRANSACTION_ITEMS]
         databatch.query_ids = [QueryId.FIRST_QUERY.value]
         databatch.shard_num = int(id)
@@ -112,7 +115,7 @@ def create_mock_transaction_items_databatch(id) -> DataBatch:
         
     except Exception as e:
         logging.error(f"Error creating mock DataBatch: {e}")
-        return DataBatch()
+        return DataBatch(client_id=MOCK_CLIENT_ID)
     
 def create_mock_users_databatch(id) -> DataBatch:
     """Create a mock DataBatch with real users data for testing."""
@@ -148,7 +151,7 @@ def create_mock_users_databatch(id) -> DataBatch:
         users_msg.rows = mock_user_list
 
         # Crear DataBatch
-        databatch = DataBatch()
+        databatch = DataBatch(client_id=MOCK_CLIENT_ID)
         databatch.table_ids = [Opcodes.NEW_USERS]
         databatch.query_ids = [QueryId.FIRST_QUERY.value]
         databatch.shard_num = int(id)
@@ -161,7 +164,7 @@ def create_mock_users_databatch(id) -> DataBatch:
         
     except Exception as e:
         logging.error(f"Error creating mock DataBatch: {e}")
-        return DataBatch()
+        return DataBatch(client_id=MOCK_CLIENT_ID)
 
 def create_mock_menu_items_databatch(id) -> DataBatch:
     """Create a mock DataBatch with real menu items data for testing."""
@@ -196,7 +199,7 @@ def create_mock_menu_items_databatch(id) -> DataBatch:
         menu_items_msg.rows = mock_menu_items
 
         # Crear DataBatch
-        databatch = DataBatch()
+        databatch = DataBatch(client_id=MOCK_CLIENT_ID)
         databatch.table_ids = [Opcodes.NEW_MENU_ITEMS]
         databatch.query_ids = [QueryId.FIRST_QUERY.value]
         databatch.shard_num = int(id)
@@ -209,7 +212,7 @@ def create_mock_menu_items_databatch(id) -> DataBatch:
         
     except Exception as e:
         logging.error(f"Error creating mock DataBatch: {e}")
-        return DataBatch()
+        return DataBatch(client_id=MOCK_CLIENT_ID)
 
 def create_mock_stores_databatch(id) -> DataBatch:
     """Create a mock DataBatch with real stores data for testing."""
@@ -247,7 +250,7 @@ def create_mock_stores_databatch(id) -> DataBatch:
         stores_msg.rows = mock_stores
 
         # Crear DataBatch
-        databatch = DataBatch()
+        databatch = DataBatch(client_id=MOCK_CLIENT_ID)
         databatch.table_ids = [Opcodes.NEW_STORES]
         databatch.query_ids = [QueryId.FIRST_QUERY.value]
         databatch.shard_num = int(id)
@@ -260,7 +263,7 @@ def create_mock_stores_databatch(id) -> DataBatch:
         
     except Exception as e:
         logging.error(f"Error creating mock DataBatch: {e}")
-        return DataBatch()
+        return DataBatch(client_id=MOCK_CLIENT_ID)
 
 def create_mock_eof_databatch(id, table_type: str = "transactions") -> DataBatch:
     """Create a mock EOF DataBatch for testing."""
@@ -268,12 +271,12 @@ def create_mock_eof_databatch(id, table_type: str = "transactions") -> DataBatch
         # Crear mensaje EOF
         eof_msg = EOFMessage()
         eof_msg.create_eof_message(
-            batch_number=1, 
+            batch_number=1,
             table_type=table_type
         )
-        
+
         # Crear DataBatch
-        databatch = DataBatch()
+        databatch = DataBatch(client_id=MOCK_CLIENT_ID)
         databatch.table_ids = [Opcodes.EOF]
         databatch.query_ids = [QueryId.FIRST_QUERY.value]
         databatch.shard_num = int(id)
@@ -286,7 +289,7 @@ def create_mock_eof_databatch(id, table_type: str = "transactions") -> DataBatch
         
     except Exception as e:
         logging.error(f"Error creating mock EOF DataBatch: {e}")
-        return DataBatch()
+        return DataBatch(client_id=MOCK_CLIENT_ID)
 
 def obtain_table_message(databatch: DataBatch):
     """Obtain the table message from a DataBatch and log its contents."""

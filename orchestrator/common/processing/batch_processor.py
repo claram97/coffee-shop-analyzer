@@ -206,7 +206,7 @@ class BatchProcessor:
             )
 
     def create_data_batch_wrapper(
-        self, original_msg, query_ids, batch_bytes
+        self, original_msg, query_ids, batch_bytes, *, client_id: str
     ) -> DataBatch:
         """
         Constructs the final `DataBatch` message wrapper around the serialized data.
@@ -225,6 +225,7 @@ class BatchProcessor:
             meta={},
             shards_info=[],
             batch_bytes=batch_bytes,
+            client_id=client_id,
         )
         wrapper.batch_number = original_msg.batch_number
         return wrapper
@@ -256,7 +257,7 @@ class BatchProcessor:
             original_msg.batch_number,
         )
 
-    def create_filtered_data_batch(self, original_msg) -> DataBatch:
+    def create_filtered_data_batch(self, original_msg, client_id: str) -> DataBatch:
         """
         Creates a fully-formed `DataBatch` from an original data message.
 
@@ -282,7 +283,9 @@ class BatchProcessor:
         )
         self.log_filtered_sample(original_msg, filtered_rows)
 
-        wrapper = self.create_data_batch_wrapper(original_msg, query_ids, batch_bytes)
+        wrapper = self.create_data_batch_wrapper(
+            original_msg, query_ids, batch_bytes, client_id=client_id
+        )
 
         self.add_backward_compatibility_data(wrapper, original_msg, filtered_rows)
 
@@ -295,7 +298,7 @@ class BatchProcessor:
 batch_processor = BatchProcessor()
 
 
-def create_filtered_data_batch(original_msg) -> DataBatch:
+def create_filtered_data_batch(original_msg, client_id: str) -> DataBatch:
     """
     A convenience function that uses the global `batch_processor` instance
     to create a filtered data batch.
@@ -308,4 +311,4 @@ def create_filtered_data_batch(original_msg) -> DataBatch:
     Returns:
         A fully processed `DataBatch` object.
     """
-    return batch_processor.create_filtered_data_batch(original_msg)
+    return batch_processor.create_filtered_data_batch(original_msg, client_id)

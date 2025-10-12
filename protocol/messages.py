@@ -5,6 +5,7 @@ Protocol message classes for handling different types of communication.
 import inspect
 import socket
 import struct
+import uuid
 from typing import Any, Callable, Iterator, List, Optional, Tuple
 
 from .constants import Opcodes, ProtocolError
@@ -722,6 +723,36 @@ class Finished:
             (agency_id, _) = socket_read_i32(data, length, self.opcode)
         
         self.agency_id = agency_id
+
+
+class ClientHello:
+    """Inbound CLIENT_HELLO message carrying a 16-byte client UUID."""
+
+    def __init__(self):
+        self.opcode = Opcodes.CLIENT_HELLO
+        self.client_id_bytes = None
+        self.client_id: Optional[str] = None
+        self._length = 16
+
+    def read_from(self, data, length: int):
+        if length != self._length:
+            raise ProtocolError("invalid length", self.opcode)
+
+        if isinstance(data, bytes):
+            reader = BytesReader(data)
+            self.client_id_bytes = reader.read(self._length)
+        else:
+            from .socket_parsing import read_exact
+
+            self.client_id_bytes = read_exact(data, self._length)
+
+        if len(self.client_id_bytes) != self._length:
+            raise ProtocolError("invalid client id size", self.opcode)
+
+        try:
+            self.client_id = str(uuid.UUID(bytes=self.client_id_bytes))
+        except (ValueError, AttributeError) as exc:
+            raise ProtocolError("invalid client id", self.opcode) from exc
 
 
 class BatchRecvSuccess:

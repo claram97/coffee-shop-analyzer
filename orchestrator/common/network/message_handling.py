@@ -5,7 +5,7 @@ standardized responses within a network communication protocol.
 
 import logging
 import os
-from typing import Any, Dict
+from typing import Any, Dict, Optional
 
 from common.processing import create_filtered_data_batch
 
@@ -53,11 +53,15 @@ class MessageHandler:
             and msg.opcode != Opcodes.BATCH_RECV_FAIL
         )
 
-    def handle_message(self, msg: Any, client_sock: Any) -> bool:
+    def handle_message(self, msg: Any, client_sock: Any, client_id: Optional[str] = None) -> bool:
         # 1) Fast-path: tablas livianas → Filter Router 0 por exchange
+        effective_client_id = client_id or getattr(msg, "client_id", None)
         if msg.opcode in (Opcodes.NEW_MENU_ITEMS, Opcodes.NEW_STORES):
             try:
-                db = create_filtered_data_batch(msg)
+                if not effective_client_id:
+                    raise RuntimeError("client_id required for light data path")
+
+                db = create_filtered_data_batch(msg, effective_client_id)
                 raw = db.to_bytes()
                 tname = (
                     "menu_items" if msg.opcode == Opcodes.NEW_MENU_ITEMS else "stores"

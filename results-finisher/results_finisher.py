@@ -48,6 +48,7 @@ QUERY_TYPE_TO_TABLE = {
 @dataclass
 class QueryState:
     """Represents the state for a single, in-flight query."""
+    client_id: str
     query_id: str
     query_type: QueryType
     consolidated_data: Dict[str, Any] = field(default_factory=dict)
@@ -81,7 +82,7 @@ class ResultsFinisher:
         self.input_client = input_client
         self.output_client = output_client
         
-        self.active_queries: Dict[str, QueryState] = {}
+        self.active_queries: Dict[Tuple[str, str], QueryState] = {}
         self.global_lock = threading.Lock()
 
         logger.info("Initialized ResultsFinisher for processing.")
@@ -105,6 +106,13 @@ class ResultsFinisher:
             return
         
         query_id = str(batch.query_ids[0])
+        client_id = getattr(batch, "client_id", None)
+        if not client_id:
+            logger.warning(
+                "Received DataBatch without client_id for query '%s'. Ignoring.",
+                query_id,
+            )
+            return
         table_type = OPCODE_TO_TABLE_TYPE.get(batch.batch_msg.opcode)
         expected_table = QUERY_TYPE_TO_TABLE.get(QueryType(int(query_id)))
 
@@ -114,7 +122,7 @@ class ResultsFinisher:
             return
 
         with self.global_lock:
-            state = self._get_or_create_query_state(query_id)
+            state = self._get_or_create_query_state(client_id, query_id)
         
         is_complete = False
         with state.lock:
@@ -125,16 +133,27 @@ class ResultsFinisher:
                 is_complete = True
         
         if is_complete:
-            logger.info(f"All tables for query '{query_id}' are complete. Finalizing.")
+            logger.info(
+                "All tables for query '%s' (client %s) are complete. Finalizing.",
+                query_id,
+                client_id,
+            )
             self._finalize_query(state)
-            self._cleanup_query_state(query_id)
+            self._cleanup_query_state(client_id, query_id)
 
-    def _get_or_create_query_state(self, query_id: str) -> QueryState:
-        if query_id not in self.active_queries:
+    def _get_or_create_query_state(self, client_id: str, query_id: str) -> QueryState:
+        key = (client_id, query_id)
+        if key not in self.active_queries:
             try:
                 query_type = QueryType(int(query_id))
-                logger.info(f"New query detected: ID '{query_id}', Type '{query_type.name}'.")
-                self.active_queries[query_id] = QueryState(
+                logger.info(
+                    "New query detected: ID '%s', Type '%s', Client '%s'.",
+                    query_id,
+                    query_type.name,
+                    client_id,
+                )
+                self.active_queries[key] = QueryState(
+                    client_id=client_id,
                     query_id=query_id,
                     query_type=query_type,
                     strategy=get_strategy(query_type)
@@ -142,8 +161,8 @@ class ResultsFinisher:
             except ValueError:
                 raise ValueError(f"Cannot determine a valid QueryType from query_id '{query_id}'")
         
-        logger.debug(f"Retrieved state for query '{query_id}'.")
-        return self.active_queries[query_id]
+        logger.debug("Retrieved state for query '%s' (client %s).", query_id, client_id)
+        return self.active_queries[key]
 
     def _update_batch_accounting(self, state: QueryState, table_type: str, batch: DataBatch):
         shards_info = batch.shards_info if batch.shards_info else [(1, 0)]
@@ -326,18 +345,30 @@ class ResultsFinisher:
             if state.strategy is None:
                 state.strategy = get_strategy(state.query_type)
             final_result = state.strategy.finalize(state.consolidated_data)
-            self._send_result(state.query_id, "success", final_result)
+            self._send_result(state.client_id, state.query_id, "success", final_result)
         except Exception as e:
             logger.error(f"Error during finalization of query '{state.query_id}': {e}", exc_info=True)
-            self._send_result(state.query_id, "error", error_message=str(e))
+            self._send_result(state.client_id, state.query_id, "error", error_message=str(e))
 
-    def _cleanup_query_state(self, query_id: str):
+    def _cleanup_query_state(self, client_id: str, query_id: str):
         with self.global_lock:
-            if query_id in self.active_queries:
-                del self.active_queries[query_id]
-            logger.info(f"In-memory cleanup complete for query '{query_id}'.")
+            key = (client_id, query_id)
+            if key in self.active_queries:
+                del self.active_queries[key]
+            logger.info(
+                "In-memory cleanup complete for query '%s' (client %s).",
+                query_id,
+                client_id,
+            )
 
-    def _send_result(self, query_id: str, status: str, result: Any = None, error_message: str = ""):
+    def _send_result(
+        self,
+        client_id: str,
+        query_id: str,
+        status: str,
+        result: Any = None,
+        error_message: str = "",
+    ):
         """Send query results using the appropriate protocol message type."""
         try:
             if status != "success" or result is None:
@@ -355,7 +386,8 @@ class ResultsFinisher:
                     meta={},
                     table_ids=[error_result.opcode],
                     batch_bytes=error_result.to_bytes(),
-                    shards_info=[(1, 0)]  # Standard format for no sharding
+                    shards_info=[(1, 0)],  # Standard format for no sharding
+                    client_id=client_id,
                 )
                 
                 self.output_client.send(batch.to_bytes())
@@ -372,7 +404,8 @@ class ResultsFinisher:
                 meta={},
                 table_ids=[result_message.opcode],
                 batch_bytes=result_message.to_bytes(),
-                shards_info=[(1, 0)]  # Standard format for no sharding
+                shards_info=[(1, 0)],  # Standard format for no sharding
+                client_id=client_id,
             )
             
             self.output_client.send(batch.to_bytes())
@@ -393,7 +426,8 @@ class ResultsFinisher:
                     meta={},
                     table_ids=[emergency_error.opcode],
                     batch_bytes=emergency_error.to_bytes(),
-                    shards_info=[(1, 0)]  # Standard format for no sharding
+                    shards_info=[(1, 0)],  # Standard format for no sharding
+                    client_id=client_id,
                 )
                 
                 self.output_client.send(emergency_batch.to_bytes())

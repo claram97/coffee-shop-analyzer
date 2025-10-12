@@ -1,13 +1,19 @@
 package common
 
 import (
+	"encoding/binary"
+	"encoding/hex"
 	"errors"
+	"fmt"
 	"io"
 	"net"
 	"os"
+	"strings"
 	"time"
 
 	"github.com/op/go-logging"
+
+	protocol "github.com/7574-sistemas-distribuidos/docker-compose-init/client/protocol"
 )
 
 // IsConnectionError checks if the error indicates a broken/lost connection
@@ -122,6 +128,17 @@ func (cm *ConnectionManager) Connect(attempts int, retryInterval time.Duration) 
 		conn, err := cm.attemptConnection()
 		if err == nil {
 			cm.handleConnectionSuccess(conn, attempt)
+			if err := cm.sendClientHello(conn); err != nil {
+				cm.log.Errorf(
+					"action: client_hello | result: fail | client_id: %s | error: %v",
+					cm.clientID,
+					err,
+				)
+				_ = conn.Close()
+				cm.conn = nil
+				lastErr = err
+				break
+			}
 			return nil
 		}
 
@@ -146,4 +163,42 @@ func (cm *ConnectionManager) Close() {
 		cm.conn.Close()
 		cm.conn = nil
 	}
+}
+
+func (cm *ConnectionManager) sendClientHello(conn net.Conn) error {
+	if strings.TrimSpace(cm.clientID) == "" {
+		return fmt.Errorf("missing client ID for handshake")
+	}
+
+	uuidBytes, err := uuidStringToBytes(cm.clientID)
+	if err != nil {
+		return err
+	}
+
+	frame := make([]byte, 1+4+16)
+	frame[0] = protocol.OpCodeClientHello
+	binary.LittleEndian.PutUint32(frame[1:], 16)
+	copy(frame[5:], uuidBytes[:])
+
+	if _, err := conn.Write(frame); err != nil {
+		return fmt.Errorf("failed to send client hello: %w", err)
+	}
+
+	cm.log.Infof("action: client_hello | result: sent | client_id: %s", cm.clientID)
+	return nil
+}
+
+func uuidStringToBytes(id string) ([16]byte, error) {
+	var out [16]byte
+	cleaned := strings.ReplaceAll(strings.TrimSpace(id), "-", "")
+	if len(cleaned) != 32 {
+		return out, fmt.Errorf("client id must be a UUID (32 hex chars), got length %d", len(cleaned))
+	}
+
+	decoded, err := hex.DecodeString(cleaned)
+	if err != nil {
+		return out, fmt.Errorf("invalid client id format: %w", err)
+	}
+	copy(out[:], decoded)
+	return out, nil
 }

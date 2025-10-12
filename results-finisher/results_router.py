@@ -44,9 +44,9 @@ class ResultsRouter:
             f"{self.output_queue_names}"
         )
 
-    def _get_target_queue_name(self, query_id: str) -> str:
+    def _get_target_queue_name(self, routing_key: str) -> str:
         """Determines the target queue using a deterministic hash algorithm."""
-        hash_value = _calculate_route_hash(query_id)
+        hash_value = _calculate_route_hash(routing_key)
         target_index = hash_value % self.finisher_count
         return self.output_queue_names[target_index]
 
@@ -73,12 +73,27 @@ class ResultsRouter:
             
             # Route based on the first query_id in the list.
             query_id = str(message.query_ids[0])
+            client_id = getattr(message, "client_id", None)
+            if not client_id:
+                logger.warning(
+                    "DataBatch missing client_id for routing. Query: %s. Discarding.",
+                    query_id,
+                )
+                return
+
+            routing_key = f"{client_id}:{query_id}"
             batch_number = message.batch_number
-            target_queue_name = self._get_target_queue_name(query_id)
+            target_queue_name = self._get_target_queue_name(routing_key)
             target_client = self.output_clients[target_queue_name]
             
             target_client.send(body)
-            logger.debug(f"Routed DATA_BATCH {batch_number} for query '{query_id}' to queue '{target_queue_name}'")
+            logger.debug(
+                "Routed DATA_BATCH %s for query '%s' (client %s) to queue '%s'",
+                batch_number,
+                query_id,
+                client_id,
+                target_queue_name,
+            )
 
         except ProtocolError as e:
             logger.error(f"Failed to parse message due to protocol error, discarding. Error: {e}. Body prefix: {body[:60]!r}")
