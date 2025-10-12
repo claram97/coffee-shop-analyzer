@@ -5,7 +5,7 @@ Protocol message classes for handling different types of communication.
 import inspect
 import socket
 import struct
-from typing import Any, Iterator, Tuple
+from typing import Any, Callable, Iterator, List, Optional, Tuple
 
 from .constants import Opcodes, ProtocolError
 from .entities import (
@@ -31,6 +31,8 @@ from .parsing import (
     read_u8_with_remaining,
 )
 
+_ROW_FACTORY_SIGNATURE_CACHE: dict[Any, Optional[tuple[tuple[str, ...], tuple[str, ...], bool]]] = {}
+_SKIP_ROW = object()
 
 class TableMessage:
     """
@@ -44,11 +46,99 @@ class TableMessage:
         """
         self.opcode = opcode
         self.required_keys = required_keys or ()
-        self.rows = []
         self.amount = 0
         self.batch_number = 0
         self.batch_status = 0
         self._row_factory = row_factory
+        self._row_factory_meta = self._prepare_row_factory(row_factory)
+        self._rows_cache: List[Any] = []
+        self._rows_loaded = True
+        self._raw_body_bytes: Optional[bytes] = None
+        self._raw_rows_offset = 0
+        self._raw_rows_length = 0
+        self.rows = []
+
+    def _prepare_row_factory(
+        self, factory: Optional[Callable[..., Any]]
+    ) -> Optional[tuple[tuple[str, ...], tuple[str, ...], bool]]:
+        if factory in (None, dict):
+            return None
+
+        cached = _ROW_FACTORY_SIGNATURE_CACHE.get(factory)
+        if cached is not None:
+            return cached
+
+        try:
+            sig = inspect.signature(factory)
+        except (TypeError, ValueError):
+            _ROW_FACTORY_SIGNATURE_CACHE[factory] = None
+            return None
+
+        required: list[str] = []
+        optional: list[str] = []
+        has_var_kw = False
+
+        for name, param in sig.parameters.items():
+            if param.kind == inspect.Parameter.VAR_KEYWORD:
+                has_var_kw = True
+                continue
+            if param.kind not in (
+                inspect.Parameter.POSITIONAL_ONLY,
+                inspect.Parameter.POSITIONAL_OR_KEYWORD,
+                inspect.Parameter.KEYWORD_ONLY,
+            ):
+                continue
+            if param.default is inspect._empty:
+                required.append(name)
+            else:
+                optional.append(name)
+
+        meta = (tuple(required), tuple(optional), has_var_kw)
+        _ROW_FACTORY_SIGNATURE_CACHE[factory] = meta
+        return meta
+
+    @property
+    def rows(self) -> List[Any]:
+        if not self._rows_loaded:
+            self._rows_cache = self._load_rows_from_raw()
+        return self._rows_cache
+
+    @rows.setter
+    def rows(self, value):
+        if value is None:
+            self._rows_cache = []
+        elif isinstance(value, list):
+            self._rows_cache = value
+        else:
+            self._rows_cache = list(value)
+        self._rows_loaded = True
+        self._raw_body_bytes = None
+        self._raw_rows_offset = 0
+        self._raw_rows_length = 0
+        self.amount = len(self._rows_cache)
+
+    def _load_rows_from_raw(self) -> List[Any]:
+        if not self._raw_body_bytes or self._raw_rows_length == 0:
+            self._rows_loaded = True
+            self._raw_body_bytes = None
+            return []
+
+        buffer = self._raw_body_bytes[
+            self._raw_rows_offset : self._raw_rows_offset + self._raw_rows_length
+        ]
+        reader = BytesReader(buffer)
+        remaining = self._raw_rows_length
+
+        rows, remaining = self._read_all_rows(reader, remaining, self.amount)
+
+        self._validate_message_length(remaining)
+
+        self._rows_loaded = True
+        self._raw_body_bytes = None
+        self._raw_rows_offset = 0
+        self._raw_rows_length = 0
+        self._rows_cache = rows
+        return rows
 
     @staticmethod
     def _to_kv_iter(row: Any) -> Iterator[Tuple[str, str]]:
@@ -160,26 +250,30 @@ class TableMessage:
         payload = {k.lower(): v for k, v in current_row_data.items()}
 
         if self._row_factory in (None, dict):
-            self.rows.append(payload)
-            return
+            return payload
 
         try:
-            sig = inspect.signature(self._row_factory)
-            kwargs = {}
-            for name, param in sig.parameters.items():
+            if self._row_factory_meta is None:
+                return self._row_factory(**payload)
+
+            required, optional, has_var_kw = self._row_factory_meta
+            kwargs: dict[str, Any] = {}
+
+            for name in required:
+                kwargs[name] = payload.get(name)
+
+            for name in optional:
                 if name in payload:
                     kwargs[name] = payload[name]
-                else:
-                    if param.default is inspect._empty and param.kind in (
-                        inspect.Parameter.POSITIONAL_OR_KEYWORD,
-                        inspect.Parameter.KEYWORD_ONLY,
-                    ):
-                        kwargs[name] = None
 
-            obj = self._row_factory(**kwargs)
-            self.rows.append(obj)
+            if has_var_kw:
+                for name, value in payload.items():
+                    if name not in kwargs:
+                        kwargs[name] = value
+
+            return self._row_factory(**kwargs)
         except Exception:
-            self.rows.append(payload)
+            return payload
 
     def _read_table_header(self, reader: BytesReader, remaining: int) -> int:
         """Read table header: number of rows, batch number and status."""
@@ -196,19 +290,26 @@ class TableMessage:
 
         return remaining
 
-    def _read_row(self, reader: BytesReader, remaining: int) -> int:
+    def _read_row(self, reader: BytesReader, remaining: int) -> Tuple[Any, int]:
         (n_pairs, remaining) = read_i32(reader, remaining, self.opcode)
         current_row_data, remaining = self._read_key_value_pairs(
             reader, remaining, n_pairs
         )
-        self._create_row_object(current_row_data)
-        return remaining
+        row_obj = self._create_row_object(current_row_data)
+        return row_obj, remaining
 
-    def _read_all_rows(self, reader: BytesReader, remaining: int, n_rows: int) -> int:
+    def _read_all_rows(
+        self, reader: BytesReader, remaining: int, n_rows: int
+    ) -> Tuple[List[Any], int]:
         """Read all rows from the table."""
+        rows: list[Any] = []
+        local_remaining = remaining
         for _ in range(n_rows):
-            remaining = self._read_row(reader, remaining)
-        return remaining
+            row_obj, local_remaining = self._read_row(reader, local_remaining)
+            if row_obj is _SKIP_ROW:
+                continue
+            rows.append(row_obj)
+        return rows, local_remaining
 
     def _validate_message_length(self, remaining: int):
         """Validate that no bytes remain unprocessed."""
@@ -229,10 +330,24 @@ class TableMessage:
 
         try:
             remaining = self._read_table_header(reader, remaining)
+            self._raw_body_bytes = body_bytes
+            self._raw_rows_offset = len(body_bytes) - remaining
+            self._raw_rows_length = remaining
 
-            remaining = self._read_all_rows(reader, remaining, self.amount)
+            if self.amount and remaining == 0:
+                raise ProtocolError(
+                    "Indicated length doesn't match body length", self.opcode
+                )
 
-            self._validate_message_length(remaining)
+            if remaining == 0 or self.amount == 0:
+                self._rows_cache = []
+                self._rows_loaded = True
+                self._raw_body_bytes = None
+                self._raw_rows_offset = 0
+                self._raw_rows_length = 0
+            else:
+                self._rows_cache = []
+                self._rows_loaded = False
 
         except ProtocolError:
             raise
@@ -462,6 +577,13 @@ class EOFMessage(TableMessage):
         )
         self.table_type = ""  # Store table type directly
 
+    def read_from(self, body_bytes: bytes):
+        super().read_from(body_bytes)
+        if not self._rows_loaded:
+            self._load_rows_from_raw()
+            self._rows_cache = []
+            self._rows_loaded = True
+
     @staticmethod
     def deserialize_from_bytes(buf: bytes) -> "EOFMessage":
         if not buf:
@@ -498,6 +620,7 @@ class EOFMessage(TableMessage):
 
         # No actual rows - rows list stays empty
         self.rows = []
+        self.amount = 1
         return self
 
     def _create_row_object(self, current_row_data: dict[str, str]):
@@ -506,6 +629,7 @@ class EOFMessage(TableMessage):
         if "table_type" in current_row_data:
             self.table_type = current_row_data["table_type"]
         # Don't append to self.rows - EOF messages have no actual data rows
+        return _SKIP_ROW
 
     def get_table_type(self) -> str:
         """Get the table type from the EOF message.
