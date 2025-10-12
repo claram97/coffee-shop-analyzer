@@ -577,13 +577,54 @@ class EOFMessage(TableMessage):
             row_factory=lambda **kwargs: None,  # Don't create row objects
         )
         self.table_type = ""  # Store table type directly
+        self.client_id: Optional[str] = None
 
     def read_from(self, body_bytes: bytes):
-        super().read_from(body_bytes)
-        if not self._rows_loaded:
-            self._load_rows_from_raw()
-            self._rows_cache = []
-            self._rows_loaded = True
+        reader = BytesReader(body_bytes)
+        remaining = len(body_bytes)
+
+        (n_rows, remaining) = read_i32(reader, remaining, self.opcode)
+        if n_rows != 1:
+            raise ProtocolError("EOF message must contain exactly one metadata row", self.opcode)
+
+        (batch_number, remaining) = read_i64(reader, remaining, self.opcode)
+        self.batch_number = batch_number
+
+        (batch_status, remaining) = read_u8_with_remaining(reader, remaining, self.opcode)
+        self.batch_status = batch_status
+
+        (n_pairs, remaining) = read_i32(reader, remaining, self.opcode)
+        if n_pairs != 1:
+            raise ProtocolError("EOF message metadata row must contain exactly one key/value pair", self.opcode)
+
+        key, remaining = read_string(reader, remaining, self.opcode)
+        value, remaining = read_string(reader, remaining, self.opcode)
+
+        if key != "table_type":
+            raise ProtocolError("EOF metadata key must be 'table_type'", self.opcode)
+
+        self.table_type = value
+        self.rows = []
+        self.amount = 1
+
+        if remaining > 0:
+            (flag, remaining) = read_u8_with_remaining(reader, remaining, self.opcode)
+            if flag not in (0, 1):
+                raise ProtocolError("invalid EOF client_id flag", self.opcode)
+
+            if flag == 1:
+                if remaining < 16:
+                    raise ProtocolError("EOF client_id is truncated", self.opcode)
+                client_bytes = reader.read(16)
+                remaining -= 16
+                self.client_id = str(uuid.UUID(bytes=client_bytes))
+            else:
+                self.client_id = None
+        else:
+            self.client_id = None
+
+        if remaining != 0:
+            raise ProtocolError("Indicated length doesn't match body length", self.opcode)
 
     @staticmethod
     def deserialize_from_bytes(buf: bytes) -> "EOFMessage":
@@ -602,7 +643,7 @@ class EOFMessage(TableMessage):
         msg.read_from(body)
         return msg
 
-    def create_eof_message(self, batch_number: int, table_type: str):
+    def create_eof_message(self, batch_number: int, table_type: str, client_id: Optional[str] = None):
         """Create an EOF message for a specific table type.
 
         Args:
@@ -622,6 +663,7 @@ class EOFMessage(TableMessage):
         # No actual rows - rows list stays empty
         self.rows = []
         self.amount = 1
+        self.client_id = client_id
         return self
 
     def _create_row_object(self, current_row_data: dict[str, str]):
@@ -643,7 +685,10 @@ class EOFMessage(TableMessage):
     def to_bytes(self) -> bytes:
         """Serialize the EOF message to bytes following TableMessage protocol.
 
-        Format: [opcode:u8][length:i32][nRows:i32][batchNumber:i64][status:u8][n_pairs:i32]["table_type"][table_type_value]
+        Format: [opcode:u8][length:i32]
+                [nRows:i32][batchNumber:i64][status:u8]
+                [n_pairs:i32]["table_type"][table_type_value]
+                [has_client_id:u8][client_id?:16]
 
         Returns:
             The serialized message as bytes
@@ -683,6 +728,17 @@ class EOFMessage(TableMessage):
 
         body_parts.append(struct.pack("<I", len(value_bytes)))  # value length
         body_parts.append(value_bytes)  # value data
+
+        # Client ID flag + optional bytes
+        has_client_id = 1 if self.client_id else 0
+        body_parts.append(struct.pack("<B", has_client_id))
+
+        if has_client_id:
+            try:
+                uuid_bytes = uuid.UUID(str(self.client_id)).bytes
+            except (ValueError, AttributeError) as exc:
+                raise ProtocolError("client_id must be a valid UUID string", self.opcode) from exc
+            body_parts.append(uuid_bytes)
 
         # Join all body parts
         body = b"".join(body_parts)

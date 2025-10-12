@@ -188,6 +188,21 @@ class ResultsFinisher:
         # Update the total_shards with the first dimension's total shards value
         batch_info["total_shards"] = total_shards
 
+        raw_status = getattr(batch.batch_msg, "batch_status", BatchStatus.CONTINUE)
+        try:
+            normalized_status = int(raw_status)
+        except (TypeError, ValueError):
+            normalized_status = BatchStatus.CONTINUE
+
+        if normalized_status != raw_status:
+            try:
+                batch.batch_msg.batch_status = normalized_status
+            except Exception:
+                logging.debug(
+                    "action: normalize_batch_status | result: skip | reason: immutable | raw_status=%s",
+                    raw_status,
+                )
+
         copy_total, copy_index = self._extract_copy_info(getattr(batch, "meta", {}))
 
         shard_entry = batch_info["shards"].setdefault(shard_key, {
@@ -236,7 +251,7 @@ class ResultsFinisher:
             state.completed_batch_counts[table_type] = state.completed_batch_counts.get(table_type, 0) + 1
         
         # If this is an EOF batch, record it
-        if batch.batch_msg.batch_status == BatchStatus.EOF:
+        if normalized_status == BatchStatus.EOF:
             logging.info(f"Received EOF for query '{state.query_id}', table '{table_type}', batch {batch.batch_number}.")
             state.eof_received[table_type] = max(state.eof_received.get(table_type, 0), batch.batch_number)
         

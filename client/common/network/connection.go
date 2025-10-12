@@ -170,7 +170,7 @@ func (cm *ConnectionManager) sendClientHello(conn net.Conn) error {
 		return fmt.Errorf("missing client ID for handshake")
 	}
 
-	uuidBytes, err := uuidStringToBytes(cm.clientID)
+	uuidBytes, err := UUIDStringToBytes(cm.clientID)
 	if err != nil {
 		return err
 	}
@@ -188,7 +188,8 @@ func (cm *ConnectionManager) sendClientHello(conn net.Conn) error {
 	return nil
 }
 
-func uuidStringToBytes(id string) ([16]byte, error) {
+// UUIDStringToBytes converts a canonical UUID string into its 16-byte representation.
+func UUIDStringToBytes(id string) ([16]byte, error) {
 	var out [16]byte
 	cleaned := strings.ReplaceAll(strings.TrimSpace(id), "-", "")
 	if len(cleaned) != 32 {

@@ -72,6 +72,22 @@ def _eof_bytes_for(table_type: str) -> bytes:
     return eof.to_bytes()
 
 
+def test_eof_message_round_trip_includes_client_id():
+    client_id = "123e4567-e89b-12d3-a456-426614174000"
+    eof = EOFMessage().create_eof_message(
+        batch_number=42,
+        table_type="transactions",
+        client_id=client_id,
+    )
+    raw = eof.to_bytes()
+
+    parsed = EOFMessage.deserialize_from_bytes(raw)
+
+    assert parsed.get_table_type() == "transactions"
+    assert parsed.batch_number == 42
+    assert parsed.client_id == client_id
+
+
 def test_table_eof_broadcast_transactions(fake_pool, cfg_obj):
     pool, pubs = fake_pool.pool, fake_pool.pubs
     route_cfg = build_route_cfg_from_config(cfg_obj)
