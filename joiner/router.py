@@ -122,8 +122,8 @@ class JoinerRouter:
         self._in = in_mw
         self._pool = publisher_pool
         self._cfg = route_cfg
-        self._pending_eofs: Dict[tuple[int, str, str], Set[int]] = {}
-        self._part_counter: Dict[tuple[int, str, str], int] = {}
+        self._pending_eofs: Dict[tuple[int, str], Set[int]] = {}
+        self._part_counter: Dict[tuple[int, str], int] = {}
         self._fr_replicas = fr_replicas
         log.info(
             "JoinerRouter init: tables=%s",
@@ -258,8 +258,7 @@ class JoinerRouter:
             log.warning("EOF without valid table_type; ignoring")
             return
         cid = getattr(eof, "client_id", "")
-        rid = getattr(eof, "run_id", "")
-        key = (table_id, cid, rid)
+        key = (table_id, cid)
         cfg = self._cfg.get(table_id)
         if cfg is None:
             log.warning("EOF for unknown table_id=%s; ignoring", table_id)
