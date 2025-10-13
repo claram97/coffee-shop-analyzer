@@ -216,20 +216,21 @@ class JoinerRouter:
             return
 
         buckets: Dict[int, List[Any]] = {}
+        for shard in range(0, cfg.joiner_shards):
+            buckets[shard] = []
+
         for r in rows:
             k = _shard_key_for_row(table_id, r, queries)
             if 1 not in queries and (k is None or not k.strip()):
                 continue
             shard = 0 if k is None else _hash_to_shard(k, cfg.joiner_shards)
-            buckets.setdefault(shard, []).append(r)
+            buckets[shard].append(r)
 
         if log.isEnabledFor(logging.INFO):
             sizes = {sh: len(rs) for sh, rs in buckets.items()}
             log.debug("shard plan table=%s -> %s", tname, sizes)
 
         for shard, shard_rows in buckets.items():
-            if not shard_rows:
-                continue
             db_sh = copy.copy(db)
             db_sh.query_ids = db.query_ids
             if 1 not in queries:
