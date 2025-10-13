@@ -197,6 +197,7 @@ func (rh *ResponseHandler) handleQueryResultTable(queryResult *protocol.QueryRes
 	defer file.Close()
 
 	encoder := json.NewEncoder(file)
+	encoder.SetIndent("", "  ") // Pretty-print with 2 spaces
 	if err := encoder.Encode(typedRows); err != nil {
 		rh.log.Errorf("action: write_results | result: fail | error: encoding to %s: %v", filename, err)
 		return

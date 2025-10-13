@@ -11,6 +11,15 @@ import (
 	"github.com/op/go-logging"
 )
 
+// parseFloat parses a string to float64, returns 0 on error
+func parseFloat(s string) float64 {
+	f, err := strconv.ParseFloat(s, 64)
+	if err != nil {
+		return 0
+	}
+	return f
+}
+
 // Finished is a client→server message that indicates the agency finished
 // sending all its batch messages. Body: [agencyId:i32].
 type Finished struct {
@@ -492,8 +501,20 @@ func ReadMessage(reader *bufio.Reader, logger *logging.Logger) (Readable, error)
 				logger.Infof("action: query_result_received | opcode: %d | status: %d | rows: %d", msg.OpCode, msg.BatchStatus, len(msg.Rows))
 			}
 			for _, row := range msg.Rows {
-				rowJson, _ := json.Marshal(row)
-				logger.Infof("row: %s", string(rowJson))
+				switch msg.OpCode {
+				case OpCodeQueryResult1:
+					logger.Infof("Transaction ID: %s | Final Amount: $%.2f", row["transaction_id"], parseFloat(row["final_amount"]))
+				case OpCodeQueryResult2:
+					logger.Infof("Product: %s | Month: %s | Quantity: %s | Revenue: $%.2f", row["name"], row["month"], row["quantity"], parseFloat(row["revenue"]))
+				case OpCodeQueryResult3:
+					logger.Infof("Store: %s | Period: %s | Amount: $%.2f", row["store_name"], row["period"], parseFloat(row["amount"]))
+				case OpCodeQueryResult4:
+					logger.Infof("Customer Birthdate: %s | Purchase Count: %s | Store: %s", row["birthdate"], row["purchase_count"], row["store_name"])
+				case OpCodeQueryResultError:
+					rowJson, _ := json.Marshal(row)
+					logger.Infof("Error Row: %s", string(rowJson))
+				}
+				logger.Infof("") // Add blank line between rows
 			}
 			return msg, err
 		}
