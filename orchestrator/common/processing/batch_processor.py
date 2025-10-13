@@ -4,84 +4,57 @@ into filtered, serialized, and wrapped DataBatch messages for downstream process
 """
 
 import logging
-from typing import Callable, Dict, List
+from time import perf_counter
+from typing import Dict, List
 
 from protocol.constants import Opcodes
 from protocol.databatch import DataBatch
 
-from .filters import (
-    filter_menu_items_columns,
-    filter_stores_columns,
-    filter_transaction_items_columns,
-    filter_transactions_columns,
-    filter_users_columns,
-)
-from .serialization import (
-    serialize_filtered_menu_items,
-    serialize_filtered_stores,
-    serialize_filtered_transaction_items,
-    serialize_filtered_transactions,
-    serialize_filtered_users,
-)
+from .filters import filter_columns
+from .serialization import serialize_data
 
 
 class BatchProcessor:
     """
     Orchestrates the process of transforming raw data batch messages into a
     filtered and serialized format suitable for downstream consumers.
-
-    This involves selecting relevant data columns based on message type (opcode),
-    serializing the result, and wrapping it in a standardized `DataBatch` message
-    with appropriate metadata.
     """
 
     def __init__(self):
         """
-        Initializes the BatchProcessor by setting up internal mappings for filter
-        functions, serialization functions, query IDs, and table names, all
-        keyed by message opcodes.
+        Initializes the BatchProcessor by setting up internal mappings for
+        column configurations, query IDs, and table names.
         """
-        self._filter_functions = self._get_filter_functions_mapping()
-        self._serialize_functions = self._get_serialize_functions_mapping()
+        self._columns_to_keep = self._get_columns_to_keep_mapping()
         self._query_mappings = self._get_query_mappings()
         self._table_names = self._get_table_names_mapping()
 
-    def _get_filter_functions_mapping(self) -> Dict[int, Callable]:
-        """Creates and returns a dictionary that maps opcodes to their corresponding column filter functions."""
+    def _get_columns_to_keep_mapping(self) -> Dict[int, List[str]]:
+        """Creates a dictionary mapping opcodes to the list of columns to retain."""
         return {
-            Opcodes.NEW_MENU_ITEMS: filter_menu_items_columns,
-            Opcodes.NEW_STORES: filter_stores_columns,
-            Opcodes.NEW_TRANSACTION_ITEMS: filter_transaction_items_columns,
-            Opcodes.NEW_TRANSACTION: filter_transactions_columns,
-            Opcodes.NEW_USERS: filter_users_columns,
+            Opcodes.NEW_MENU_ITEMS: ["product_id", "name", "price"],
+            Opcodes.NEW_STORES: ["store_id", "store_name"],
+            Opcodes.NEW_TRANSACTION_ITEMS: [
+                "transaction_id", "item_id", "quantity", "subtotal", "created_at",
+            ],
+            Opcodes.NEW_TRANSACTION: [
+                "transaction_id", "store_id", "user_id", "final_amount", "created_at",
+            ],
+            Opcodes.NEW_USERS: ["user_id", "birthdate"],
         }
 
     def _get_query_mappings(self) -> Dict[int, List[int]]:
-        """Creates and returns a dictionary that maps opcodes to the query IDs they are relevant for."""
+        """Creates and returns a dictionary that maps opcodes to relevant query IDs."""
         return {
-            Opcodes.NEW_TRANSACTION: [
-                1,
-                3,
-                4,
-            ],  # Transaction: query 1, query 3, query 4
-            Opcodes.NEW_TRANSACTION_ITEMS: [2],  # TransactionItem: query 2
-            Opcodes.NEW_MENU_ITEMS: [],  # MenuItem: query 2
-            Opcodes.NEW_STORES: [],  # Store: query 3
-            Opcodes.NEW_USERS: [4],  # User: query 4
-        }
-
-    def _get_serialize_functions_mapping(self) -> Dict[int, Callable]:
-        """Creates and returns a dictionary that maps opcodes to their corresponding serialization functions."""
-        return {
-            Opcodes.NEW_MENU_ITEMS: serialize_filtered_menu_items,
-            Opcodes.NEW_STORES: serialize_filtered_stores,
-            Opcodes.NEW_TRANSACTION_ITEMS: serialize_filtered_transaction_items,
-            Opcodes.NEW_TRANSACTION: serialize_filtered_transactions,
-            Opcodes.NEW_USERS: serialize_filtered_users,
+            Opcodes.NEW_TRANSACTION: [1, 3, 4],
+            Opcodes.NEW_TRANSACTION_ITEMS: [2],
+            Opcodes.NEW_MENU_ITEMS: [],
+            Opcodes.NEW_STORES: [],
+            Opcodes.NEW_USERS: [4],
         }
 
     def _get_table_names_mapping(self) -> Dict[int, str]:
-        """Creates and returns a dictionary that maps opcodes to human-readable table names for logging."""
+        """Creates and returns a dictionary that maps opcodes to table names."""
         return {
             Opcodes.NEW_MENU_ITEMS: "menu_items",
             Opcodes.NEW_STORES: "stores",
@@ -90,92 +63,98 @@ class BatchProcessor:
             Opcodes.NEW_USERS: "users",
         }
 
-    def get_filter_function_for_opcode(self, opcode: int) -> Callable:
-        """
-        Retrieves the appropriate filter function for a given opcode.
-
-        Args:
-            opcode: The opcode of the message.
-
-        Returns:
-            The filter function associated with the opcode.
-
-        Raises:
-            ValueError: If no filter function is registered for the given opcode.
-        """
-        filter_func = self._filter_functions.get(opcode)
-        if filter_func is None:
-            raise ValueError(f"No filter function defined for opcode {opcode}")
-        return filter_func
-
     def get_query_ids_for_opcode(self, opcode: int) -> List[int]:
-        """
-        Retrieves the list of query IDs associated with a given opcode.
-
-        Args:
-            opcode: The opcode of the message.
-
-        Returns:
-            A list of integer query IDs. Defaults to [] if not found.
-        """
+        """Retrieves the list of query IDs associated with a given opcode."""
         return self._query_mappings.get(opcode, [])
 
-    def get_serialize_function_for_opcode(self, opcode: int) -> Callable:
-        """
-        Retrieves the appropriate serialization function for a given opcode.
-
-        Args:
-            opcode: The opcode of the message.
-
-        Returns:
-            The serialization function associated with the opcode.
-
-        Raises:
-            ValueError: If no serialization function is registered for the given opcode.
-        """
-        serialize_func = self._serialize_functions.get(opcode)
-        if serialize_func is None:
-            raise ValueError(f"No serialize function defined for opcode {opcode}")
-        return serialize_func
-
     def get_table_name_for_opcode(self, opcode: int) -> str:
-        """
-        Retrieves the human-readable table name for a given opcode.
-
-        Args:
-            opcode: The opcode of the message.
-
-        Returns:
-            The table name string, or a default string if the opcode is unknown.
-        """
+        """Retrieves the human-readable table name for a given opcode."""
         return self._table_names.get(opcode, f"unknown_opcode_{opcode}")
 
-    def filter_and_serialize_data(self, original_msg):
+    def create_filtered_data_batch(self, original_msg, client_id: str) -> DataBatch:
         """
-        Applies the appropriate filter and serialization functions to an original message's data.
-
-        Args:
-            original_msg: The incoming message object containing the raw data rows.
-
-        Returns:
-            A tuple containing:
-            - filtered_rows (List[Dict]): A list of the filtered row dictionaries.
-            - inner_body (bytes): The serialized binary representation of the filtered data.
+        Creates a fully-formed `DataBatch` from an original data message.
         """
-        filter_func = self.get_filter_function_for_opcode(original_msg.opcode)
-        filtered_rows = filter_func(original_msg.rows)
+        # --- ROBUSTNESS: Add validation check to prevent crashes from bad data ---
+        if original_msg.rows is None:
+            logging.error(
+                "action: process_batch | result: skip | reason: 'rows' attribute is None | "
+                "opcode: %d | batch_number: %d",
+                original_msg.opcode,
+                original_msg.batch_number
+            )
+            return None # Stop processing this invalid batch
 
-        serialize_func = self.get_serialize_function_for_opcode(original_msg.opcode)
-        inner_body = serialize_func(
-            filtered_rows, original_msg.batch_number, original_msg.batch_status
+        timing_start = perf_counter()
+
+        opcode = original_msg.opcode
+        query_ids = self.get_query_ids_for_opcode(opcode)
+        columns_to_keep = self._columns_to_keep.get(opcode)
+
+        if columns_to_keep is None:
+            logging.error(
+                "action: process_batch | result: skip | reason: unknown_opcode | "
+                "opcode: %d | batch_number: %d",
+                opcode,
+                original_msg.batch_number
+            )
+            return None
+
+        table_name = self.get_table_name_for_opcode(opcode)
+
+        # --- PERFORMANCE: Directly serialize from the original raw objects ---
+        # This avoids creating a costly intermediate list of dictionaries.
+        inner_body = serialize_data(
+            original_msg.rows,
+            original_msg.batch_number,
+            original_msg.batch_status,
+            tuple(columns_to_keep),
+            table_name
+        )
+        timing_after_serialize = perf_counter()
+
+        # Filtering is now only done once for backward compatibility,
+        # not on the main performance path.
+        filtered_rows_for_compat = filter_columns(original_msg.rows, columns_to_keep)
+
+        batch_bytes = DataBatch.make_embedded(
+            inner_opcode=opcode, inner_body=inner_body
+        )
+        timing_after_embedding = perf_counter()
+
+        self.log_data_batch_creation(
+            original_msg, query_ids, filtered_rows_for_compat, inner_body, batch_bytes
+        )
+        self.log_filtered_sample(original_msg, filtered_rows_for_compat)
+
+        wrapper = self.create_data_batch_wrapper(
+            original_msg, query_ids, batch_bytes, client_id=client_id
+        )
+        timing_after_wrapper = perf_counter()
+
+        self.add_backward_compatibility_data(wrapper, original_msg, filtered_rows_for_compat)
+        timing_after_backward = perf_counter()
+
+        self.log_data_batch_ready(original_msg)
+
+        # Updated timing log to reflect the new processing flow
+        logging.info(
+            "action: batch_processor_timing | table: %s | batch_number: %d | "
+            "total_ms: %.3f | serialize_ms: %.3f | embedding_ms: %.3f | "
+            "wrapper_ms: %.3f | backward_fill_ms: %.3f",
+            table_name,
+            original_msg.batch_number,
+            (timing_after_backward - timing_start) * 1000,
+            (timing_after_serialize - timing_start) * 1000,
+            (timing_after_embedding - timing_after_serialize) * 1000,
+            (timing_after_wrapper - timing_after_embedding) * 1000,
+            (timing_after_backward - timing_after_wrapper) * 1000,
         )
 
-        return filtered_rows, inner_body
+        return wrapper
 
-    def log_data_batch_creation(
-        self, original_msg, query_ids, filtered_rows, inner_body, batch_bytes
-    ):
-        """Logs a comprehensive summary of the data batch creation process."""
+    # --- HELPER METHODS (Unchanged but still essential) ---
+    def log_data_batch_creation(self, original_msg, query_ids, filtered_rows, inner_body, batch_bytes):
         table_name = self.get_table_name_for_opcode(original_msg.opcode)
         logging.debug(
             "action: create_data_batch | table: %s | opcode: %d | query_ids: %s | "
@@ -192,7 +171,6 @@ class BatchProcessor:
         )
 
     def log_filtered_sample(self, original_msg, filtered_rows):
-        """Logs a sample of the filtered data for debugging, showing the first row."""
         if filtered_rows:
             table_name = self.get_table_name_for_opcode(original_msg.opcode)
             sample_row = filtered_rows[0]
@@ -205,20 +183,7 @@ class BatchProcessor:
                 sample_row,
             )
 
-    def create_data_batch_wrapper(
-        self, original_msg, query_ids, batch_bytes, *, client_id: str
-    ) -> DataBatch:
-        """
-        Constructs the final `DataBatch` message wrapper around the serialized data.
-
-        Args:
-            original_msg: The source message, used for metadata like batch number.
-            query_ids: The list of query IDs relevant to this data.
-            batch_bytes: The serialized inner message payload.
-
-        Returns:
-            A configured `DataBatch` instance.
-        """
+    def create_data_batch_wrapper(self, original_msg, query_ids, batch_bytes, *, client_id: str) -> DataBatch:
         wrapper = DataBatch(
             table_ids=[],
             query_ids=query_ids,
@@ -230,13 +195,7 @@ class BatchProcessor:
         wrapper.batch_number = original_msg.batch_number
         return wrapper
 
-    def add_backward_compatibility_data(
-        self, wrapper: DataBatch, original_msg, filtered_rows
-    ):
-        """
-        Attaches a `filtered_data` dictionary to the `DataBatch` wrapper to maintain
-        compatibility with older consumers that might expect data in this format.
-        """
+    def add_backward_compatibility_data(self, wrapper: DataBatch, original_msg, filtered_rows):
         table_name = self.get_table_name_for_opcode(original_msg.opcode)
         wrapper.filtered_data = {
             "table_name": table_name,
@@ -248,7 +207,6 @@ class BatchProcessor:
         }
 
     def log_data_batch_ready(self, original_msg):
-        """Logs a final confirmation that a `DataBatch` has been fully created and is ready."""
         table_name = self.get_table_name_for_opcode(original_msg.opcode)
         logging.debug(
             "action: data_batch_ready | table: %s | batch_number: %d | "
@@ -257,58 +215,7 @@ class BatchProcessor:
             original_msg.batch_number,
         )
 
-    def create_filtered_data_batch(self, original_msg, client_id: str) -> DataBatch:
-        """
-        Creates a fully-formed `DataBatch` from an original data message.
-
-        This method orchestrates the entire process of filtering, serializing,
-        and wrapping the data, including logging and adding compatibility attributes.
-
-        Args:
-            original_msg: An incoming message object (e.g., NewMenuItems, NewStores).
-
-        Returns:
-            A `DataBatch` object ready for transmission or further processing.
-        """
-        query_ids = self.get_query_ids_for_opcode(original_msg.opcode)
-
-        filtered_rows, inner_body = self.filter_and_serialize_data(original_msg)
-
-        batch_bytes = DataBatch.make_embedded(
-            inner_opcode=original_msg.opcode, inner_body=inner_body
-        )
-
-        self.log_data_batch_creation(
-            original_msg, query_ids, filtered_rows, inner_body, batch_bytes
-        )
-        self.log_filtered_sample(original_msg, filtered_rows)
-
-        wrapper = self.create_data_batch_wrapper(
-            original_msg, query_ids, batch_bytes, client_id=client_id
-        )
-
-        self.add_backward_compatibility_data(wrapper, original_msg, filtered_rows)
-
-        self.log_data_batch_ready(original_msg)
-
-        return wrapper
-
-
-# A global singleton instance of the processor for easy access throughout the application.
 batch_processor = BatchProcessor()
 
-
 def create_filtered_data_batch(original_msg, client_id: str) -> DataBatch:
-    """
-    A convenience function that uses the global `batch_processor` instance
-    to create a filtered data batch.
-
-    This serves as a simple entry point for the batch processing logic.
-
-    Args:
-        original_msg: The source message object.
-
-    Returns:
-        A fully processed `DataBatch` object.
-    """
     return batch_processor.create_filtered_data_batch(original_msg, client_id)
