@@ -9,10 +9,8 @@ from dataclasses import dataclass
 from random import randint
 from typing import Any, Dict, List, Optional, Union
 
-from middleware.middleware_client import (
-    MessageMiddlewareExchange,
-    MessageMiddlewareQueue,
-)
+from middleware.middleware_client import (MessageMiddlewareExchange,
+                                          MessageMiddlewareQueue)
 from protocol.constants import Opcodes
 from protocol.databatch import DataBatch
 from protocol.messages import EOFMessage
@@ -297,29 +295,7 @@ class FilterRouter:
         self, batch: DataBatch, table: str, queries: List[int]
     ) -> None:
         num_parts = max(1, int(self._cfg.aggregators))
-        if table in ["stores", "menu_items"]:
-            self._p.send_to_aggregator_partition(randint(0, num_parts - 1), batch)
-            return
-        rows = rows_of(batch)
-        self._log.debug(
-            "shard plan table=%s parts=%d rows=%d", table, num_parts, len(rows)
-        )
-
-        if not isinstance(rows, list) or len(rows) == 0:
-            pid = randint(0, self._cfg.aggregators - 1)
-            self._log.debug("→ aggregator (no-rows) part=%d table=%s", pid, table)
-            self._p.send_to_aggregator_partition(pid, batch)
-            return
-
-        by_part = _group_rows_by_partition(table, queries, rows, num_parts)
-        for pid, subrows in by_part.items():
-            if not subrows:
-                continue
-            b = _clone_with_rows(batch, subrows, (num_parts, int(pid)))
-            self._log.debug(
-                "→ aggregator part=%d table=%s rows=%d", int(pid), table, len(subrows)
-            )
-            self._p.send_to_aggregator_partition(int(pid), b)
+        self._p.send_to_aggregator_partition(randint(0, num_parts - 1), batch)
 
     def _pick_part_for_empty_payload(
         self, table: str, queries: List[int], reserved_u16: int
