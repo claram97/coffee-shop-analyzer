@@ -8,6 +8,15 @@ from typing import List, Dict, Any
 from protocol.entities import RawMenuItems, RawStore, RawTransactionItem, RawTransaction, RawUser
 
 
+def _return_if_dict_list(rows):
+    if isinstance(rows, list):
+        if not rows:
+            return rows
+        if all(isinstance(row, dict) for row in rows):
+            return rows
+    return None
+
+
 def filter_menu_items_columns(rows: List[RawMenuItems]) -> List[Dict]:
     """
     Selects a subset of columns from a list of RawMenuItems objects.
@@ -23,6 +32,10 @@ def filter_menu_items_columns(rows: List[RawMenuItems]) -> List[Dict]:
         A new list of dictionaries, where each dictionary represents a
         menu item with a reduced set of key-value pairs.
     """
+    passthrough = _return_if_dict_list(rows)
+    if passthrough is not None:
+        return passthrough
+
     filtered_rows = []
     for row in rows:
         filtered_row = {
@@ -48,6 +61,10 @@ def filter_stores_columns(rows: List[RawStore]) -> List[Dict]:
         A new list of dictionaries, each representing a store with
         only its ID and name.
     """
+    passthrough = _return_if_dict_list(rows)
+    if passthrough is not None:
+        return passthrough
+
     filtered_rows = []
     for row in rows:
         filtered_row = {
@@ -72,6 +89,10 @@ def filter_transaction_items_columns(rows: List[RawTransactionItem]) -> List[Dic
         A new list of dictionaries, each representing a transaction item
         with a reduced set of columns.
     """
+    passthrough = _return_if_dict_list(rows)
+    if passthrough is not None:
+        return passthrough
+
     filtered_rows = []
     for row in rows:
         filtered_row = {
@@ -99,6 +120,10 @@ def filter_transactions_columns(rows: List[RawTransaction]) -> List[Dict]:
         A new list of dictionaries, each representing a transaction with a
         reduced set of key-value pairs.
     """
+    passthrough = _return_if_dict_list(rows)
+    if passthrough is not None:
+        return passthrough
+
     filtered_rows = []
     for row in rows:
         filtered_row = {
@@ -126,6 +151,10 @@ def filter_users_columns(rows: List[RawUser]) -> List[Dict]:
         A new list of dictionaries, each representing a user with only
         their ID and birthdate.
     """
+    passthrough = _return_if_dict_list(rows)
+    if passthrough is not None:
+        return passthrough
+
     filtered_rows = []
     for row in rows:
         filtered_row = {

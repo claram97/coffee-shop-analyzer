@@ -23,7 +23,7 @@ class ResultsConsumer:
         """
         self.queue_name = queue_name
         self.host = host
-        self.client_connection = None
+        self.client_connections = {}
         self.middleware = None
         self.stopping = False
         self.queries_sent = set()
@@ -53,31 +53,38 @@ class ResultsConsumer:
             except Exception as e:
                 logging.error(f"action: results_consumer_stop | result: fail | error: {e}")
 
-    def register_client(self, client_connection):
+    def register_client(self, client_connection, client_id: str):
+
         """Register a client connection to receive results for a specific query.
         
         Args:
             client_connection: The client socket or connection object
         """
         with self.client_lock:
-            if self.client_connection is None:
-                self.client_connection = client_connection
-                logging.info(f"action: client_registered | result: success")
+            self.client_connections[client_id] = client_connection
+            logging.info(
+                "action: client_registered | result: success | client_id: %s",
+                client_id,
+            )
 
-    def unregister_client(self):
+    def unregister_client(self, client_id: str):
         """Unregister the client from receiving results.
         """
         with self.client_lock:
-            self.client_connection = None
-            logging.info(f"action: client_unregistered | result: success")
-
+            key = client_id
+            if key in self.client_connections:
+                del self.client_connections[key]
+                logging.info(
+                    "action: client_unregistered | result: success | client_id: %s",
+                    client_id,
+                )
+                
     def _process_result(self, body):
         """Process a result message from the queue.
         
         Args:
             body: Raw message bytes from the queue
         """
-        logging.info(f"action: result_message_received | result: processing: {body[:50]}...")
         try:
             # Parse the DataBatch wrapper
             if not body or body[0] != Opcodes.DATA_BATCH:
@@ -91,6 +98,14 @@ class ResultsConsumer:
                 return
                 
             query_id = str(data_batch.query_ids[0])
+            
+            client_id = getattr(data_batch, "client_id", None)
+            if not client_id:
+                logging.warning(
+                    "action: process_result | result: missing_client_id | query_id: %s",
+                    query_id,
+                )
+                return
             
             # Log detailed information about the result
             inner_opcode = getattr(data_batch.batch_msg, "opcode", "unknown")
@@ -132,8 +147,11 @@ class ResultsConsumer:
                 except Exception as e:
                     logging.warning(f"action: log_row_data | result: fail | error: {str(e)}")
             
-            self._forward_result_to_client(query_id, data_batch.batch_msg.to_bytes())
-            
+            # Mine
+            self._forward_result_to_client(query_id, data_batch.batch_msg.to_bytes(), client_id)
+            # New
+            self._forward_result_to_client(client_id, query_id, body)
+
         except Exception as e:
             logging.error(f"action: process_result | result: fail | error: {str(e)}")
     
@@ -157,7 +175,7 @@ class ResultsConsumer:
         
 
             
-    def _forward_result_to_client(self, query_id, result_bytes):
+    def _forward_result_to_client(self, query_id, result_bytes, client_id: str):
         """Forward the result to the appropriate client.
         
         Args:
@@ -166,7 +184,7 @@ class ResultsConsumer:
         """
         client_conn = None
         with self.client_lock:
-            client_conn = self.client_connection
+            client_conn = self.client_connections.get(client_id)
             
         if not client_conn:
             logging.warning(f"action: forward_result | result: no_client | query_id: {query_id}")
@@ -180,8 +198,8 @@ class ResultsConsumer:
             logging.info(f"action: forward_result | result: success | query_id: {query_id} | bytes_sent: {bytes_sent}")
             if len(self.queries_sent) == 4:
                 logging.info("action: all_queries_sent | result: success | unregistering_client")
-                self.unregister_client()
+                self.unregister_client(client_id)
         except Exception as e:
             logging.error(f"action: forward_result | result: fail | query_id: {query_id} | error: {str(e)}")
             # Clean up the connection on error
-            self.unregister_client()
+            self.unregister_client(client_id)

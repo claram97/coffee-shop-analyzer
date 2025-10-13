@@ -88,6 +88,9 @@ class Opcodes:
     # Error result message for any query type
     QUERY_RESULT_ERROR = 29
 
+    # Client identification handshake, sent once per TCP connection
+    CLIENT_HELLO = 30
+
 
 class BatchStatus:
     """

@@ -6,7 +6,16 @@ protocol messages based on their opcode.
 import socket
 from .constants import ProtocolError, Opcodes
 from .socket_parsing import read_u8, read_i32, recv_exact
-from .messages import Finished, NewMenuItems, NewStores, NewTransactionItems, NewTransactions, NewUsers, EOFMessage
+from .messages import (
+    Finished,
+    NewMenuItems,
+    NewStores,
+    NewTransactionItems,
+    NewTransactions,
+    NewUsers,
+    EOFMessage,
+    ClientHello,
+)
 from .databatch import DataBatch
 
 
@@ -59,12 +68,16 @@ def recv_msg(sock: socket.socket):
         msg = EOFMessage()
     elif opcode == Opcodes.DATA_BATCH: # Esto no lo debería mandar nunca el cliente mMMMMM
         msg = DataBatch()
+    elif opcode == Opcodes.CLIENT_HELLO:
+        msg = ClientHello()
     else:
         # If the opcode is not recognized, it's a protocol violation
         raise ProtocolError(f"invalid opcode: {opcode}")
 
     body_bytes = recv_exact(sock, length)
     if opcode == Opcodes.FINISHED:
+        msg.read_from(body_bytes, length)
+    elif opcode == Opcodes.CLIENT_HELLO:
         msg.read_from(body_bytes, length)
     else:
         msg.read_from(body_bytes)

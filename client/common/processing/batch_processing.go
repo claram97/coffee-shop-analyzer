@@ -134,3 +134,8 @@ func (bp *BatchProcessor) BuildAndSendBatches(ctx context.Context, reader *csv.R
 func (bp *BatchProcessor) GetConnection() net.Conn {
 	return bp.conn
 }
+
+// GetClientID returns the client identifier associated with this processor
+func (bp *BatchProcessor) GetClientID() string {
+	return bp.clientID
+}

@@ -3,9 +3,11 @@ package common
 import (
 	"context"
 	"os/signal"
+	"strings"
 	"syscall"
 	"time"
 
+	"github.com/google/uuid"
 	"github.com/op/go-logging"
 
 	// Import the refactored modules with aliases to avoid name conflicts
@@ -35,11 +37,35 @@ type Client struct {
 
 // NewClient constructs a Client with the provided configuration
 func NewClient(config ClientConfig) *Client {
-	connectionManager := network.NewConnectionManager(config.ServerAddress, config.ID, log)
-	fileProcessor := processing.NewFileProcessor(config.ID, log)
+	cfg := config
+
+	sanitizedID := strings.TrimSpace(cfg.ID)
+	if sanitizedID == "" {
+		generated := uuid.New().String()
+		log.Infof("action: client_id | result: generated | value: %s", generated)
+		sanitizedID = generated
+	} else {
+		if parsed, err := uuid.Parse(sanitizedID); err != nil {
+			generated := uuid.New().String()
+			log.Warningf(
+				"action: client_id | result: invalid_config | provided: %s | fallback: %s | error: %v",
+				cfg.ID,
+				generated,
+				err,
+			)
+			sanitizedID = generated
+		} else {
+			sanitizedID = parsed.String()
+		}
+	}
+
+	cfg.ID = sanitizedID
+
+	connectionManager := network.NewConnectionManager(cfg.ServerAddress, cfg.ID, log)
+	fileProcessor := processing.NewFileProcessor(cfg.ID, log)
 
 	return &Client{
-		config:            config,
+		config:            cfg,
 		connectionManager: connectionManager,
 		fileProcessor:     fileProcessor,
 		// queryHandler will be initialized after connection is established

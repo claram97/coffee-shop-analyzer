@@ -1,4 +1,4 @@
-import pytest
+import pytest  # type: ignore[import-not-found]
 
 from joiner.router import (
     ExchangePublisherPool,
@@ -13,6 +13,8 @@ from protocol.messages import (
     NewTransactionItems,
     NewTransactions,
 )
+
+TEST_CLIENT_ID = "00000000-0000-0000-0000-000000000002"
 
 
 class FakePublisher:
@@ -89,7 +91,10 @@ def test_shard_transactions(fake_pool, cfg_obj):
         },
     ]
     db = DataBatch(
-        table_ids=[Opcodes.NEW_TRANSACTION], batch_bytes=msg.to_bytes(), query_ids=[3]
+        table_ids=[Opcodes.NEW_TRANSACTION],
+        batch_bytes=msg.to_bytes(),
+        query_ids=[3],
+        client_id=TEST_CLIENT_ID,
     )
     db.batch_msg = msg
     db.batch_msg.rows = rows
@@ -115,7 +120,10 @@ def test_broadcast_stores(fake_pool, cfg_obj):
     msg = NewStores()
     rows = [{"store_id": "s1", "store_name": "store1", "city": "A"}]
     db = DataBatch(
-        table_ids=[Opcodes.NEW_STORES], batch_bytes=msg.to_bytes(), query_ids=[3]
+        table_ids=[Opcodes.NEW_STORES],
+        batch_bytes=msg.to_bytes(),
+        query_ids=[3],
+        client_id=TEST_CLIENT_ID,
     )
     db.batch_msg = msg
 
@@ -140,7 +148,10 @@ def test_menu_items_broadcast_for_q2(fake_pool, cfg_obj):
     msg = NewMenuItems()
     rows = [{"item_id": "i1", "item_name": "burger"}]
     db = DataBatch(
-        table_ids=[Opcodes.NEW_MENU_ITEMS], batch_bytes=msg.to_bytes(), query_ids=[2]
+        table_ids=[Opcodes.NEW_MENU_ITEMS],
+        batch_bytes=msg.to_bytes(),
+        query_ids=[2],
+        client_id=TEST_CLIENT_ID,
     )
     db.batch_msg = msg
     db.batch_msg.rows = rows
@@ -166,7 +177,10 @@ def test_transaction_items_shard_by_item(fake_pool, cfg_obj):
         {"transaction_id": "t2", "item_id": "itm2", "quantity": "2"},
     ]
     db = DataBatch(
-        table_ids=[Opcodes.NEW_TRANSACTION_ITEMS], batch_bytes=msg, query_ids=[2]
+        table_ids=[Opcodes.NEW_TRANSACTION_ITEMS],
+        batch_bytes=msg,
+        query_ids=[2],
+        client_id=TEST_CLIENT_ID,
     )
     db.batch_msg = msg
     db.batch_msg.rows = rows

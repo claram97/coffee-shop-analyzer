@@ -18,7 +18,12 @@ class ConnectionManager:
     accepting, and handling individual client communications in separate threads.
     """
 
-    def __init__(self, port: int, listen_backlog: int):
+    def __init__(
+        self,
+        port: int,
+        listen_backlog: int,
+        disconnect_handler: Optional[Callable[[socket.socket], None]] = None,
+    ):
         """
         Initializes the ConnectionManager by creating and binding a server socket.
 
@@ -31,6 +36,7 @@ class ConnectionManager:
         self._server_socket.listen(listen_backlog)
         self._stop = threading.Event()
         self._threads: List[threading.Thread] = []
+        self._disconnect_handler = disconnect_handler
 
     def set_stop_flag(self):
         """Signals the server to begin the shutdown process by setting an internal stop flag."""
@@ -135,6 +141,15 @@ class ConnectionManager:
                 logging.error("action: receive_message | result: fail | error: %s", e)
                 break
 
+        if self._disconnect_handler is not None:
+            try:
+                self._disconnect_handler(client_sock)
+            except Exception as exc:
+                logging.warning(
+                    "action: client_disconnect_cleanup | result: fail | error: %s",
+                    exc,
+                )
+
         client_sock.close()
 
 
@@ -144,7 +159,13 @@ class ServerManager:
     management with graceful shutdown via OS signal handling.
     """
 
-    def __init__(self, port: int, listen_backlog: int, message_handler: Callable):
+    def __init__(
+        self,
+        port: int,
+        listen_backlog: int,
+        message_handler: Callable,
+        disconnect_handler: Optional[Callable[[socket.socket], None]] = None,
+    ):
         """
         Initializes the server manager.
 
@@ -153,7 +174,11 @@ class ServerManager:
             listen_backlog: The maximum number of pending connections.
             message_handler: The function responsible for processing client messages.
         """
-        self.connection_manager = ConnectionManager(port, listen_backlog)
+        self.connection_manager = ConnectionManager(
+            port,
+            listen_backlog,
+            disconnect_handler,
+        )
         self.message_handler = message_handler
 
     def setup_signal_handler(self):

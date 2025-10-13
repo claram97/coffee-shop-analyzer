@@ -2,10 +2,13 @@ import os
 import shutil
 import tempfile
 
-import pytest
+import pytest  # type: ignore[import-not-found]
 
 from protocol.constants import Opcodes
 from protocol.databatch import DataBatch
+# UUID used for tests to satisfy DataBatch serialization requirements
+TEST_CLIENT_ID = "00000000-0000-0000-0000-000000000001"
+
 from protocol.messages import (
     NewMenuItems,
     NewStores,
@@ -26,11 +29,11 @@ def _db_with(inner_msg, *, table_ids, query_ids=None, batch_number=1, meta=None)
     db = DataBatch(
         table_ids=list(table_ids),
         query_ids=list(query_ids or []),
-        total_shards=1,
-        shard_num=0,
+        shards_info=[(1, 0)],
         reserved_u16=0,
         meta=dict(meta or {}),
         batch_bytes=batch_bytes,
+        client_id=TEST_CLIENT_ID,
     )
     # opcionalmente setear el batch_number para rastrear (si tu DataBatch lo guarda)
     db.batch_number = batch_number

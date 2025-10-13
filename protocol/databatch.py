@@ -4,6 +4,7 @@ table-specific data messages along with essential metadata for routing and proce
 """
 
 import logging
+import uuid
 from typing import Dict, List, Optional, Tuple
 
 from .constants import Opcodes, ProtocolError
@@ -112,6 +113,7 @@ class DataBatch:
         shards_info: Optional[List[Tuple[int, int]]],
         reserved_u16: int,
         batch_bytes: Optional[bytes],
+        client_id: Optional[str],
     ):
         """Internal helper to initialize all instance fields with defaults or provided values."""
         self.opcode = Opcodes.DATA_BATCH
@@ -130,6 +132,7 @@ class DataBatch:
         # or raw bytes (before serialization).
         self.batch_msg = None
         self.batch_bytes: Optional[bytes] = batch_bytes
+        self.client_id: Optional[str] = client_id
 
     def _validate_u8_list(self, items: List[int], field_name: str):
         """Internal helper to validate that a list contains values suitable for a u8 list."""
@@ -167,6 +170,12 @@ class DataBatch:
 
         self._validate_u16_field(self.reserved_u16, "reserved_u16")
 
+        if self.client_id is not None:
+            try:
+                uuid.UUID(self.client_id)
+            except (ValueError, AttributeError) as exc:
+                raise ValueError("client_id must be a valid UUID string") from exc
+
     def __init__(
         self,
         *,
@@ -176,6 +185,7 @@ class DataBatch:
         shards_info: Optional[List[Tuple[int, int]]] = None,
         reserved_u16: int = 0,
         batch_bytes: Optional[bytes] = None,
+        client_id: Optional[str] = None,
     ):
         """
         Initializes a DataBatch message. Can be used to prepare a message for
@@ -188,6 +198,7 @@ class DataBatch:
             shards_info,
             reserved_u16,
             batch_bytes,
+            client_id,
         )
         self._validate_serialization_parameters(table_ids, query_ids, meta)
 
@@ -244,6 +255,18 @@ class DataBatch:
         remaining -= inner_len
         return remaining
 
+    def _read_client_id(self, reader: BytesReader, remaining: int) -> int:
+        if remaining < 16:
+            raise ProtocolError("missing client id", self.opcode)
+
+        client_bytes = reader.read(16)
+        if len(client_bytes) != 16:
+            raise ProtocolError("invalid client id length", self.opcode)
+
+        self.client_id = str(uuid.UUID(bytes=client_bytes))
+        remaining -= 16
+        return remaining
+
     def _validate_remaining_bytes(self, remaining: int):
         """Checks that all bytes of the message body have been consumed."""
         if remaining != 0:
@@ -263,6 +286,7 @@ class DataBatch:
 
         remaining = self._read_data_batch_header(reader, remaining)
         remaining = self._read_embedded_message(reader, remaining)
+        remaining = self._read_client_id(reader, remaining)
         self._validate_remaining_bytes(remaining)
 
     def write_to(self, buf: bytearray):
@@ -334,6 +358,15 @@ class DataBatch:
             out.extend([int(a), int(b)])
         return out
 
+    def _serialize_client_id(self) -> bytes:
+        if self.client_id is None:
+            raise ProtocolError("client_id must be set before serialization", self.opcode)
+
+        try:
+            return uuid.UUID(self.client_id).bytes
+        except (ValueError, AttributeError) as exc:
+            raise ProtocolError("client_id must be a valid UUID string", self.opcode) from exc
+
     def _serialize_data_batch_body(self) -> bytearray:
         """Assembles the complete body of the DataBatch message for serialization."""
         body = bytearray()
@@ -346,6 +379,7 @@ class DataBatch:
         body.extend(self._serialize_u8_dict(self.meta))
         body.extend(self._serialize_tuples_list(self.shards_info))
         body.extend(self.batch_bytes)
+        body.extend(self._serialize_client_id())
         return body
 
     def _create_final_message(self, body: bytearray) -> bytes:
