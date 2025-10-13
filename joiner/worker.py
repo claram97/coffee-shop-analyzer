@@ -563,10 +563,11 @@ class JoinerWorker:
         kind, msg = self._decode_msg(raw)
         if kind == "eof":
             eof: EOFMessage = msg
-            self._on_table_eof(
+            if self._on_table_eof(
                 _eof_table_id(eof),
                 getattr(eof, "client_id", ""),
-            )
+            ):
+                self._flush_remaining_q4_without_user(getattr(eof, "client_id", ""))
             return
         if kind != "db":
             return
