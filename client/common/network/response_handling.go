@@ -3,11 +3,13 @@ package common
 import (
 	"bufio"
 	"context"
+	"encoding/json"
 	"encoding/binary"
 	"errors"
 	"fmt"
 	"io"
 	"net"
+	"os"
 	"strconv"
 	"strings"
 	"time"
@@ -50,12 +52,24 @@ func (rh *ResponseHandler) handleReadError(err error) bool {
 func (rh *ResponseHandler) handleResponseMessage(msg interface{}) {
 	// Use type assertion to access the GetOpCode() method
 	if respMsg, ok := msg.(interface{ GetOpCode() byte }); ok {
-		switch respMsg.GetOpCode() {
+		opcode := respMsg.GetOpCode()
+		if opcode != protocol.BatchRecvSuccessOpCode && opcode != protocol.BatchRecvFailOpCode {
+			rh.log.Infof("action: response_received | where: response_handling | opcode: %d", opcode)
+		}
+		switch opcode {
 		case protocol.BatchRecvSuccessOpCode:
 			rh.log.Debug("action: batch_enviado | result: success")
 		case protocol.BatchRecvFailOpCode:
 			rh.log.Error("action: batch_enviado | result: fail")
+		case protocol.OpCodeQueryResult1, protocol.OpCodeQueryResult2, protocol.OpCodeQueryResult3, protocol.OpCodeQueryResult4, protocol.OpCodeQueryResultError:
+			// Handle query results
+			if queryResult, ok := respMsg.(*protocol.QueryResultTable); ok {
+				rh.handleQueryResultTable(queryResult)
+			} else {
+				rh.log.Warning("action: response_received | result: unexpected_format | type: query_result")
+			}
 		case protocol.OpCodeDataBatch:
+			rh.log.Infof("action: query_result_received as OpCodeDataBatch")
 			// Try to cast to DataBatch to get inner message type
 			if dataBatch, ok := respMsg.(*protocol.DataBatch); ok {
 				rh.handleQueryResult(dataBatch)
@@ -88,18 +102,129 @@ func (rh *ResponseHandler) handleQueryResult(dataBatch *protocol.DataBatch) {
 	default:
 		rh.log.Warning("action: query_result_received | result: unknown_type | opcode: %d", dataBatch.OpCode)
 	}
+
+	// Write results to file if available
+	if dataBatch.ResultTable != nil {
+		typedRows, err := dataBatch.ResultTable.GetTypedRows()
+		if err != nil {
+			rh.log.Errorf("action: write_results | result: fail | error: %v", err)
+			return
+		}
+
+		var filename string
+		switch dataBatch.OpCode {
+		case protocol.OpCodeQueryResult1:
+			filename = "query1_results.json"
+		case protocol.OpCodeQueryResult2:
+			filename = "query2_results.json"
+		case protocol.OpCodeQueryResult3:
+			filename = "query3_results.json"
+		case protocol.OpCodeQueryResult4:
+			filename = "query4_results.json"
+		case protocol.OpCodeQueryResultError:
+			filename = "query_error_results.json"
+		default:
+			rh.log.Warning("action: write_results | result: unknown_type | opcode: %d", dataBatch.OpCode)
+			return
+		}
+
+		file, err := os.OpenFile(filename, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644)
+		if err != nil {
+			rh.log.Errorf("action: write_results | result: fail | error: opening file %s: %v", filename, err)
+			return
+		}
+		defer file.Close()
+
+		encoder := json.NewEncoder(file)
+		if err := encoder.Encode(typedRows); err != nil {
+			rh.log.Errorf("action: write_results | result: fail | error: encoding to %s: %v", filename, err)
+			return
+		}
+
+		rh.log.Infof("action: write_results | result: success | file: %s | rows: %d", filename, len(dataBatch.ResultTable.Rows))
+	}
+}
+
+// handleQueryResultTable processes a direct query result table message
+func (rh *ResponseHandler) handleQueryResultTable(queryResult *protocol.QueryResultTable) {
+	// Log based on the opcode
+	switch queryResult.OpCode {
+	case protocol.OpCodeQueryResult1:
+		rh.log.Info("action: query_result_received | result: success | type: filtered_transactions")
+		rh.log.Debug("Query 1 result: Morning high-value transactions")
+	case protocol.OpCodeQueryResult2:
+		rh.log.Info("action: query_result_received | result: success | type: product_metrics")
+		rh.log.Debug("Query 2 result: Product ranking by sales quantity and revenue")
+	case protocol.OpCodeQueryResult3:
+		rh.log.Info("action: query_result_received | result: success | type: tpv_analysis")
+		rh.log.Debug("Query 3 result: Total Processing Volume by store and semester")
+	case protocol.OpCodeQueryResult4:
+		rh.log.Info("action: query_result_received | result: success | type: top_customers")
+		rh.log.Debug("Query 4 result: Top 3 customers by purchase count per store")
+	case protocol.OpCodeQueryResultError:
+		rh.log.Error("action: query_result_received | result: error | type: query_error")
+		rh.log.Debug("Query execution failed with an error")
+	default:
+		rh.log.Warning("action: query_result_received | result: unknown_type | opcode: %d", queryResult.OpCode)
+	}
+
+	// Write results to file
+	typedRows, err := queryResult.GetTypedRows()
+	if err != nil {
+		rh.log.Errorf("action: write_results | result: fail | error: %v", err)
+		return
+	}
+
+	var filename string
+	switch queryResult.OpCode {
+	case protocol.OpCodeQueryResult1:
+		filename = "query1_results.json"
+	case protocol.OpCodeQueryResult2:
+		filename = "query2_results.json"
+	case protocol.OpCodeQueryResult3:
+		filename = "query3_results.json"
+	case protocol.OpCodeQueryResult4:
+		filename = "query4_results.json"
+	case protocol.OpCodeQueryResultError:
+		filename = "query_error_results.json"
+	default:
+		rh.log.Warning("action: write_results | result: unknown_type | opcode: %d", queryResult.OpCode)
+		return
+	}
+
+	file, err := os.OpenFile(filename, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644)
+	if err != nil {
+		rh.log.Errorf("action: write_results | result: fail | error: opening file %s: %v", filename, err)
+		return
+	}
+	defer file.Close()
+
+	encoder := json.NewEncoder(file)
+	encoder.SetIndent("", "  ") // Pretty-print with 2 spaces
+	if err := encoder.Encode(typedRows); err != nil {
+		rh.log.Errorf("action: write_results | result: fail | error: encoding to %s: %v", filename, err)
+		return
+	}
+
+	rh.log.Infof("action: write_results | result: success | file: %s | rows: %d", filename, len(queryResult.Rows))
 }
 
 // responseReaderLoop executes the main response reading loop
 func (rh *ResponseHandler) responseReaderLoop(reader *bufio.Reader) {
 	for {
-		msg, err := protocol.ReadMessage(reader)
+		msg, err := protocol.ReadMessage(reader, rh.log)
+
 		if err != nil {
 			if rh.handleReadError(err) {
 				break
 			}
 			continue
 		}
+		opcode := msg.(interface{ GetOpCode() byte }).GetOpCode()
+		if opcode != protocol.BatchRecvSuccessOpCode && opcode != protocol.BatchRecvFailOpCode {
+			rh.log.Infof("action: response_received | where: response_reading_loop| opcode: %d", opcode)
+		}
+
 		rh.handleResponseMessage(msg)
 	}
 }
