@@ -5,6 +5,7 @@ import (
 	"encoding/binary"
 	"fmt"
 	"io"
+	"strconv"
 
 	"github.com/op/go-logging"
 )
@@ -94,6 +95,30 @@ type QueryResultTable struct {
 	Rows        []map[string]string
 }
 
+type Query1Result struct {
+	FinalAmount  float64 `json:"final_amount"`
+	TransactionID string  `json:"transaction_id"`
+}
+
+type Query2Result struct {
+	Month    string  `json:"month"`
+	Name     string  `json:"name"`
+	Quantity int     `json:"quantity"`
+	Revenue  float64 `json:"revenue"`
+}
+
+type Query3Result struct {
+	Amount    float64 `json:"amount"`
+	Period    string  `json:"period"`
+	StoreName string  `json:"store_name"`
+}
+
+type Query4Result struct {
+	Birthdate     string `json:"birthdate"`
+	PurchaseCount int    `json:"purchase_count"`
+	StoreName     string `json:"store_name"`
+}
+
 func (t *QueryResultTable) GetOpCode() byte  { return t.OpCode }
 func (t *QueryResultTable) GetLength() int32 { return 0 }
 
@@ -124,6 +149,61 @@ func (t *QueryResultTable) populateFromBody(body []byte) error {
 	t.BatchStatus = status
 	t.Rows = rows
 	return nil
+}
+
+func (t *QueryResultTable) GetTypedRows() (interface{}, error) {
+	switch t.OpCode {
+	case OpCodeQueryResult1:
+		results := make([]Query1Result, len(t.Rows))
+		for i, row := range t.Rows {
+			finalAmount, _ := strconv.ParseFloat(row["final_amount"], 64)
+			results[i] = Query1Result{
+				FinalAmount:  finalAmount,
+				TransactionID: row["transaction_id"],
+			}
+		}
+		return results, nil
+	case OpCodeQueryResult2:
+		results := make([]Query2Result, len(t.Rows))
+		for i, row := range t.Rows {
+			quantity, _ := strconv.Atoi(row["quantity"])
+			revenue, _ := strconv.ParseFloat(row["revenue"], 64)
+			results[i] = Query2Result{
+				Month:    row["month"],
+				Name:     row["name"],
+				Quantity: quantity,
+				Revenue:  revenue,
+			}
+		}
+		return results, nil
+	case OpCodeQueryResult3:
+		results := make([]Query3Result, len(t.Rows))
+		for i, row := range t.Rows {
+			amount, _ := strconv.ParseFloat(row["amount"], 64)
+			results[i] = Query3Result{
+				Amount:    amount,
+				Period:    row["period"],
+				StoreName: row["store_name"],
+			}
+		}
+		return results, nil
+	case OpCodeQueryResult4:
+		results := make([]Query4Result, len(t.Rows))
+		for i, row := range t.Rows {
+			purchaseCount, _ := strconv.Atoi(row["purchase_count"])
+			results[i] = Query4Result{
+				Birthdate:     row["birthdate"],
+				PurchaseCount: purchaseCount,
+				StoreName:     row["store_name"],
+			}
+		}
+		return results, nil
+	case OpCodeQueryResultError:
+		// Mantener genérico o agregar un struct si hay campos específicos
+		return t.Rows, nil
+	default:
+		return nil, fmt.Errorf("unsupported opcode for typed rows: %d", t.OpCode)
+	}
 }
 
 type DataBatch struct {
@@ -410,9 +490,24 @@ func ReadMessage(reader *bufio.Reader, logger *logging.Logger) (Readable, error)
 			if err == nil && logger != nil {
 				logger.Infof("action: query_result_received | opcode: %d | status: %d | rows: %d", msg.OpCode, msg.BatchStatus, len(msg.Rows))
 			}
+			for _, row := range msg.Rows {
+				logger.Infof("row: %v", row)
+			}
 			return msg, err
 		}
 	default:
 		return nil, &ProtocolError{"invalid opcode", opcode}
 	}
 }
+
+// Query 2
+// 2025-10-13 00:04:28 INFO     row: map[month:2024-01 name:Hot Chocolate quantity:310703 revenue:2796327.0]
+
+// Query 4
+// 2025-10-13 00:06:42 INFO     row: map[birthdate:1965-04-01 purchase_count:3 store_name:G Coffee @ Seksyen 21]
+
+// Query 1
+// 2025-10-13 00:06:22 INFO     row: map[final_amount:75.0 transaction_id:e3d6673f-5dca-4878-bdf2-137affa75725]
+
+// Query 3
+// 2025-10-13 00:06:21 INFO     row: map[amount:2053737.0 period:2024-S1 store_name:G Coffee @ Alam Tun Hussein Onn]
