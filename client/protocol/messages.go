@@ -3,6 +3,7 @@ package common
 import (
 	"bufio"
 	"encoding/binary"
+	"encoding/json"
 	"fmt"
 	"io"
 	"strconv"
@@ -491,7 +492,8 @@ func ReadMessage(reader *bufio.Reader, logger *logging.Logger) (Readable, error)
 				logger.Infof("action: query_result_received | opcode: %d | status: %d | rows: %d", msg.OpCode, msg.BatchStatus, len(msg.Rows))
 			}
 			for _, row := range msg.Rows {
-				logger.Infof("row: %v", row)
+				rowJson, _ := json.Marshal(row)
+				logger.Infof("row: %s", string(rowJson))
 			}
 			return msg, err
 		}
