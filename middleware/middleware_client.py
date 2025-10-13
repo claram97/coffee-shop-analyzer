@@ -247,6 +247,7 @@ class MessageMiddlewareExchange(MessageMiddleware):
         self._stop_event = threading.Event()
         self._consume_lock = threading.Lock()
         self.queue_name = queue_name  # Will be set only if consuming
+        self._send_lock = threading.Lock()
 
         # Connect and declare exchange
         self._connect()
@@ -430,12 +431,13 @@ class MessageMiddlewareExchange(MessageMiddleware):
             logging.debug(
                 f"Publishing message to exchange {self.exchange_name} with routing key {self.default_routing_key}"
             )
-            self._channel.basic_publish(
-                exchange=self.exchange_name,
-                routing_key=self.default_routing_key,
-                body=message,
-                properties=pika.BasicProperties(delivery_mode=2),
-            )
+            with self._send_lock:
+                self._channel.basic_publish(
+                    exchange=self.exchange_name,
+                    routing_key=self.default_routing_key,
+                    body=message,
+                    properties=pika.BasicProperties(delivery_mode=2),
+                )
         except pika.exceptions.AMQPError as e:
             logging.error(f"Error sending message to exchange: {e}")
             raise MessageMiddlewareMessageError("Error sending message") from e

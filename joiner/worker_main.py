@@ -172,7 +172,11 @@ def main(argv=None):
     out_q_name = cfg.names.results_controller_queue
 
     in_mw = build_inputs_for_shard(cfg, host, shard)
-    out_results = MessageMiddlewareQueue(host=host, queue_name=out_q_name)
+
+    def make_results_pub():
+        return MessageMiddlewareQueue(host=host, queue_name=out_q_name)
+
+    out_results = make_results_pub()
 
     worker = JoinerWorker(
         in_mw=in_mw,
@@ -181,6 +185,7 @@ def main(argv=None):
         logger=logging.getLogger(f"joiner-worker-{shard}"),
         shard_index=shard,
         router_replicas=cfg.routers.joiner,
+        out_factory=make_results_pub,
     )
 
     stop_event = threading.Event()

@@ -50,3 +50,30 @@ docker-compose-down-client:
 docker-compose-logs-client:
 	docker compose -f docker-compose-client.yaml logs -f
 .PHONY: docker-compose-logs-client
+
+docker-compose-up-client1: docker-image
+	docker compose -f docker-compose-client.yaml up -d --build client1
+.PHONY: docker-compose-up-client1
+
+docker-compose-down-client1:
+	docker compose -f docker-compose-client.yaml stop -t 1 client1
+	docker compose -f docker-compose-client.yaml rm -f client1
+.PHONY: docker-compose-down-client1
+
+docker-compose-up-client2: docker-image
+	docker compose -f docker-compose-client.yaml up -d --build client2
+.PHONY: docker-compose-up-client2
+
+docker-compose-down-client2:
+	docker compose -f docker-compose-client.yaml stop -t 1 client2
+	docker compose -f docker-compose-client.yaml rm -f client2
+.PHONY: docker-compose-down-client2
+
+docker-compose-up-client3: docker-image
+	docker compose -f docker-compose-client.yaml up -d --build client3
+.PHONY: docker-compose-up-client3
+
+docker-compose-down-client3:
+	docker compose -f docker-compose-client.yaml stop -t 1 client3
+	docker compose -f docker-compose-client.yaml rm -f client3
+.PHONY: docker-compose-down-client3
