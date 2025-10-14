@@ -1,8 +1,12 @@
+y en este código hay que cambiar algo?
+
+# query_strategy_incremental.py
 import datetime
 from collections import defaultdict
-from typing import List, Dict, Any, Callable
+from typing import Any, Callable, Dict, List
 
 from constants import QueryType
+
 
 # --- Utility Functions ---
 def _group_by(data: List[Dict], key_func: Callable) -> Dict[Any, List[Dict]]:
@@ -145,45 +149,59 @@ class Q3Strategy(BaseQueryStrategy):
         return dict(final_result)
 
 class Q4Strategy(BaseQueryStrategy):
-    """Strategy for Q4: Identifies top 3 customers by purchase count for each store."""
+    """
+    Nuevo Q4 incremental:
+      - consolidate("TransactionStores"): +1 compra por (store_name, user_id)
+      - consolidate("Users"): guarda birthdate por user_id
+      - finalize(): top-3 por store y join con birthdate
+    """
+
+    @staticmethod
+    def _norm_uid(v: Any) -> str:
+        s = "" if v is None else str(v)
+        return s.split(".", 1)[0] if s.endswith(".0") else s
+
     def consolidate(self, state_data: Dict[str, Any], table_type: str, new_rows: List[Any]):
-        if table_type != 'TransactionStoresUsers': return
+        # Estructuras internas
+        counts = state_data.setdefault('q4_counts', defaultdict(lambda: defaultdict(int)))  # store -> {user -> count}
+        users  = state_data.setdefault('q4_users', {})  # user -> birthdate
 
-        purchase_counts = state_data.setdefault('purchase_counts', defaultdict(int))
-        user_birthdates = state_data.setdefault('user_birthdates', {})
+        if table_type == 'TransactionStores':
+            for r in new_rows or []:
+                store = getattr(r, 'store_name', '') or ''
+                uid   = self._norm_uid(getattr(r, 'user_id', None))
+                if not store or not uid:
+                    continue
+                counts[store][uid] += 1  # 1 fila = 1 compra
 
-        for row in new_rows:
-            user_id = getattr(row, 'user_id', None)
-            if not user_id:
-                continue
-            
-            store_name = getattr(row, 'store_name', 'Unknown Store')
-            key = (store_name, user_id)
-            purchase_counts[key] += 1
+        elif table_type == 'Users':
+            for u in new_rows or []:
+                uid = self._norm_uid(getattr(u, 'user_id', None))
+                if not uid:
+                    continue
+                bd = getattr(u, 'birthdate', '') or ''
+                # no pises un valor no-vacío con vacío
+                if bd or uid not in users:
+                    users[uid] = bd
 
-            if user_id not in user_birthdates:
-                user_birthdates[user_id] = getattr(row, 'birthdate', 'Unknown')
+        else:
+            # ignorar otras tablas
+            return
 
     def finalize(self, consolidated_data: Dict[str, Any]) -> Dict[str, Any]:
-        purchase_counts = consolidated_data.get('purchase_counts', {})
-        user_birthdates = consolidated_data.get('user_birthdates', {})
+        counts: Dict[str, Dict[str, int]] = consolidated_data.get('q4_counts', {})
+        users:  Dict[str, str]            = consolidated_data.get('q4_users', {})
 
-        # Convert purchase counts to a more usable list format
-        parsed_data = [
-            {"store_name": key[0], "user_id": key[1], "count": count}
-            for key, count in purchase_counts.items()
-        ]
-        
-        final_result = {}
-        for store_name, customers in _group_by(parsed_data, key_func=lambda x: x['store_name']).items():
-            top_3 = sorted(customers, key=lambda x: x['count'], reverse=True)[:3]
-            
-            final_result[store_name] = [
+        final_result: Dict[str, List[Dict[str, Any]]] = {}
+        for store, umap in counts.items():
+            # ordenar por compras desc y desempatar por user_id
+            top = sorted(umap.items(), key=lambda kv: (-kv[1], kv[0]))[:3]
+            final_result[store] = [
                 {
-                    "birthdate": user_birthdates.get(c['user_id'], 'Unknown'), 
-                    "purchase_count": c['count']
+                    "birthdate": users.get(uid, ""),  # puede quedar "" si no llegó ese user
+                    "purchase_count": cnt,
                 }
-                for c in top_3
+                for uid, cnt in top
             ]
         return final_result
 

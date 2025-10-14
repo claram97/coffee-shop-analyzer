@@ -3,16 +3,14 @@ import os
 import threading
 import time
 from dataclasses import dataclass, field
-from typing import Dict, Any, Set, Tuple
+from typing import Any, Dict, Set, Tuple
 
 from middleware.middleware_client import MessageMiddlewareQueue
-from protocol import ProtocolError, Opcodes, BatchStatus, DataBatch
-from protocol import messages, entities
+from protocol import BatchStatus, DataBatch, Opcodes, ProtocolError, entities, messages
 from protocol.messages import TableMessage
 
 logging.basicConfig(
-    level=logging.INFO,
-    format='%(asctime)s - %(levelname)s - [%(name)s] - %(message)s'
+    level=logging.INFO, format="%(asctime)s - %(levelname)s - [%(name)s] - %(message)s"
 )
 logger = logging.getLogger(__name__)
 
@@ -21,9 +19,11 @@ logger = logging.getLogger(__name__)
 STRATEGY_MODE = os.getenv("STRATEGY_MODE", "append_only").lower()
 if STRATEGY_MODE == "incremental":
     from query_strategy_incremental import get_strategy
+
     logger.info("Using INCREMENTAL aggregation strategy.")
 else:
     from query_strategy_append_only import get_strategy
+
     logger.info("Using APPEND-ONLY aggregation strategy.")
 from constants import QueryType
 
@@ -38,23 +38,25 @@ OPCODE_TO_TABLE_TYPE = {
     Opcodes.NEW_TRANSACTION_STORES_USERS: "TransactionStoresUsers",
 }
 
-QUERY_TYPE_TO_TABLE = {
-    QueryType.Q1: "Transactions",
-    QueryType.Q2: "TransactionItemsMenuItems",
-    QueryType.Q3: "TransactionStores",
-    QueryType.Q4: "TransactionStoresUsers",
+EXPECTED_TABLES = {
+    QueryType.Q1: ["Transactions"],
+    QueryType.Q2: ["TransactionItemsMenuItems"],
+    QueryType.Q3: ["TransactionStores"],
+    QueryType.Q4: ["TransactionStores", "Users"],
 }
+
 
 @dataclass
 class QueryState:
     """Represents the state for a single, in-flight query."""
+
     client_id: str
     query_id: str
     query_type: QueryType
     consolidated_data: Dict[str, Any] = field(default_factory=dict)
     batch_counters: Dict[str, Dict[int, Dict[str, Any]]] = field(default_factory=dict)
-    
-    # Definitive Structure: 
+
+    # Definitive Structure:
     # {table: {batch_num: {
     #     "total_shards": int,  # First dimension's total shards (for backward compatibility)
     #     "shards_info": [(total_shards, shard_num), ...],  # All sharding dimensions
@@ -70,18 +72,24 @@ class QueryState:
     completed_batch_counts: Dict[str, int] = field(default_factory=dict)
     strategy: Any = field(default=None, repr=False)
     lock: threading.Lock = field(default_factory=threading.Lock, repr=False)
+    q4_counts: Dict[str, Dict[str, int]] = field(default_factory=dict, repr=False)
+    q4_users: Dict[str, Dict[str, str]] = field(default_factory=dict, repr=False)
+
 
 class ResultsFinisher:
     """
     Processes batches using per-query locking mechanism.
     """
-    def __init__(self,
-                 input_client: MessageMiddlewareQueue,
-                 output_client: MessageMiddlewareQueue):
-        
+
+    def __init__(
+        self,
+        input_client: MessageMiddlewareQueue,
+        output_client: MessageMiddlewareQueue,
+    ):
+
         self.input_client = input_client
         self.output_client = output_client
-        
+
         self.active_queries: Dict[Tuple[str, str], QueryState] = {}
         self.global_lock = threading.Lock()
 
@@ -104,7 +112,7 @@ class ResultsFinisher:
     def _handle_data_batch(self, batch: DataBatch):
         if not batch.query_ids:
             return
-        
+
         query_id = str(batch.query_ids[0])
         client_id = getattr(batch, "client_id", None)
         if not client_id:
@@ -113,25 +121,41 @@ class ResultsFinisher:
                 query_id,
             )
             return
-        table_type = OPCODE_TO_TABLE_TYPE.get(batch.batch_msg.opcode)
-        expected_table = QUERY_TYPE_TO_TABLE.get(QueryType(int(query_id)))
 
-        # If the batch's table type doesn't match the single one we expect for this query, ignore it.
-        if not table_type or table_type != expected_table:
-            logging.warning(f"Query {query_id} received unexpected table type '{table_type}'. Expected '{expected_table}'. Ignoring.")
+        try:
+            qtype = QueryType(int(query_id))
+        except ValueError:
+            logger.warning("Invalid query_id '%s'", query_id)
+            return
+
+        table_type = OPCODE_TO_TABLE_TYPE.get(batch.batch_msg.opcode)
+        expected_tables = EXPECTED_TABLES.get(qtype, [])
+
+        # Para Q4 aceptamos TransactionStores y Users
+        if not table_type or table_type not in expected_tables:
+            logging.warning(
+                f"Query {query_id} received unexpected table type '{table_type}'. "
+                f"Expected one of {sorted(expected_tables)}. Ignoring."
+            )
             return
 
         with self.global_lock:
             state = self._get_or_create_query_state(client_id, query_id)
-        
+
         is_complete = False
         with state.lock:
             self._update_batch_accounting(state, table_type, batch)
-            self._consolidate_batch_data(state, table_type, batch)
+
+            # Consolidación especial para Q4
+            if qtype == QueryType.Q4:
+                self._q4_consolidate(state, table_type, batch)
+            else:
+                self._consolidate_batch_data(state, table_type, batch)
+
             state.last_update_time = time.time()
             if self._is_query_complete(state):
                 is_complete = True
-        
+
         if is_complete:
             logger.info(
                 "All tables for query '%s' (client %s) are complete. Finalizing.",
@@ -140,6 +164,29 @@ class ResultsFinisher:
             )
             self._finalize_query(state)
             self._cleanup_query_state(client_id, query_id)
+
+    def _q4_consolidate(self, state: QueryState, table_type: str, batch: DataBatch):
+        rows = getattr(batch.batch_msg, "rows", []) or []
+        if not rows:
+            return
+
+        if table_type == "TransactionStores":
+            counts = state.q4_counts
+            for r in rows:
+                store = getattr(r, "store_name", "") or ""
+                uid = str(getattr(r, "user_id", "")).split(".", maxsplit=1)[0]
+                if not store or not uid:
+                    continue
+                store_map = counts.setdefault(store, {})
+                store_map[uid] = store_map.get(uid, 0) + 1
+
+        elif table_type == "Users":
+            for u in rows:
+                uid = getattr(u, "user_id", "") or ""
+                if not uid:
+                    continue
+                birth = getattr(u, "birthdate", "") or ""
+                state.q4_users[uid] = birth
 
     def _get_or_create_query_state(self, client_id: str, query_id: str) -> QueryState:
         key = (client_id, query_id)
@@ -156,31 +203,40 @@ class ResultsFinisher:
                     client_id=client_id,
                     query_id=query_id,
                     query_type=query_type,
-                    strategy=get_strategy(query_type)
+                    strategy=get_strategy(query_type),
                 )
             except ValueError:
-                raise ValueError(f"Cannot determine a valid QueryType from query_id '{query_id}'")
-        
+                raise ValueError(
+                    f"Cannot determine a valid QueryType from query_id '{query_id}'"
+                )
+
         logger.debug("Retrieved state for query '%s' (client %s).", query_id, client_id)
         return self.active_queries[key]
 
-    def _update_batch_accounting(self, state: QueryState, table_type: str, batch: DataBatch):
+    def _update_batch_accounting(
+        self, state: QueryState, table_type: str, batch: DataBatch
+    ):
         shards_info = batch.shards_info if batch.shards_info else [(1, 0)]
 
         # Create a unique shard key from all sharding dimensions
-        shard_key = "_".join([f"{total_shards}_{shard_num}" for total_shards, shard_num in shards_info])
+        shard_key = "_".join(
+            [f"{total_shards}_{shard_num}" for total_shards, shard_num in shards_info]
+        )
 
         # Extract the primary shard dimension for single-dimension use cases
         primary_shard = shards_info[0]
         total_shards, shard_num = primary_shard
 
         table_batches = state.batch_counters.setdefault(table_type, {})
-        batch_info = table_batches.setdefault(batch.batch_number, {
-            "total_shards": total_shards,
-            "shards": {},
-            "shards_info": shards_info,  # Store the complete shards_info for verification
-            "completed": False
-        })
+        batch_info = table_batches.setdefault(
+            batch.batch_number,
+            {
+                "total_shards": total_shards,
+                "shards": {},
+                "shards_info": shards_info,  # Store the complete shards_info for verification
+                "completed": False,
+            },
+        )
         batch_info.setdefault("completed", False)
 
         batch_query_id = batch.query_ids[0] if batch.query_ids else None
@@ -205,12 +261,15 @@ class ResultsFinisher:
 
         copy_total, copy_index = self._extract_copy_info(getattr(batch, "meta", {}))
 
-        shard_entry = batch_info["shards"].setdefault(shard_key, {
-            "expected_copies": copy_total,
-            "received_bitmap": [False] * max(1, copy_total),
-            "received_count": 0,
-            "shard_info": shards_info
-        })
+        shard_entry = batch_info["shards"].setdefault(
+            shard_key,
+            {
+                "expected_copies": copy_total,
+                "received_bitmap": [False] * max(1, copy_total),
+                "received_count": 0,
+                "shard_info": shards_info,
+            },
+        )
         shard_entry.setdefault("received_count", 0)
 
         if copy_total > shard_entry.get("expected_copies", 1):
@@ -221,9 +280,13 @@ class ResultsFinisher:
             shard_entry["received_bitmap"] = bitmap_ref
             shard_entry["expected_copies"] = copy_total
         else:
-            shard_entry["expected_copies"] = max(shard_entry.get("expected_copies", 1), copy_total)
+            shard_entry["expected_copies"] = max(
+                shard_entry.get("expected_copies", 1), copy_total
+            )
 
-        bitmap = shard_entry.setdefault("received_bitmap", [False] * max(1, shard_entry.get("expected_copies", 1)))
+        bitmap = shard_entry.setdefault(
+            "received_bitmap", [False] * max(1, shard_entry.get("expected_copies", 1))
+        )
         if copy_index >= len(bitmap):
             bitmap.extend([False] * (copy_index - len(bitmap) + 1))
         if not bitmap[copy_index]:
@@ -243,28 +306,40 @@ class ResultsFinisher:
             copy_index + 1,
             shard_entry.get("expected_copies", copy_total),
             received_shard_instances,
-            expected_total_shards
+            expected_total_shards,
         )
 
-        if not batch_info.get("completed") and received_shard_instances >= expected_total_shards:
+        if (
+            not batch_info.get("completed")
+            and received_shard_instances >= expected_total_shards
+        ):
             batch_info["completed"] = True
-            state.completed_batch_counts[table_type] = state.completed_batch_counts.get(table_type, 0) + 1
-        
+            state.completed_batch_counts[table_type] = (
+                state.completed_batch_counts.get(table_type, 0) + 1
+            )
+
         # If this is an EOF batch, record it
         if normalized_status == BatchStatus.EOF:
-            logging.info(f"Received EOF for query '{state.query_id}', table '{table_type}', batch {batch.batch_number}.")
-            state.eof_received[table_type] = max(state.eof_received.get(table_type, 0), batch.batch_number)
-        
+            logging.info(
+                f"Received EOF for query '{state.query_id}', table '{table_type}', batch {batch.batch_number}."
+            )
+            state.eof_received[table_type] = max(
+                state.eof_received.get(table_type, 0), batch.batch_number
+            )
+
         # Check for completion if we have already received an EOF for this table
-        # This handles both: 
+        # This handles both:
         # 1. The current batch is an EOF
         # 2. EOF arrived earlier but we're still receiving shard batches
         if table_type in state.eof_received:
             self._check_and_mark_table_as_complete(state, table_type)
-    
-    def _consolidate_batch_data(self, state: QueryState, table_type: str, batch: DataBatch):
-        rows = getattr(batch.batch_msg, 'rows', [])
-        if not rows: return
+
+    def _consolidate_batch_data(
+        self, state: QueryState, table_type: str, batch: DataBatch
+    ):
+        rows = getattr(batch.batch_msg, "rows", [])
+        if not rows:
+            return
         if state.strategy is None:
             state.strategy = get_strategy(state.query_type)
         state.strategy.consolidate(state.consolidated_data, table_type, rows)
@@ -284,14 +359,14 @@ class ResultsFinisher:
         # All batches up to EOF have reached completion once.
         state.completed_tables.add(table_type)
         logging.info(f"Query '{state.query_id}': Table '{table_type}' is now complete.")
-    
+
     def _calculate_total_expected_shards(self, batch_info):
         """
         Calculate the total number of expected shard combinations based on the shards_info.
-        
+
         Instead of generating all combinations, we simply multiply the total_shards values
         from all dimensions to get the total expected number of unique shard combinations.
-        
+
         For example, if shards_info contains [(2, x), (3, y)], we expect 2*3 = 6 combinations total.
         """
         base_expected = 1
@@ -350,20 +425,53 @@ class ResultsFinisher:
         return copy_total, copy_index
 
     def _is_query_complete(self, state: QueryState) -> bool:
-        expected_table = QUERY_TYPE_TO_TABLE.get(state.query_type)
-        if not expected_table:
+        expected = EXPECTED_TABLES.get(state.query_type, [])
+        if not expected:
             return False
-        return expected_table in state.completed_tables
+        # Se marca cada tabla en _check_and_mark_table_as_complete()
+        return all(t in state.completed_tables for t in expected)
 
     def _finalize_query(self, state: QueryState):
         try:
+            if state.query_type == QueryType.Q4:
+                result = self._q4_finalize(state)
+                self._send_result(state.client_id, state.query_id, "success", result)
+                return
+
+            # queries anteriores: usar estrategia existente
             if state.strategy is None:
                 state.strategy = get_strategy(state.query_type)
             final_result = state.strategy.finalize(state.consolidated_data)
             self._send_result(state.client_id, state.query_id, "success", final_result)
         except Exception as e:
-            logger.error(f"Error during finalization of query '{state.query_id}': {e}", exc_info=True)
-            self._send_result(state.client_id, state.query_id, "error", error_message=str(e))
+            logger.error(
+                f"Error during finalization of query '{state.query_id}': {e}",
+                exc_info=True,
+            )
+            self._send_result(
+                state.client_id, state.query_id, "error", error_message=str(e)
+            )
+
+    def _q4_finalize(self, state: QueryState) -> Dict[str, list]:
+        """
+        Devuelve: { store_name: [ {birthdate: str, purchase_count: int}, ... (top-3) ] }
+        """
+        counts = state.q4_counts or {}
+        users = state.q4_users or {}
+
+        out: Dict[str, list] = {}
+        for store, umap in counts.items():
+            top = sorted(umap.items(), key=lambda kv: (-kv[1], kv[0]))[:3]
+            rows = []
+            for uid, cnt in top:
+                rows.append(
+                    {
+                        "birthdate": users.get(uid, ""),
+                        "purchase_count": cnt,
+                    }
+                )
+            out[store] = rows
+        return out
 
     def _cleanup_query_state(self, client_id: str, query_id: str):
         with self.global_lock:
@@ -389,12 +497,16 @@ class ResultsFinisher:
             if status != "success" or result is None:
                 # For error cases, create an error message
                 error_result = messages.QueryResultError()
-                error_result.rows.append(entities.ResultError(
-                    query_id=query_id,
-                    error_code="EXECUTION_ERROR" if status == "error" else "NULL_RESULT",
-                    error_message=error_message or "Unknown error"
-                ))
-                
+                error_result.rows.append(
+                    entities.ResultError(
+                        query_id=query_id,
+                        error_code=(
+                            "EXECUTION_ERROR" if status == "error" else "NULL_RESULT"
+                        ),
+                        error_message=error_message or "Unknown error",
+                    )
+                )
+
                 # Wrap the error in a DataBatch
                 batch = DataBatch(
                     query_ids=[int(query_id)] if query_id.isdigit() else [],
@@ -404,15 +516,17 @@ class ResultsFinisher:
                     shards_info=[(1, 0)],  # Standard format for no sharding
                     client_id=client_id,
                 )
-                
+
                 self.output_client.send(batch.to_bytes())
-                logger.info(f"Sent error result for query '{query_id}' using protocol message")
+                logger.info(
+                    f"Sent error result for query '{query_id}' using protocol message"
+                )
                 return
-            
+
             # For successful results, use the appropriate message type
             query_type = QueryType(int(query_id))
             result_message = self._create_result_message(query_type, result)
-            
+
             # Wrap the result in a DataBatch for consistent protocol handling
             batch = DataBatch(
                 query_ids=[int(query_id)],
@@ -422,20 +536,24 @@ class ResultsFinisher:
                 shards_info=[(1, 0)],  # Standard format for no sharding
                 client_id=client_id,
             )
-            
+
             self.output_client.send(batch.to_bytes())
-            logger.info(f"Sent final result for query '{query_id}' using protocol message")
+            logger.info(
+                f"Sent final result for query '{query_id}' using protocol message"
+            )
         except Exception as e:
             # Emergency error handling using minimal protocol message
             # Even in case of internal errors, we still use the protocol
             try:
                 emergency_error = messages.QueryResultError()
-                emergency_error.rows.append(entities.ResultError(
-                    query_id=query_id,
-                    error_code="INTERNAL_ERROR",
-                    error_message=f"Internal error while sending result: {str(e)}"
-                ))
-                
+                emergency_error.rows.append(
+                    entities.ResultError(
+                        query_id=query_id,
+                        error_code="INTERNAL_ERROR",
+                        error_message=f"Internal error while sending result: {str(e)}",
+                    )
+                )
+
                 emergency_batch = DataBatch(
                     query_ids=[],  # May not have valid query ID at this point
                     meta={},
@@ -444,25 +562,34 @@ class ResultsFinisher:
                     shards_info=[(1, 0)],  # Standard format for no sharding
                     client_id=client_id,
                 )
-                
+
                 self.output_client.send(emergency_batch.to_bytes())
             except Exception as fatal_e:
-                logger.critical(f"FATAL: Failed to send even emergency error message: {fatal_e}")
-            
-            logger.error(f"Failed to create normal protocol message for query {query_id}: {e}", exc_info=True)
-            
-    def _create_result_message(self, query_type: QueryType, result: Any) -> TableMessage:
+                logger.critical(
+                    f"FATAL: Failed to send even emergency error message: {fatal_e}"
+                )
+
+            logger.error(
+                f"Failed to create normal protocol message for query {query_id}: {e}",
+                exc_info=True,
+            )
+
+    def _create_result_message(
+        self, query_type: QueryType, result: Any
+    ) -> TableMessage:
         """Create the appropriate result message for the query type."""
         if query_type == QueryType.Q1:
             # Q1: Filtered transactions
             message = messages.QueryResult1()
-            for tx in result.get('transactions', []):
-                message.rows.append(entities.ResultFilteredTransaction(
-                    transaction_id=str(tx.get('transaction_id', '')),
-                    final_amount=str(tx.get('final_amount', 0))
-                ))
+            for tx in result.get("transactions", []):
+                message.rows.append(
+                    entities.ResultFilteredTransaction(
+                        transaction_id=str(tx.get("transaction_id", "")),
+                        final_amount=str(tx.get("final_amount", 0)),
+                    )
+                )
             return message
-            
+
         elif query_type == QueryType.Q2:
             # Q2: Product metrics by month
             message = messages.QueryResult2()
@@ -470,60 +597,69 @@ class ResultsFinisher:
             for month, data in result.items():
                 # Create a dictionary to store product metrics by name
                 product_metrics = {}
-                
+
                 # Process quantity metrics
-                for product in data.get('by_quantity', []):
-                    name = product.get('name', '')
-                    quantity = product.get('quantity', 0)
-                    product_metrics[name] = product_metrics.get(name, {'quantity': 0, 'revenue': 0.0})
-                    product_metrics[name]['quantity'] = quantity
-                
+                for product in data.get("by_quantity", []):
+                    name = product.get("name", "")
+                    quantity = product.get("quantity", 0)
+                    product_metrics[name] = product_metrics.get(
+                        name, {"quantity": 0, "revenue": 0.0}
+                    )
+                    product_metrics[name]["quantity"] = quantity
+
                 # Process revenue metrics
-                for product in data.get('by_revenue', []):
-                    name = product.get('name', '')
-                    revenue = product.get('revenue', 0.0)
-                    product_metrics[name] = product_metrics.get(name, {'quantity': 0, 'revenue': 0.0})
-                    product_metrics[name]['revenue'] = revenue
-                
+                for product in data.get("by_revenue", []):
+                    name = product.get("name", "")
+                    revenue = product.get("revenue", 0.0)
+                    product_metrics[name] = product_metrics.get(
+                        name, {"quantity": 0, "revenue": 0.0}
+                    )
+                    product_metrics[name]["revenue"] = revenue
+
                 # Create result rows with both quantity and revenue
                 for name, metrics in product_metrics.items():
                     # Only include products with either non-zero quantity or revenue
-                    if metrics['quantity'] != 0 or metrics['revenue'] != 0:
-                        message.rows.append(entities.ResultProductMetrics(
-                            month=month,
-                            name=name,
-                            quantity=str(metrics['quantity']),
-                            revenue=str(metrics['revenue'])
-                        ))
+                    if metrics["quantity"] != 0 or metrics["revenue"] != 0:
+                        message.rows.append(
+                            entities.ResultProductMetrics(
+                                month=month,
+                                name=name,
+                                quantity=str(metrics["quantity"]),
+                                revenue=str(metrics["revenue"]),
+                            )
+                        )
             return message
-            
+
         elif query_type == QueryType.Q3:
             # Q3: TPV analysis by store and period
             message = messages.QueryResult3()
             for store_name, periods in result.items():
                 for period, amount in periods.items():
-                    message.rows.append(entities.ResultStoreTPV(
-                        store_name=store_name,
-                        period=period,
-                        amount=str(amount)
-                    ))
+                    message.rows.append(
+                        entities.ResultStoreTPV(
+                            store_name=store_name, period=period, amount=str(amount)
+                        )
+                    )
             return message
-            
+
         elif query_type == QueryType.Q4:
             # Q4: Top customers by store
             message = messages.QueryResult4()
             for store_name, customers in result.items():
                 for customer in customers:
-                    message.rows.append(entities.ResultTopCustomer(
-                        store_name=store_name,
-                        birthdate=customer.get('birthdate', ''),
-                        purchase_count=str(customer.get('purchase_count', 0))
-                    ))
+                    message.rows.append(
+                        entities.ResultTopCustomer(
+                            store_name=store_name,
+                            birthdate=customer.get("birthdate", ""),
+                            purchase_count=str(customer.get("purchase_count", 0)),
+                        )
+                    )
             return message
-            
-        else:
-            raise ValueError(f"No result message type defined for query type {query_type}")
 
+        else:
+            raise ValueError(
+                f"No result message type defined for query type {query_type}"
+            )
 
     def start(self):
         logger.info("ResultsFinisher is starting...")
