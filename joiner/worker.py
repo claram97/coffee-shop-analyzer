@@ -3,11 +3,9 @@ from __future__ import annotations
 
 import copy
 import hashlib
-import io
 import logging
 import os
 import pickle
-import shelve
 import struct
 import threading
 from collections import defaultdict
@@ -72,11 +70,11 @@ class _Shard:
     def close(self):
         try:
             self.wfh.close()
-        except:
+        except Exception:
             pass
         try:
             self.rfh.close()
-        except:
+        except Exception:
             pass
 
 
@@ -100,7 +98,7 @@ class FastSpool:
         h = hashlib.blake2b(key.encode("utf-8"), digest_size=2).digest()
         return int.from_bytes(h, "little") % self._shards
 
-    def append_list(self, bucket: str, key: str, value_item: Any) -> None:
+    def append_list(self, key: str, value_item: Any) -> None:
         payload = pickle.dumps(value_item, protocol=5)
         hdr = self._hdr.pack(len(payload))
         sid = self._shard_of(key)
@@ -114,7 +112,7 @@ class FastSpool:
         with self._keys_lock:
             self._keys[sid].add(key)
 
-    def pop_all(self, bucket: str, key: str) -> List[Any]:
+    def pop_all(self, key: str) -> List[Any]:
         sid = self._shard_of(key)
         shard = self._table[sid]
         with shard.wlock:
@@ -125,7 +123,7 @@ class FastSpool:
                 return []
         out: List[Any] = []
         with shard.rlock:
-            for off, length in ptrs:
+            for off, _length in ptrs:
                 shard.rfh.seek(off)
                 size = self._hdr.unpack(shard.rfh.read(self._hdr.size))[0]
                 buf = shard.rfh.read(size)
@@ -134,7 +132,7 @@ class FastSpool:
             self._keys[sid].discard(key)
         return out
 
-    def keys_with_prefix(self, bucket: str) -> List[str]:
+    def keys_with_prefix(self) -> List[str]:
         with self._keys_lock:
             keys = []
             for s in range(self._shards):
@@ -175,6 +173,7 @@ class JoinerWorker:
         in_mw: Dict[int, MessageMiddleware],
         out_results_mw: MessageMiddleware,
         router_replicas: int,
+        stop_event: threading.Event,
         data_dir: str = "./data/joiner",
         logger=None,
         shard_index: int = 0,
@@ -199,6 +198,9 @@ class JoinerWorker:
         self._pending_eofs: Dict[tuple[int, str], Set[int]] = {}
         self._part_counter: Dict[tuple[int, str], int] = {}
 
+        self._stop_event = stop_event
+        self._is_shutting_down = False
+
     def _log_db(self, where: str, db: DataBatch):
         try:
             t = getattr(db.batch_msg, "opcode", None)
@@ -215,7 +217,32 @@ class JoinerWorker:
         self._start_queue(Opcodes.NEW_TRANSACTION_ITEMS, self._on_raw_ti)
         self._start_queue(Opcodes.NEW_TRANSACTION, self._on_raw_tx)
         self._start_queue(Opcodes.NEW_USERS, self._on_raw_users)
-        threading.Event().wait()
+
+    def shutdown(self):
+        """Initiates the shutdown of the worker and all its resources."""
+        self._log.info("Shutting down JoinerWorker...")
+        self._is_shutting_down = True
+
+        self._log.info("Stopping all consumers...")
+        for table_id in self._in.keys():
+            self._stop_queue(table_id)
+
+        self._log.info("Waiting for consumer threads to finish...")
+        for t in self._threads.values():
+            t.join()
+
+        self._log.info("Closing outbound connections and data store...")
+        try:
+            self._out.close()
+        except Exception as e:
+            self._log.warning("Error closing outbound middleware: %s", e)
+
+        try:
+            self._store.close()
+        except Exception as e:
+            self._log.warning("Error closing data store: %s", e)
+
+        self._log.info("JoinerWorker shutdown complete.")
 
     def _start_queue(self, table_id: int, cb: Callable[[bytes], None]):
         mw = self._in.get(table_id)
@@ -224,7 +251,7 @@ class JoinerWorker:
             return
         if table_id in self._threads and self._threads[table_id].is_alive():
             return
-        t = threading.Thread(target=mw.start_consuming, args=(cb,), daemon=True)
+        t = threading.Thread(target=mw.start_consuming, args=(cb,), daemon=False)
         self._threads[table_id] = t
         t.start()
         self._log.info("Consumiendo table_id=%s", table_id)
@@ -244,6 +271,10 @@ class JoinerWorker:
     def _decode_msg(
         self, body: bytes
     ) -> Tuple[str, Union[EOFMessage, DataBatch, int, None]]:
+        if self._is_shutting_down or self._stop_event.is_set():
+            self._log.warning("Shutdown in progress, skipping message.")
+            return "shutdown", None
+
         if not body or len(body) < 1:
             self._log.error("Mensaje vacío")
             return "err", None
@@ -299,6 +330,8 @@ class JoinerWorker:
 
     def _on_raw_menu(self, raw: bytes):
         kind, msg = self._decode_msg(raw)
+        if kind in ("err", "bad", "shutdown"):
+            return
         if kind == "eof":
             eof: EOFMessage = msg
             self._on_table_eof(
@@ -327,6 +360,8 @@ class JoinerWorker:
 
     def _on_raw_stores(self, raw: bytes):
         kind, msg = self._decode_msg(raw)
+        if kind in ("err", "bad", "shutdown"):
+            return
         if kind == "eof":
             eof: EOFMessage = msg
             self._on_table_eof(
@@ -355,6 +390,8 @@ class JoinerWorker:
 
     def _on_raw_ti(self, raw: bytes):
         kind, msg = self._decode_msg(raw)
+        if kind in ("err", "bad", "shutdown"):
+            return
         if kind == "eof":
             eof: EOFMessage = msg
             self._on_table_eof(
@@ -436,6 +473,8 @@ class JoinerWorker:
 
     def _on_raw_tx(self, raw: bytes):
         kind, msg = self._decode_msg(raw)
+        if kind in ("err", "bad", "shutdown"):
+            return
         if kind == "eof":
             eof: EOFMessage = msg
             self._on_table_eof(
@@ -551,7 +590,7 @@ class JoinerWorker:
                 template.batch_bytes = template.batch_msg.to_bytes()
                 template_raw = template.to_bytes()
                 key = f"{cid}:{uid}"
-                self._store.append_list("q4_by_user", key, (template_raw, lst))
+                self._store.append_list(key, (template_raw, lst))
                 self._log.debug(
                     "Q4 stash key=%s rows=%d chunk=%d/%d", key, len(lst), idx + 1, total
                 )
@@ -561,6 +600,8 @@ class JoinerWorker:
 
     def _on_raw_users(self, raw: bytes):
         kind, msg = self._decode_msg(raw)
+        if kind in ("err", "bad", "shutdown"):
+            return
         if kind == "eof":
             eof: EOFMessage = msg
             if self._on_table_eof(
@@ -597,7 +638,7 @@ class JoinerWorker:
 
             for uid, u in uidx.items():
                 key = f"{cid}:{uid}"
-                items = self._store.pop_all("q4_by_user", key)
+                items = self._store.pop_all(key)
                 if not items:
                     continue
 
@@ -665,13 +706,13 @@ class JoinerWorker:
         return False
 
     def _flush_remaining_q4_without_user(self, client_id):
-        keys = self._store.keys_with_prefix("q4_by_user")
+        keys = self._store.keys_with_prefix()
         if keys:
             self._log.info("Flush Q4 sin user: keys_pendientes=%d", len(keys))
         for key in keys:
             if not key.startswith(f"{client_id}"):
                 continue
-            for template_raw, txst_rows in self._store.pop_all("q4_by_user", key):
+            for template_raw, txst_rows in self._store.pop_all(key):
                 out_db = DataBatch.deserialize_from_bytes(template_raw)
                 msg_join = NewTransactionStoresUsers()
                 msg_join.rows = []
@@ -687,7 +728,6 @@ class JoinerWorker:
                 self._send(out_db)
 
     def _safe_send(self, raw: bytes):
-        # 1) serializa accesos al canal
         with self._out_lock:
             try:
                 self._out.send(raw)
@@ -695,22 +735,19 @@ class JoinerWorker:
             except Exception as e:
                 self._log.warning("send failed once: %s; recreating publisher", e)
 
-                # 2) si el canal se cerró, recrea y reintenta una vez
                 try:
-                    # si el wrapper tiene is_closed(), verificalo para log
                     if getattr(self._out, "is_closed", None):
                         self._log.debug("out channel closed? %s", self._out.is_closed())
 
                     if self._out_factory is not None:
                         self._out = self._out_factory()
                     else:
-                        # fallback: intenta reopen si existe
                         if hasattr(self._out, "reopen"):
                             self._out.reopen()
                         else:
                             raise RuntimeError(
                                 "No out_factory / reopen() to recreate publisher"
-                            )
+                            ) from e
 
                     self._out.send(raw)
                     return

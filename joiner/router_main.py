@@ -7,13 +7,12 @@ import os
 import signal
 import sys
 import threading
-from typing import Dict, Tuple
+from typing import Tuple
 
 from app_config.config_loader import Config
 from joiner.router import (
     ExchangePublisherPool,
     JoinerRouter,
-    TableRouteCfg,
     build_route_cfg_from_config,
 )
 from middleware.middleware_client import (
@@ -49,23 +48,30 @@ class _FanInServer:
         self._consumers = [MessageMiddlewareQueue(broker_host, q) for q in in_queues]
         self._threads: list[threading.Thread] = []
 
-    def run(self):
+    def run(self, stop_evt: threading.Event):
         def mk_cb():
             return lambda body: self._router._on_raw(body)
 
         for c in self._consumers:
-            t = threading.Thread(target=c.start_consuming, args=(mk_cb(),), daemon=True)
+            t = threading.Thread(
+                target=c.start_consuming, args=(mk_cb(),), daemon=False
+            )
             t.start()
             self._threads.append(t)
-
-        stop_evt = threading.Event()
-
-        def _stop(*_a):
-            stop_evt.set()
-
-        signal.signal(signal.SIGINT, _stop)
-        signal.signal(signal.SIGTERM, _stop)
         stop_evt.wait()
+
+    def shutdown(self):
+        """Stops all consumers and waits for their threads to finish."""
+        self._logger.info("Shutting down FanInServer consumers...")
+        for c in self._consumers:
+            c.stop_consuming()
+
+        self._logger.info("Waiting for consumer threads to finish...")
+        for t in self._threads:
+            t.join()
+        self._logger.info(
+            "All consumer threads finished. FanInServer shutdown complete."
+        )
 
 
 def resolve_config_path(cli_value: str | None) -> str:
@@ -88,8 +94,6 @@ def resolve_config_path(cli_value: str | None) -> str:
 
 
 def _ensure_all_joiner_bindings(cfg: Config, host: str):
-    from middleware.middleware_client import MessageMiddlewareExchange
-
     tables = ["menu_items", "stores", "transactions", "transaction_items", "users"]
     for t in tables:
         ex = cfg.joiner_router_exchange(t)
@@ -99,7 +103,6 @@ def _ensure_all_joiner_bindings(cfg: Config, host: str):
         for sh in range(shards):
             rk = cfg.joiner_router_rk(t, sh)
             qn = cfg.joiner_queue(t, sh)
-            # Consumidor efímero para forzar binding ex↔rk→queue
             tmp = MessageMiddlewareExchange(
                 host=host,
                 exchange_name=ex,
@@ -130,16 +133,25 @@ def main():
 
     cfg_path = resolve_config_path(args.config)
     if not os.path.exists(cfg_path):
-        print(f"[filter-router] config no encontrado: {cfg_path}", file=sys.stderr)
+        print("[filter-router] config no encontrado: %s", cfg_path, file=sys.stderr)
         sys.exit(2)
 
-    log.info(f"Usando config: {cfg_path}")
+    log.info("Usando config: %s", cfg_path)
 
     try:
         cfg = Config(cfg_path)
     except Exception as e:
-        log.error(f"No pude cargar config: {e}")
+        log.error("No pude cargar config: %s", e)
         sys.exit(2)
+
+    stop_event = threading.Event()
+
+    def shutdown_handler(*_a):
+        log.info("Shutdown signal received. Initiating graceful shutdown...")
+        stop_event.set()
+
+    signal.signal(signal.SIGINT, shutdown_handler)
+    signal.signal(signal.SIGTERM, shutdown_handler)
 
     broker_host = cfg.broker.host
     fr_replicas = cfg.routers.filter
@@ -149,7 +161,11 @@ def main():
     route_cfg = build_route_cfg_from_config(cfg)
 
     router = JoinerRouter(
-        in_mw=None, publisher_pool=pool, route_cfg=route_cfg, fr_replicas=fr_replicas
+        in_mw=None,
+        publisher_pool=pool,
+        route_cfg=route_cfg,
+        fr_replicas=fr_replicas,
+        stop_event=stop_event,
     )
 
     in_queues: list[str] = []
@@ -160,7 +176,7 @@ def main():
         (Opcodes.NEW_MENU_ITEMS, "menu_items"),
         (Opcodes.NEW_STORES, "stores"),
     ]
-    for tid, tname in tables_for_input:
+    for _tid, tname in tables_for_input:
         parts = cfg.workers.aggregators
         for pid in range(parts):
             q = cfg.aggregator_to_joiner_router_queue(tname, pid, jr_index)
@@ -169,8 +185,17 @@ def main():
     log.info("Entradas (N=%d): %s", len(in_queues), ", ".join(in_queues))
 
     server = _FanInServer(broker_host, in_queues, router, log)
-    _ensure_all_joiner_bindings(cfg, broker_host)
-    server.run()
+    try:
+        _ensure_all_joiner_bindings(cfg, broker_host)
+        server.run(stop_evt=stop_event)
+        log.info("Joiner router is running. Press Ctrl+C to exit.")
+        stop_event.wait()
+        log.info("Stop event received, starting shutdown process.")
+    finally:
+        log.info("Cleaning up resources...")
+        server.shutdown()
+        router.shutdown()
+        log.info("Graceful shutdown complete. Exiting.")
 
 
 if __name__ == "__main__":

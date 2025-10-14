@@ -77,7 +77,7 @@ def _shard_key_for_row(table_id: int, row, queries: List[int]) -> Optional[str]:
     return None
 
 
-def is_broadcast_table(table_id: int, queries: List[int]) -> bool:
+def is_broadcast_table(table_id: int) -> bool:
     return table_id in (Opcodes.NEW_MENU_ITEMS, Opcodes.NEW_STORES)
 
 
@@ -88,11 +88,9 @@ class ExchangePublisherPool:
         self._lock = threading.Lock()
 
     def get_pub(self, exchange_name: str, routing_key: str) -> "MessageMiddleware":
-        # clave incluye el id del hilo
         k = (exchange_name, routing_key, threading.get_ident())
         with self._lock:
             pub = self._pool.get(k)
-            # Si el canal se cerró, recrearlo
             if pub is None or getattr(pub, "is_closed", lambda: False)():
                 log.debug(
                     "create publisher exchange=%s rk=%s (thread=%s)",
@@ -103,6 +101,18 @@ class ExchangePublisherPool:
                 pub = self._factory(exchange_name, routing_key)
                 self._pool[k] = pub
         return pub
+
+    def shutdown(self):
+        """Closes all active publisher connections in the pool."""
+        log.info("Shutting down ExchangePublisherPool, closing all publishers...")
+        with self._lock:
+            for pub in self._pool.values():
+                try:
+                    pub.close()
+                except Exception as e:
+                    log.warning(f"Error closing publisher: %s", e)
+            self._pool.clear()
+        log.info("ExchangePublisherPool shutdown complete.")
 
 
 class JoinerRouter:
@@ -118,6 +128,7 @@ class JoinerRouter:
         publisher_pool: ExchangePublisherPool,
         route_cfg: Dict[int, TableRouteCfg],
         fr_replicas: int,
+        stop_event: threading.Event,
     ):
         self._in = in_mw
         self._pool = publisher_pool
@@ -125,6 +136,8 @@ class JoinerRouter:
         self._pending_eofs: Dict[tuple[int, str], Set[int]] = {}
         self._part_counter: Dict[tuple[int, str], int] = {}
         self._fr_replicas = fr_replicas
+        self._stop_event = stop_event
+        self._is_shutting_down = False
         log.info(
             "JoinerRouter init: tables=%s",
             {
@@ -136,6 +149,12 @@ class JoinerRouter:
                 for k, v in route_cfg.items()
             },
         )
+
+    def shutdown(self):
+        log.info("Shutting down JoinerRouter...")
+        self._is_shutting_down = True
+        self._pool.shutdown()
+        log.info("JoinerRouter shutdown complete.")
 
     def run(self):
         log.info("JoinerRouter consuming…")
@@ -183,6 +202,9 @@ class JoinerRouter:
             return None
 
     def _on_raw(self, raw: bytes):
+        if self._is_shutting_down or self._stop_event.is_set():
+            log.warning("Router is shutting down, skipping new message.")
+            return
         eof = self._try_parse_eof(raw)
         if eof is not None:
             self._handle_partition_eof_like(eof, raw)
@@ -204,7 +226,7 @@ class JoinerRouter:
         inner = getattr(db, "batch_msg", None)
         log.debug("recv DataBatch table=%s queries=%s", tname, queries)
 
-        if is_broadcast_table(table_id, queries):
+        if is_broadcast_table(table_id):
             log.info("broadcast table=%s shards=%d", tname, cfg.joiner_shards)
             self._broadcast(cfg, raw)
             return
@@ -255,7 +277,6 @@ class JoinerRouter:
             log.warning("EOF for unknown table_id=%s; ignoring", table_id)
             return
 
-        tname = ID_TO_NAME.get(table_id, f"#{table_id}")
         recvd = self._pending_eofs.setdefault(key, set())
         next_idx = self._part_counter.get(key, 0) + 1
         self._part_counter[key] = next_idx
@@ -291,7 +312,6 @@ class JoinerRouter:
                 rk,
                 e,
             )
-            # recreate per-thread publisher and retry 1 vez
             pub2 = self._pool.get_pub(ex, rk)
             pub2.send(raw)
 
@@ -321,7 +341,6 @@ def build_route_cfg_from_config(cfg: "Config") -> Dict[int, TableRouteCfg]:
         return ex_fmt.format(table=table)
 
     def _rk_pattern(table: str) -> str:
-        # dejamos {shard:02d} para .format(shard=..)
         return rk_fmt.replace("{table}", table)
 
     route: Dict[int, TableRouteCfg] = {}

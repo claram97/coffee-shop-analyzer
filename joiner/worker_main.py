@@ -27,7 +27,6 @@ def force_bind(host: str, exchange: str, queue: str, routing_key: str):
         )
     )
     ch = conn.channel()
-    # Idempotente: no rompe si ya existen
     ch.exchange_declare(exchange=exchange, exchange_type="topic", durable=True)
     ch.queue_declare(queue=queue, durable=True)
     ch.queue_bind(exchange=exchange, queue=queue, routing_key=routing_key)
@@ -39,25 +38,18 @@ def ensure_joiner_bindings(cfg: Config, host: str, shard: int) -> None:
     Declara la cola estable de cada tabla para este shard y asegura el binding
     exchange -> routing_key -> queue.
     """
-    # Utilizamos MessageMiddlewareQueue para asegurarnos que la cola exista.
-    # Luego creamos un publisher del exchange para forzar/asegurar el binding.
     tables = ["menu_items", "stores", "transactions", "transaction_items", "users"]
     for table in tables:
-        rk = cfg.joiner_router_rk(table, shard)  # p.ej. join.stores.shard.15
-        qn = cfg.joiner_queue(table, shard)  # p.ej. join.stores.shard.15
-        ex = cfg.joiner_router_exchange(table)  # p.ej. jx.stores
+        rk = cfg.joiner_router_rk(table, shard)
+        qn = cfg.joiner_queue(table, shard)
+        ex = cfg.joiner_router_exchange(table)
 
-        # 1) Declarar cola estable
         q = MessageMiddlewareQueue(host=host, queue_name=qn)
-        # Cerramos el canal; la cola queda declarada en Rabbit
         try:
             q.close()
         except Exception:
             pass
 
-        # 2) Asegurar el binding exchange<->rk->queue
-        # Muchas implementaciones de Exchange crean el binding al pasar queue_name.
-        # Si tu wrapper no bindea por sí solo, crea un consumidor efímero para forzar el bind.
         _tmp_consumer = MessageMiddlewareExchange(
             host=host,
             exchange_name=ex,
@@ -65,7 +57,7 @@ def ensure_joiner_bindings(cfg: Config, host: str, shard: int) -> None:
             consumer=True,
             queue_name=qn,
         )
-        # No arrancamos el consumo; con abrir/cerrar alcanza para declarar/bindear
+
         try:
             _tmp_consumer.close()
         except Exception:
@@ -78,15 +70,15 @@ def build_inputs_for_shard(
     inputs: Dict[int, MessageMiddlewareExchange] = {}
 
     def make(table: str) -> MessageMiddlewareExchange:
-        ex = cfg.joiner_router_exchange(table)  # jx.{table}
-        rk = cfg.joiner_router_rk(table, shard)  # join.{table}.shard.{shard:02d}
-        qn = cfg.joiner_queue(table, shard)  # join.{table}.shard.{shard:02d} (estable)
+        ex = cfg.joiner_router_exchange(table)
+        rk = cfg.joiner_router_rk(table, shard)
+        qn = cfg.joiner_queue(table, shard)
         return MessageMiddlewareExchange(
             host=host,
             exchange_name=ex,
             route_keys=[rk],
-            consumer=True,  # ← ok, la clase acepta 'consumer'
-            queue_name=qn,  # ← cola estable (no exclusiva) ya bindeada al exchange+rk
+            consumer=True,
+            queue_name=qn,
         )
 
     inputs[Opcodes.NEW_TRANSACTION_ITEMS] = make("transaction_items")
@@ -115,10 +107,8 @@ def parse_args(argv=None):
     return p.parse_args(argv)
 
 
-def resolve_config_path(cli_value: str | None) -> str:
+def resolve_config_path() -> str:
     candidates = []
-    if cli_value:
-        candidates.append(cli_value)
     env_cfg_path = os.getenv("CONFIG_PATH")
     if env_cfg_path:
         candidates.append(env_cfg_path)
@@ -135,43 +125,42 @@ def resolve_config_path(cli_value: str | None) -> str:
 
 
 def main(argv=None):
-    ap = argparse.ArgumentParser()
-    ap.add_argument("-c", "--config", help="Ruta al config.ini")
-    ap.add_argument("--log-level", default=os.environ.get("LOG_LEVEL", "INFO"))
-    args = ap.parse_args()
-
+    log_level = os.environ.get("LOG_LEVEL", "INFO")
     logging.basicConfig(
-        level=getattr(logging, args.log_level.upper(), logging.INFO),
+        level=getattr(logging, log_level, logging.INFO),
         format="%(asctime)s %(levelname)s [joiner-worker] %(message)s",
     )
     log = logging.getLogger("joiner-worker-main")
 
-    cfg_path = resolve_config_path(args.config)
+    cfg_path = resolve_config_path()
     if not os.path.exists(cfg_path):
-        print(f"[joiner-worker] config no encontrado: {cfg_path}", file=sys.stderr)
+        print("[joiner-worker] config no encontrado: %s", cfg_path, file=sys.stderr)
         sys.exit(2)
+    log.info("Usando config: %s", cfg_path)
 
-    log.info(f"Usando config: {cfg_path}")
-
-    try:
-        shard = int(os.environ["JOINER_WORKER_INDEX"])
-    except KeyError:
-        log.error("JOINER_WORKER_INDEX no está definido en el entorno")
-        sys.exit(1)
-    except ValueError:
-        log.error("JOINER_WORKER_INDEX debe ser un entero")
-        sys.exit(1)
+    shard = int(os.environ["JOINER_WORKER_INDEX"], 0)
 
     try:
         cfg = Config(cfg_path)
     except Exception as e:
-        log.error(f"No pude cargar config: {e}")
+        log.error("No pude cargar config: %s", e)
         sys.exit(2)
+
+    stop_event = threading.Event()
+
+    def shutdown_handler(*_):
+        log.info("Shutdown signal received. Initiating graceful shutdown...")
+        stop_event.set()
+
+    signal.signal(signal.SIGINT, shutdown_handler)
+    signal.signal(signal.SIGTERM, shutdown_handler)
 
     host = cfg.broker.host
     out_q_name = cfg.names.results_controller_queue
 
     in_mw = build_inputs_for_shard(cfg, host, shard)
+
+    ensure_joiner_bindings(cfg, host, shard)
 
     def make_results_pub():
         return MessageMiddlewareQueue(host=host, queue_name=out_q_name)
@@ -186,42 +175,24 @@ def main(argv=None):
         shard_index=shard,
         router_replicas=cfg.routers.joiner,
         out_factory=make_results_pub,
+        stop_event=stop_event,
     )
-
-    stop_event = threading.Event()
-
-    def _handle_sig(*_):
-        log.info("Recibida señal, deteniendo joiner...")
-        stop_event.set()
-        try:
-            for mw in in_mw.values():
-                mw.stop_consuming()
-        except Exception:
-            pass
-        try:
-            out_results.close()
-        except Exception:
-            pass
-        sys.exit(0)
-
-    signal.signal(signal.SIGINT, _handle_sig)
-    signal.signal(signal.SIGTERM, _handle_sig)
 
     log.info(
         "Iniciando JoinerWorker shard=%d -> results=%s",
         shard,
         out_q_name,
     )
-    ensure_joiner_bindings(cfg, host, shard)
-    in_mw = build_inputs_for_shard(cfg, host, shard)
-    # joiner/worker-main.py (en main)
-    ensure = []
-    for table in ["menu_items", "stores", "transactions", "transaction_items", "users"]:
-        ex = cfg.joiner_router_exchange(table)  # ej: jx.menu_items
-        rk = cfg.joiner_router_rk(table, shard)  # ej: join.menu_items.shard.03
-        qn = cfg.joiner_queue(table, shard)  # ej: join.menu_items.shard.03
-        force_bind(host, ex, qn, rk)  # <-- bind explícito y seguro
-    worker.run()
+
+    try:
+        worker.run()
+        log.info("Joiner worker is running. Press Ctrl+C to exit.")
+        stop_event.wait()
+        log.info("Stop event received, starting shutdown process.")
+    finally:
+        log.info("Cleaning up resources...")
+        worker.shutdown()
+        log.info("Graceful shutdown complete. Exiting.")
 
 
 if __name__ == "__main__":
