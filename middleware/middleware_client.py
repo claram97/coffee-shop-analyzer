@@ -129,7 +129,6 @@ class MessageMiddlewareQueue(MessageMiddleware):
                 queue=self.queue_name, on_message_callback=callback_wrapper
             )
 
-            # Process events until stopped
             self._process_events_until_stopped()
             self._cleanup_consumer()
 
@@ -141,9 +140,7 @@ class MessageMiddlewareQueue(MessageMiddleware):
         """Process RabbitMQ events until stop is requested"""
         while not self._stop_event.is_set():
             try:
-                self._connection.process_data_events(
-                    time_limit=10.0
-                )  # Set a longer time limit (e.g., 10 seconds)
+                self._connection.process_data_events(time_limit=10.0)
             except Exception as e:
                 if not self._stop_event.is_set():
                     logging.error(
@@ -164,24 +161,23 @@ class MessageMiddlewareQueue(MessageMiddleware):
             self._consumer_tag = None
 
     def stop_consuming(self):
+        """
+        Thread-safely stops the consumer by scheduling its internal stop event to be set.
+        """
         with self._consume_lock:
             if not self._consuming_thread or not self._consuming_thread.is_alive():
                 return
 
-            try:
-                self._stop_event.set()
-                self._consuming_thread.join(timeout=1.0)
+            logging.info(f"Scheduling stop for consumer on queue '{self.queue_name}'")
 
-                if self._consuming_thread.is_alive():
-                    self._force_cleanup()
+            if self._connection and self._connection.is_open:
+                self._connection.add_callback_threadsafe(self._stop_event.set)
 
-            except Exception as e:
-                raise MessageMiddlewareDisconnectedError(
-                    "Error stopping consumer"
-                ) from e
-            finally:
-                self._consuming_thread = None
-                self._consumer_tag = None
+        self._consuming_thread.join()
+        logging.info(
+            f"Consumer thread for queue '{self.queue_name}' has successfully joined."
+        )
+        self._consuming_thread = None
 
     def _force_cleanup(self):
         try:
@@ -198,10 +194,10 @@ class MessageMiddlewareQueue(MessageMiddleware):
                 raise ValueError("Message must be bytes")
 
             self._channel.basic_publish(
-                exchange="",  # Default exchange for direct queue publishing
+                exchange="",
                 routing_key=self.queue_name,
                 body=message,
-                properties=pika.BasicProperties(delivery_mode=2),  # Persistent message
+                properties=pika.BasicProperties(delivery_mode=2),
             )
         except pika.exceptions.AMQPError as e:
             raise MessageMiddlewareMessageError("Error sending message") from e
@@ -239,22 +235,19 @@ class MessageMiddlewareExchange(MessageMiddleware):
             )
         self.default_routing_key = self.route_keys[0]
 
-        # Initialize connection and channel variables
         self._connection = None
         self._channel = None
         self._consumer_tag = consumer
         self._consuming_thread = None
         self._stop_event = threading.Event()
         self._consume_lock = threading.Lock()
-        self.queue_name = queue_name  # Will be set only if consuming
+        self.queue_name = queue_name
         self._send_lock = threading.Lock()
 
-        # Connect and declare exchange
         self._connect()
         self._setup_exchange()
         if consumer and queue_name:
             try:
-                # declarar la cola (durable) y bindear todas las routing keys
                 self._channel.queue_declare(queue=self.queue_name, durable=True)
                 for key in self.route_keys:
                     self._channel.queue_bind(
@@ -262,9 +255,8 @@ class MessageMiddlewareExchange(MessageMiddleware):
                         queue=self.queue_name,
                         routing_key=key,
                     )
-                # QoS opcional si después vas a consumir con este canal
                 self._channel.basic_qos(prefetch_count=3)
-                logging.info(
+                logging.debug(
                     f"[MMX] ensured binding ex={self.exchange_name} q={self.queue_name} rk={self.route_keys}"
                 )
             except Exception as e:
@@ -327,7 +319,7 @@ class MessageMiddlewareExchange(MessageMiddleware):
 
     def _create_callback_wrapper(self, on_message_callback):
         def callback_wrapper(ch, method, properties, body):
-            logging.info(
+            logging.debug(
                 f"Exchange callback received message, delivery_tag: {method.delivery_tag}, body_size: {len(body)}"
             )
 
@@ -338,9 +330,9 @@ class MessageMiddlewareExchange(MessageMiddleware):
                 return
 
             try:
-                logging.info("About to call exchange message callback")
+                logging.debug("About to call exchange message callback")
                 on_message_callback(body)
-                logging.info(
+                logging.debug(
                     f"Exchange message processed, sending ACK for delivery_tag: {method.delivery_tag}"
                 )
                 ch.basic_ack(delivery_tag=method.delivery_tag)
@@ -355,11 +347,11 @@ class MessageMiddlewareExchange(MessageMiddleware):
 
     def _consume_loop(self, callback_wrapper):
         try:
-            logging.info(f"Starting consume loop on queue: {self.queue_name}")
+            logging.debug(f"Starting consume loop on queue: {self.queue_name}")
             self._consumer_tag = self._channel.basic_consume(
                 queue=self.queue_name, on_message_callback=callback_wrapper
             )
-            logging.info("Entering event processing loop")
+            logging.debug("Entering event processing loop")
             while not self._stop_event.is_set():
                 try:
                     self._connection.process_data_events(time_limit=10.0)
@@ -385,34 +377,37 @@ class MessageMiddlewareExchange(MessageMiddleware):
                 logging.error(f"AMQP error in consume loop: {e}")
                 raise MessageMiddlewareMessageError("Consumer error") from e
 
+    def _cleanup_consumer(self):
+        """Helper to be called on the consumer thread to stop consumption."""
+        if self._channel and self._channel.is_open:
+            try:
+                if self._consumer_tag:
+                    self._channel.basic_cancel(self._consumer_tag)
+            except Exception as e:
+                logging.error(f"Error during basic_cancel for exchange consumer: {e}")
+        if self._connection and self._connection.is_open:
+            self._connection.close()
+
     def stop_consuming(self):
+        """
+        Thread-safely stops the consumer by scheduling its internal stop event to be set.
+        """
         with self._consume_lock:
             if not self._consuming_thread or not self._consuming_thread.is_alive():
                 return
 
-            try:
-                logging.info("Stopping exchange consumer")
-                self._stop_event.set()
+            logging.info(
+                f"Scheduling stop for consumer on exchange '{self.exchange_name}'"
+            )
 
-                # ⚠️ Si estamos en el mismo thread del consumidor, NO hacer join()
-                if threading.current_thread() is self._consuming_thread:
-                    logging.info("Stop requested from consumer thread; skipping join")
-                else:
-                    self._consuming_thread.join(timeout=1.0)
-                    if self._consuming_thread.is_alive():
-                        logging.warning(
-                            "Consumer thread still alive after timeout, forcing cleanup"
-                        )
-                        self._force_cleanup()
+            if self._connection and self._connection.is_open:
+                self._connection.add_callback_threadsafe(self._stop_event.set)
 
-            except Exception as e:
-                logging.error(f"Error stopping consumer: {e}")
-                raise MessageMiddlewareDisconnectedError(
-                    "Error stopping consumer"
-                ) from e
-            finally:
-                self._consuming_thread = None
-                self._consumer_tag = None
+        self._consuming_thread.join()
+        logging.info(
+            f"Consumer thread for exchange '{self.exchange_name}' has successfully joined."
+        )
+        self._consuming_thread = None
 
     def _force_cleanup(self):
         try:

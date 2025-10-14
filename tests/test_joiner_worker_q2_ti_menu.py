@@ -1,4 +1,5 @@
 import pytest
+from conftest import TEST_CLIENT_ID
 
 from joiner.worker import JoinerWorker
 from protocol.constants import Opcodes
@@ -66,15 +67,20 @@ def test_q2_join_ti_with_menu(tmp_data_dir, fake_out, empty_inputs):
         data_dir=tmp_data_dir,
         logger=None,
         shard_index=0,
+        router_replicas=1,
     )
 
     # 1) cachear menu
     worker._on_raw_menu(_mk_menu_db())
 
-    # 2) mandar transaction_items con Q2
+    # 2) Enablear fase de transactions
+    worker._on_table_eof(Opcodes.NEW_STORES, TEST_CLIENT_ID)
+    worker._on_table_eof(Opcodes.NEW_MENU_ITEMS, TEST_CLIENT_ID)
+
+    # 3) mandar transaction_items con Q2
     worker._on_raw_ti(_mk_ti_db_q2())
 
-    # 3) debe haber salido 1 solo batch (el ítem con mi-1 joinea; mi-999 se descarta)
+    # 4) debe haber salido 1 solo batch (el ítem con mi-1 joinea; mi-999 se descarta)
     assert len(fake_out.sent) == 1
 
     out_db = DataBatch.deserialize_from_bytes(fake_out.sent[0])

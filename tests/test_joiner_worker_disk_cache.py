@@ -1,11 +1,56 @@
+# tests/test_joiner_q4_spool.py
+import uuid
+
 from joiner.worker import JoinerWorker
 from protocol.constants import Opcodes
 from protocol.databatch import DataBatch
-from protocol.entities import RawMenuItems, RawStore
-from protocol.messages import NewMenuItems, NewStores
+from protocol.entities import RawMenuItems, RawStore, RawTransaction
+from protocol.messages import EOFMessage, NewMenuItems, NewStores, NewTransactions
 
 
-def _mk_menu_db():
+def _db_bytes(
+    inner_msg, *, table_ids, query_ids, client_id, batch_number=1, shards_info=None
+):
+    if shards_info is None:
+        shards_info = [(1, 0)]
+    # arma el DataBatch con todo lo necesario y lo serializa
+    db = DataBatch(
+        table_ids=table_ids,
+        query_ids=query_ids,
+        shards_info=shards_info,
+        client_id=client_id,
+    )
+    db.batch_bytes = inner_msg.to_bytes()
+    # opcional pero útil para logs/asserts
+    db.batch_msg = inner_msg
+    db.batch_number = batch_number
+    return db.to_bytes()
+
+
+def _eof_bytes(table_type: str, client_id: str) -> bytes:
+    eof = EOFMessage()
+    eof.create_eof_message(batch_number=0, table_type=table_type, client_id=client_id)
+    return eof.to_bytes()
+
+
+def test_q4_stash_persists_txstore_chunks(tmp_data_dir, fake_out, empty_inputs):
+    """
+    Verifica que el JoinerWorker guarde en FastSpool los (template_raw, lst)
+    por usuario cuando procesa transactions Q4, usando la key {client_id}:{user_id}.
+    """
+    worker = JoinerWorker(
+        in_mw=empty_inputs,
+        out_results_mw=fake_out,
+        data_dir=tmp_data_dir,
+        logger=None,
+        shard_index=0,
+        router_replicas=1,
+    )
+
+    # Usamos un client_id fijo para que todas las piezas calcen
+    client_id = str(uuid.uuid4())
+
+    # 1) Cache de menu_items (no lo usamos en Q4, pero es simétrico al flujo real)
     m = NewMenuItems()
     m.rows = [
         RawMenuItems(
@@ -18,12 +63,16 @@ def _mk_menu_db():
             available_to="",
         )
     ]
-    from tests.conftest import _db_with
+    worker._on_raw_menu(
+        _db_bytes(
+            m, table_ids=[Opcodes.NEW_MENU_ITEMS], query_ids=[], client_id=client_id
+        )
+    )
+    worker._on_raw_menu(
+        _eof_bytes("menu_items", client_id)
+    )  # marca phase ready para tablas que dependen
 
-    return _db_with(m, table_ids=[Opcodes.NEW_MENU_ITEMS])
-
-
-def _mk_stores_db():
+    # 2) Cache de stores (sí lo usamos para Q3/Q4 join)
     s = NewStores()
     s.rows = [
         RawStore(
@@ -37,30 +86,64 @@ def _mk_stores_db():
             longitude="0",
         )
     ]
-    from tests.conftest import _db_with
-
-    return _db_with(s, table_ids=[Opcodes.NEW_STORES])
-
-
-def test_disk_kv_persists_caches(tmp_data_dir, fake_out, empty_inputs):
-    worker = JoinerWorker(
-        in_mw=empty_inputs,
-        out_results_mw=fake_out,
-        data_dir=tmp_data_dir,
-        logger=None,
-        shard_index=0,
+    worker._on_raw_stores(
+        _db_bytes(s, table_ids=[Opcodes.NEW_STORES], query_ids=[], client_id=client_id)
     )
+    worker._on_raw_stores(_eof_bytes("stores", client_id))  # phase ready para TX
 
-    # cache menu y stores
-    worker._on_raw_menu(_mk_menu_db())
-    worker._on_raw_stores(_mk_stores_db())
+    # 3) Envía un batch de transactions con Q4 (user_id con pocas compras)
+    tx = NewTransactions()
+    tx.rows = [
+        RawTransaction(
+            transaction_id="T-001",
+            store_id="S1",
+            payment_method_id="pm-1",
+            original_amount="10.00",
+            discount_applied="0.00",
+            final_amount="12.34",
+            created_at="2025-01-15T10:00:00Z",
+            user_id="U1",
+            voucher_id="v-1",
+        )
+    ]
+    raw_tx = _db_bytes(
+        tx,
+        table_ids=[Opcodes.NEW_TRANSACTION],
+        query_ids=[4],  # Q4
+        client_id=client_id,
+        batch_number=7,
+    )
+    worker._on_raw_tx(raw_tx)
 
-    # Leemos del DiskKV directamente (como haría otro proceso/instancia)
-    menu_idx = worker._store.get("menu_items", "full")
-    stores_idx = worker._store.get("stores", "full")
+    # 4) Verifica que el FastSpool tenga la key {client}:{uid} y el contenido esperado
+    key_prefix = f"{client_id}:"
+    keys = worker._store.keys_with_prefix("q4_by_user")
+    # puede haber más keys de otros tests, filtramos por cliente
+    keys = [k for k in keys if k.startswith(key_prefix)]
+    assert (
+        f"{client_id}:U1" in keys
+    ), f"no se encontró la key esperada en el spool: {keys}"
 
-    assert isinstance(menu_idx, dict) and "A" in menu_idx
-    assert menu_idx["A"].name == "Americano"
+    items = worker._store.pop_all("q4_by_user", f"{client_id}:U1")
+    assert len(items) == 1, f"esperaba un solo chunk por usuario; got={len(items)}"
 
-    assert isinstance(stores_idx, dict) and "S1" in stores_idx
-    assert stores_idx["S1"].store_name == "1st Ave"
+    template_raw, lst = items[0]
+    # lst debe ser la lista de RawTransactionStore que salió del join TX×Store
+    assert isinstance(lst, list) and len(lst) == 1
+    joined = lst[0]
+    # checks fuertes sobre el join
+    assert joined.transaction_id == "T-001"
+    assert joined.store_id == "S1"
+    assert joined.store_name == "1st Ave"
+    assert joined.user_id == "U1"
+    assert joined.final_amount == "12.34"
+    assert joined.city == "Metropolis"
+    assert joined.created_at == "2025-01-15T10:00:00Z"
+
+    # template_raw debe ser un DataBatch serializado que sirve de plantilla
+    out_db = DataBatch.deserialize_from_bytes(template_raw)
+    # sin filas (metadata_only), pero conserva batch_number/meta/batch_status del original
+    assert getattr(out_db.batch_msg, "rows", []) == []
+    assert out_db.batch_number == 7
+    # y dejó copiado el meta con info de copies (total/index)
+    assert isinstance(out_db.meta, dict) and len(out_db.meta) >= 1

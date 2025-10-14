@@ -4,7 +4,8 @@ Entry point for the Filter Worker service.
 """
 import logging
 import os
-import time
+import signal
+import threading
 
 from worker import FilterWorker
 
@@ -17,10 +18,18 @@ def main():
         level=getattr(logging, log_level),
         format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
     )
-
     logger = logging.getLogger("filter-worker-main")
-    logger.info("Starting Filter Worker...")
 
+    stop_event = threading.Event()
+
+    def shutdown_handler(*_a):
+        logger.info("Shutdown signal received. Initiating graceful shutdown...")
+        stop_event.set()
+
+    signal.signal(signal.SIGINT, shutdown_handler)
+    signal.signal(signal.SIGTERM, shutdown_handler)
+
+    logger.info("Starting Filter Worker...")
     cfg_path = os.getenv("CONFIG_PATH", "./config/config.ini")
     cfg = Config(cfg_path)
 
@@ -34,6 +43,7 @@ def main():
     logger.info(f"Input queue (filters pool): {filters_pool_queue}")
     logger.info(f"Output exchange (router input): {router_exchange}")
 
+    worker = None
     try:
         worker = FilterWorker(
             host=rabbitmq_host,
@@ -41,22 +51,20 @@ def main():
             out_router_exchange=router_exchange,
             out_router_rk_fmt=router_rk_fmt,
             num_routers=num_routers,
+            stop_event=stop_event,
         )
 
-        logger.info("Filter Worker started successfully")
         worker.run()
+        logger.info("Filter Worker is running. Press Ctrl+C to exit.")
+        stop_event.wait()
 
-        try:
-            while True:
-                time.sleep(1)
-        except KeyboardInterrupt:
-            logger.info("Shutting down Filter Worker...")
-
-    except KeyboardInterrupt:
-        logger.info("Shutting down Filter Worker...")
     except Exception as e:
-        logger.error(f"Error in Filter Worker: {e}")
-        raise
+        logger.error(f"An unexpected error occurred: {e}", exc_info=True)
+    finally:
+        logger.info("Cleaning up resources...")
+        if worker:
+            worker.shutdown()
+        logger.info("Graceful shutdown complete. Exiting.")
 
 
 if __name__ == "__main__":

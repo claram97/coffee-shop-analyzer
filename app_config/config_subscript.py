@@ -26,7 +26,13 @@ def _read_workers(cp: configparser.ConfigParser):
     filters = cp.getint("filters", "workers", fallback=1)
     aggregators = cp.getint("aggregators", "workers", fallback=1)
     joiners = cp.getint("joiners", "workers", fallback=1)
-    return {"filters": filters, "aggregators": aggregators, "joiners": joiners}
+    finishers = cp.getint("results", "workers", fallback=1)
+    return {
+        "filters": filters,
+        "aggregators": aggregators,
+        "joiners": joiners,
+        "finishers": finishers,
+    }
 
 
 def _read_broker(cp: configparser.ConfigParser):
@@ -52,17 +58,19 @@ def _read_broker(cp: configparser.ConfigParser):
 def _read_routers(cp: configparser.ConfigParser):
     filter = cp.getint("filters", "routers", fallback=1)
     joiner = cp.getint("joiners", "routers", fallback=1)
-    return {"fr_routers": filter, "j_routers": joiner}
+    finisher = cp.getint("results", "routers", fallback=1)
+    return {"fr_routers": filter, "j_routers": joiner, "results_routers": finisher}
 
 
 def cmd_workers(cp: configparser.ConfigParser, fmt: str):
     w = _read_workers(cp)
     if fmt == "plain":
-        print(w["filters"], w["aggregators"], w["joiners"])
+        print(w["filters"], w["aggregators"], w["joiners"], w["finishers"])
     elif fmt == "env":
         print(f"FILTERS={w['filters']}")
         print(f"AGGREGATORS={w['aggregators']}")
         print(f"JOINERS={w['joiners']}")
+        print(f"FINISHERS={w['finishers']}")
     else:
         _die(f"unknown format: {fmt}")
 
@@ -94,10 +102,11 @@ def cmd_broker(cp: configparser.ConfigParser, fmt: str):
 def cmd_routers(cp: configparser.ConfigParser, fmt: str):
     w = _read_routers(cp)
     if fmt == "plain":
-        print(w["fr_routers"], w["j_routers"])
+        print(w["fr_routers"], w["j_routers"], w["results_routers"])
     elif fmt == "env":
         print(f"FR_ROUTERS={w['fr_routers']}")
         print(f"J_ROUTERS={w['j_routers']}")
+        print(f"RESULTS_ROUTERS={w['results_routers']}")
     else:
         _die(f"unknown format: {fmt}")
 
@@ -110,8 +119,10 @@ def cmd_all_env(cp: configparser.ConfigParser):
         f"FILTERS={w['filters']}",
         f"AGGREGATORS={w['aggregators']}",
         f"JOINERS={w['joiners']}",
+        f"FINISHERS={w['finishers']}",
         f"FR_ROUTERS={r['fr_routers']}",
         f"J_ROUTERS={r['j_routers']}",
+        f"RESULTS_ROUTERS={r['results_routers']}",
         f"RABBIT_HOST={b['host']}",
         f"RABBIT_PORT={b['port']}",
         f"RABBIT_MGMT_PORT={b['management_port']}",
@@ -135,11 +146,13 @@ def main():
     sub = p.add_subparsers(dest="cmd", required=True)
 
     spw = sub.add_parser(
-        "workers", help="Print worker counts (filters, aggregators, joiners)"
+        "workers", help="Print worker counts (filters, aggregators, joiners, finishers)"
     )
     spw.add_argument("--format", choices=["plain", "env"], default="plain")
 
-    spr = sub.add_parser("routers", help="Print router counts (filter)")
+    spr = sub.add_parser(
+        "routers", help="Print router counts (filter, joiner, finisher)"
+    )
     spr.add_argument("--format", choices=["plain", "env"], default="env")
 
     spb = sub.add_parser("broker", help="Print RabbitMQ connection info")

@@ -31,6 +31,7 @@ def _setup_logging() -> None:
 
 _setup_logging()
 
+
 def current_step_from_mask(mask: int) -> Optional[int]:
     if mask == 0:
         return None
@@ -44,7 +45,8 @@ def current_step_from_mask(mask: int) -> Optional[int]:
 def _parse_dt_local(s: str) -> Optional[datetime]:
     try:
         return datetime.strptime(s, "%Y-%m-%d %H:%M:%S")
-    except Exception:
+    except Exception as e:
+        logger.error("error in hour_filter: %s", e)
         return None
 
 
@@ -68,7 +70,8 @@ def final_amount_filter(rows) -> List[Any]:
             continue
         try:
             amount = float(str(final_amount_raw).strip())
-        except (TypeError, ValueError):
+        except Exception as e:
+            logger.error("error in hour_filter: %s", e)
             continue
         if amount >= 75.0:
             kept.append(r)
@@ -82,7 +85,7 @@ def year_filter(rows, min_year: int = 2024, max_year: int = 2025) -> List[Any]:
         try:
             y = datetime.strptime(ts, "%Y-%m-%d %H:%M:%S").year
         except Exception as e:
-            logger.debug("exception while applying filter: %s", e)
+            logger.error("exception while applying year_filter: %s", e)
             continue
         if min_year <= y <= max_year:
             kept.append(r)
@@ -118,6 +121,7 @@ class FilterWorker:
         out_router_exchange: str,
         out_router_rk_fmt: str,
         num_routers: int,
+        stop_event: threading.Event,
         filters: FilterRegistry | None = None,
     ):
         self._host = host
@@ -130,6 +134,8 @@ class FilterWorker:
 
         self._pub_cache: Dict[str, MessageMiddlewareExchange] = {}
 
+        self._stop_event = stop_event
+
         logger.info(
             "FilterWorker inicializado | host=%s in_queue=%s out_exchange=%s rk_fmt=%s num_routers=%d",
             host,
@@ -138,6 +144,25 @@ class FilterWorker:
             out_router_rk_fmt,
             self._num_routers,
         )
+
+    def shutdown(self):
+        """Stops the consumer and closes all publisher connections."""
+        logger.info("Shutting down FilterWorker...")
+
+        try:
+            self._in.stop_consuming()
+            logger.info("Input consumer stopped.")
+        except Exception as e:
+            logger.warning(f"Error stopping input consumer: {e}")
+
+        for rk, pub in self._pub_cache.items():
+            try:
+                pub.close()
+            except Exception as e:
+                logger.warning(f"Error closing publisher for rk='{rk}': {e}")
+
+        self._pub_cache.clear()
+        logger.info("FilterWorker shutdown complete.")
 
     def _publisher_for_rk(self, rk: str) -> MessageMiddlewareExchange:
         pub = self._pub_cache.get(rk)
@@ -162,6 +187,9 @@ class FilterWorker:
         self._in.start_consuming(self._on_raw)
 
     def _on_raw(self, raw: bytes) -> None:
+        if self._stop_event.is_set():
+            logger.warning("Shutdown in progress, skipping message.")
+            return
         t0 = time.perf_counter()
         try:
             db = DataBatch.deserialize_from_bytes(raw)
@@ -215,7 +243,7 @@ class FilterWorker:
 
                     sample_data = [row.__dict__ for row in sample_rows]
 
-                    logging.info(
+                    logging.debug(
                         "action: batch_preview | batch_number: %d | opcode: %d | keys: %s | sample_count: %d | sample: %s",
                         getattr(inner, "batch_number", 0),
                         inner.opcode,
@@ -255,7 +283,7 @@ class FilterWorker:
 
             dt_ms = (time.perf_counter() - t0) * 1000
             if table_id == Opcodes.NEW_TRANSACTION:
-                logger.info(
+                logger.debug(
                     "Filtro aplicado y publicado | table_id=%s step=%s queries=%s rows_in=%d rows_out=%d latency_ms=%.2f filter=%s pid=%02d",
                     table_id,
                     step,

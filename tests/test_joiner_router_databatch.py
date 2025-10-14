@@ -53,7 +53,7 @@ def cfg_obj():
 
     class DummyCfg:
         names = DummyNames()
-        workers = type("W", (), {"joiners": 2})()
+        workers = type("W", (), {"joiners": 2, "aggregators": 1})()
         broker = type("B", (), {"host": "fake"})()
 
         def agg_partitions(self, table):
@@ -73,7 +73,7 @@ def cfg_obj():
 def test_shard_transactions(fake_pool, cfg_obj):
     pool, pubs = fake_pool.pool, fake_pool.pubs
     route_cfg = build_route_cfg_from_config(cfg_obj)
-    router = JoinerRouter(None, pool, route_cfg)
+    router = JoinerRouter(None, pool, route_cfg, fr_replicas=1)
 
     msg = NewTransactions()
     rows = [
@@ -115,7 +115,7 @@ def test_shard_transactions(fake_pool, cfg_obj):
 def test_broadcast_stores(fake_pool, cfg_obj):
     pool, pubs = fake_pool.pool, fake_pool.pubs
     route_cfg = build_route_cfg_from_config(cfg_obj)
-    router = JoinerRouter(None, pool, route_cfg)
+    router = JoinerRouter(None, pool, route_cfg, fr_replicas=1)
 
     msg = NewStores()
     rows = [{"store_id": "s1", "store_name": "store1", "city": "A"}]
@@ -143,7 +143,7 @@ def test_broadcast_stores(fake_pool, cfg_obj):
 def test_menu_items_broadcast_for_q2(fake_pool, cfg_obj):
     pool, pubs = fake_pool.pool, fake_pool.pubs
     route_cfg = build_route_cfg_from_config(cfg_obj)
-    router = JoinerRouter(None, pool, route_cfg)
+    router = JoinerRouter(None, pool, route_cfg, fr_replicas=1)
 
     msg = NewMenuItems()
     rows = [{"item_id": "i1", "item_name": "burger"}]
@@ -169,7 +169,7 @@ def test_menu_items_broadcast_for_q2(fake_pool, cfg_obj):
 def test_transaction_items_shard_by_item(fake_pool, cfg_obj):
     pool, pubs = fake_pool.pool, fake_pool.pubs
     route_cfg = build_route_cfg_from_config(cfg_obj)
-    router = JoinerRouter(None, pool, route_cfg)
+    router = JoinerRouter(None, pool, route_cfg, fr_replicas=1)
 
     msg = NewTransactionItems()
     rows = [

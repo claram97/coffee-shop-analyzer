@@ -20,11 +20,8 @@ while getopts "c:o:" opt; do
   esac
 done
 
-read FILTERS AGGS JOINERS < <(python3 ./app_config/config_subscript.py -c "$INI_PATH" workers --format=plain)
-read FR_ROUTERS J_ROUTERS < <(python3 ./app_config/config_subscript.py -c "$INI_PATH" routers --format=plain)
-
-echo "$FR_ROUTERS"
-echo "$J_ROUTERS"
+read FILTERS AGGS JOINERS FINISHERS < <(python3 ./app_config/config_subscript.py -c "$INI_PATH" workers --format=plain)
+read FR_ROUTERS J_ROUTERS RESULTS_ROUTERS < <(python3 ./app_config/config_subscript.py -c "$INI_PATH" routers --format=plain)
 
 eval "$(python3 ./app_config/config_subscript.py -c "$INI_PATH" broker --format=env)"
 
@@ -208,11 +205,15 @@ cat >> "$OUT_PATH" <<YAML
 YAML
 done
 
+FINISHER_QUEUES=$(printf "finisher_input_queue_%s," $(seq 0 $((FINISHERS-1))))
+FINISHER_QUEUES=${FINISHER_QUEUES%,}
+
 # --- results-router ---
+for i in $(seq 0 $((RESULTS_ROUTERS-1))); do
 cat >> "$OUT_PATH" <<YAML
 
-  results-router:
-    container_name: results-router
+  results-router-${i}:
+    container_name: results-router-${i}
     build:
       context: .
       dockerfile: results-finisher/Dockerfile.router
@@ -221,7 +222,7 @@ cat >> "$OUT_PATH" <<YAML
       - RABBITMQ_HOST=rabbitmq
       - LOG_LEVEL=INFO
       - INPUT_QUEUE=results.controller.in
-      - OUTPUT_QUEUES=finisher_input_queue_1,finisher_input_queue_2
+      - OUTPUT_QUEUES=${FINISHER_QUEUES}
     networks:
       - testing_net
     volumes:
@@ -230,9 +231,10 @@ cat >> "$OUT_PATH" <<YAML
       rabbitmq:
         condition: service_healthy
 YAML
+done
 
 # --- results-finishers (multiple instances) ---
-for i in 1 2; do
+for i in $(seq 0 $((FINISHERS-1))); do
 cat >> "$OUT_PATH" <<YAML
 
   results-finisher-${i}:
@@ -254,7 +256,7 @@ cat >> "$OUT_PATH" <<YAML
     depends_on:
       rabbitmq:
         condition: service_healthy
-      results-router:
+      results-router-0:
         condition: service_started
 YAML
 done
