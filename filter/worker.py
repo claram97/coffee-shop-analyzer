@@ -121,6 +121,7 @@ class FilterWorker:
         out_router_exchange: str,
         out_router_rk_fmt: str,
         num_routers: int,
+        stop_event: threading.Event,
         filters: FilterRegistry | None = None,
     ):
         self._host = host
@@ -133,6 +134,8 @@ class FilterWorker:
 
         self._pub_cache: Dict[str, MessageMiddlewareExchange] = {}
 
+        self._stop_event = stop_event
+
         logger.info(
             "FilterWorker inicializado | host=%s in_queue=%s out_exchange=%s rk_fmt=%s num_routers=%d",
             host,
@@ -141,6 +144,25 @@ class FilterWorker:
             out_router_rk_fmt,
             self._num_routers,
         )
+
+    def shutdown(self):
+        """Stops the consumer and closes all publisher connections."""
+        logger.info("Shutting down FilterWorker...")
+
+        try:
+            self._in.stop_consuming()
+            logger.info("Input consumer stopped.")
+        except Exception as e:
+            logger.warning(f"Error stopping input consumer: {e}")
+
+        for rk, pub in self._pub_cache.items():
+            try:
+                pub.close()
+            except Exception as e:
+                logger.warning(f"Error closing publisher for rk='{rk}': {e}")
+
+        self._pub_cache.clear()
+        logger.info("FilterWorker shutdown complete.")
 
     def _publisher_for_rk(self, rk: str) -> MessageMiddlewareExchange:
         pub = self._pub_cache.get(rk)
@@ -165,6 +187,9 @@ class FilterWorker:
         self._in.start_consuming(self._on_raw)
 
     def _on_raw(self, raw: bytes) -> None:
+        if self._stop_event.is_set():
+            logger.warning("Shutdown in progress, skipping message.")
+            return
         t0 = time.perf_counter()
         try:
             db = DataBatch.deserialize_from_bytes(raw)

@@ -1,4 +1,3 @@
-# filter_router.py
 from __future__ import annotations
 
 import copy
@@ -367,6 +366,24 @@ class ExchangeBusProducer:
         self._base_backoff_ms = int(base_backoff_ms)
         self._backoff_multiplier = float(backoff_multiplier)
 
+    def shutdown(self):
+        """Closes all active publisher connections."""
+        self._log.info("Shutting down ExchangeBusProducer...")
+
+        try:
+            self._filters_pub.close()
+        except Exception as e:
+            self._log.warning(f"Error closing filters_pool publisher: {e}")
+
+        for pub in self._pub_cache.values():
+            try:
+                pub.close()
+            except Exception as e:
+                self._log.warning(f"Error closing cached publisher for key {pub}: {e}")
+
+        self._pub_cache.clear()
+        self._log.info("ExchangeBusProducer shutdown complete.")
+
     def _key_for(self, table: str, pid: int) -> tuple[str, str]:
         ex = self._exchange_fmt.format(table=table)
         rk = self._rk_fmt.format(table=table, pid=pid)
@@ -519,17 +536,24 @@ class RouterServer:
         producer: ExchangeBusProducer,
         policy: QueryPolicyResolver,
         table_cfg: TableConfig,
+        stop_event: threading.Event,
     ):
+        self._producer = producer
         self._mw_in = router_in
         self._router = FilterRouter(
             producer=producer, policy=policy, table_cfg=table_cfg
         )
         self._log = logging.getLogger("filter-router-server")
+        self._stop_event = stop_event
 
     def run(self) -> None:
         self._log.debug("RouterServer starting consume")
 
         def _cb(body: bytes):
+            if self._stop_event.is_set():
+                self._log.warning("Shutdown in progress, skipping incoming message.")
+                return
+
             try:
                 if len(body) < 1:
                     self._log.error("Received empty message")
@@ -546,6 +570,8 @@ class RouterServer:
                     self._log.warning(f"Unwanted message opcode: {opcode}")
             except Exception as e:
                 self._log.exception("Error in router callback: %s", e)
+            except Exception as e:
+                self._log.exception("Error in router callback: %s", e)
 
         try:
             self._mw_in.start_consuming(_cb)
@@ -554,7 +580,18 @@ class RouterServer:
             self._log.exception("start_consuming failed: %s", e)
 
     def stop(self) -> None:
+        """Stops the consumer and shuts down the producer."""
+        self._log.info("Stopping Filter Router Server...")
+
         try:
             self._mw_in.stop_consuming()
-        except Exception:
-            pass
+            self._log.info("Input consumer stopped.")
+        except Exception as e:
+            self._log.warning(f"Error stopping input consumer: {e}")
+
+        try:
+            self._producer.shutdown()
+        except Exception as e:
+            self._log.warning(f"Error during producer shutdown: {e}")
+
+        self._log.info("Filter Router Server stopped.")

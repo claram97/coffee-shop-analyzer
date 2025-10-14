@@ -3,8 +3,9 @@ from __future__ import annotations
 import argparse
 import logging
 import os
+import signal
 import sys
-import time
+import threading
 
 from router import ExchangeBusProducer, QueryPolicyResolver, RouterServer, TableConfig
 
@@ -31,12 +32,16 @@ def resolve_config_path(cli_value: str | None) -> str:
     return os.path.abspath(candidates[0])
 
 
-def build_filter_router_from_config(cfg: Config) -> RouterServer:
+def build_filter_router_from_config(
+    cfg: Config, stop_event: threading.Event
+) -> RouterServer:
     pid = int(os.environ["FILTER_ROUTER_INDEX"])
     router_in = MessageMiddlewareExchange(
         host=cfg.broker.host,
         exchange_name=cfg.names.orch_to_fr_exchange,
         route_keys=[cfg.orchestrator_rk(pid)],
+        consumer=True,
+        queue_name=f"filter_router_in_{pid}",
     )
     producer = ExchangeBusProducer(
         host=cfg.broker.host,
@@ -53,6 +58,7 @@ def build_filter_router_from_config(cfg: Config) -> RouterServer:
         producer=producer,
         policy=policy,
         table_cfg=table_cfg,
+        stop_event=stop_event,  # Pass the event here
     )
     return server
 
@@ -71,24 +77,33 @@ def main():
 
     cfg_path = resolve_config_path(args.config)
     if not os.path.exists(cfg_path):
-        print(f"[filter-router] config no encontrado: {cfg_path}", file=sys.stderr)
+        print("[filter-router] config no encontrado: %s", cfg_path, file=sys.stderr)
         sys.exit(2)
 
-    log.info(f"Usando config: {cfg_path}")
+    log.info("Usando config: %s", cfg_path)
 
     try:
         cfg = Config(cfg_path)
     except ConfigError as e:
-        print(f"[filter-router] no pude cargar config: {e}", file=sys.stderr)
+        print("[filter-router] no pude cargar config: %s", e, file=sys.stderr)
         sys.exit(2)
+    stop_event = threading.Event()
 
-    server = build_filter_router_from_config(cfg)
-    server.run()
+    def shutdown_handler(*_a):
+        log.info("Shutdown signal received. Initiating graceful shutdown...")
+        stop_event.set()
+
+    signal.signal(signal.SIGINT, shutdown_handler)
+    signal.signal(signal.SIGTERM, shutdown_handler)
+    server = build_filter_router_from_config(cfg, stop_event)
     try:
-        while True:
-            time.sleep(1)
-    except KeyboardInterrupt:
-        pass
+        server.run()
+        log.info("Filter router is running. Press Ctrl+C to exit.")
+        stop_event.wait()
+    finally:
+        log.info("Cleaning up resources...")
+        server.stop()
+        log.info("Graceful shutdown complete. Exiting.")
 
 
 if __name__ == "__main__":
