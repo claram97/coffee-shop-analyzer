@@ -51,7 +51,7 @@ def _serialize_row(row: Any, metadata: Sequence[Tuple[str, bytes]]) -> bytes:
 
 
 def serialize_data(
-    rows: List[Any], # Now expects a list of raw objects
+    rows: List[Any], 
     batch_number: int,
     batch_status: int,
     required_keys: Tuple[str, ...],
@@ -68,7 +68,6 @@ def serialize_data(
 
     metadata = _get_key_metadata(required_keys)
 
-    # PERFORMANCE: This list comprehension over raw objects is highly efficient.
     all_row_bytes = [_serialize_row(row, metadata) for row in rows]
     body.extend(b"".join(all_row_bytes))
 

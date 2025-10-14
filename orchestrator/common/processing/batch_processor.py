@@ -4,7 +4,7 @@ into filtered, serialized, and wrapped DataBatch messages for downstream process
 """
 
 import logging
-from time import perf_counter
+from time import perf_counter, process_time # Import process_time
 from typing import Dict, List
 
 from protocol.constants import Opcodes
@@ -73,19 +73,21 @@ class BatchProcessor:
 
     def create_filtered_data_batch(self, original_msg, client_id: str) -> DataBatch:
         """
-        Creates a fully-formed `DataBatch` from an original data message.
+        Creates a fully-formed `DataBatch` and logs detailed wall vs. CPU timing
+        to diagnose performance spikes.
         """
-        # --- ROBUSTNESS: Add validation check to prevent crashes from bad data ---
-        if original_msg.rows is None:
+        if not hasattr(original_msg, 'rows') or original_msg.rows is None:
             logging.error(
-                "action: process_batch | result: skip | reason: 'rows' attribute is None | "
+                "action: process_batch | result: skip | reason: 'rows' attribute is missing or None | "
                 "opcode: %d | batch_number: %d",
                 original_msg.opcode,
                 original_msg.batch_number
             )
-            return None # Stop processing this invalid batch
+            return None
 
-        timing_start = perf_counter()
+        # --- Start Detailed Timing ---
+        wall_start = perf_counter()
+        cpu_start = process_time()
 
         opcode = original_msg.opcode
         query_ids = self.get_query_ids_for_opcode(opcode)
@@ -102,8 +104,7 @@ class BatchProcessor:
 
         table_name = self.get_table_name_for_opcode(opcode)
 
-        # --- PERFORMANCE: Directly serialize from the original raw objects ---
-        # This avoids creating a costly intermediate list of dictionaries.
+        # --- Step 1: Serialize Data ---
         inner_body = serialize_data(
             original_msg.rows,
             original_msg.batch_number,
@@ -111,49 +112,41 @@ class BatchProcessor:
             tuple(columns_to_keep),
             table_name
         )
-        timing_after_serialize = perf_counter()
+        wall_after_serialize = perf_counter()
+        cpu_after_serialize = process_time()
 
-        # Filtering is now only done once for backward compatibility,
-        # not on the main performance path.
-        filtered_rows_for_compat = filter_columns(original_msg.rows, columns_to_keep)
-
+        # --- Step 2: Embed Data ---
         batch_bytes = DataBatch.make_embedded(
             inner_opcode=opcode, inner_body=inner_body
         )
-        timing_after_embedding = perf_counter()
+        wall_after_embedding = perf_counter()
+        cpu_after_embedding = process_time()
 
-        self.log_data_batch_creation(
-            original_msg, query_ids, filtered_rows_for_compat, inner_body, batch_bytes
-        )
-        self.log_filtered_sample(original_msg, filtered_rows_for_compat)
-
+        # --- Step 3: Create Wrapper Object ---
         wrapper = self.create_data_batch_wrapper(
             original_msg, query_ids, batch_bytes, client_id=client_id
         )
-        timing_after_wrapper = perf_counter()
+        wall_after_wrapper = perf_counter()
+        cpu_after_wrapper = process_time()
 
-        self.add_backward_compatibility_data(wrapper, original_msg, filtered_rows_for_compat)
-        timing_after_backward = perf_counter()
-
-        self.log_data_batch_ready(original_msg)
-
-        # Updated timing log to reflect the new processing flow
+        # --- Log Enhanced Timing Metrics ---
         logging.info(
             "action: batch_processor_timing | table: %s | batch_number: %d | "
-            "total_ms: %.3f | serialize_ms: %.3f | embedding_ms: %.3f | "
-            "wrapper_ms: %.3f | backward_fill_ms: %.3f",
+            "total_wall_ms: %.3f | total_cpu_ms: %.3f | "
+            "serialize_wall_ms: %.3f | serialize_cpu_ms: %.3f | "
+            "embedding_wall_ms: %.3f | wrapper_wall_ms: %.3f",
             table_name,
             original_msg.batch_number,
-            (timing_after_backward - timing_start) * 1000,
-            (timing_after_serialize - timing_start) * 1000,
-            (timing_after_embedding - timing_after_serialize) * 1000,
-            (timing_after_wrapper - timing_after_embedding) * 1000,
-            (timing_after_backward - timing_after_wrapper) * 1000,
+            (wall_after_wrapper - wall_start) * 1000,
+            (cpu_after_wrapper - cpu_start) * 1000,
+            (wall_after_serialize - wall_start) * 1000,
+            (cpu_after_serialize - cpu_start) * 1000,
+            (wall_after_embedding - wall_after_serialize) * 1000,
+            (wall_after_wrapper - wall_after_embedding) * 1000,
         )
 
         return wrapper
-
-    # --- HELPER METHODS (Unchanged but still essential) ---
+    
     def log_data_batch_creation(self, original_msg, query_ids, filtered_rows, inner_body, batch_bytes):
         table_name = self.get_table_name_for_opcode(original_msg.opcode)
         logging.debug(

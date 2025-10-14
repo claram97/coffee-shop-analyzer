@@ -23,6 +23,4 @@ def filter_columns(rows: List[Any], columns_to_keep: List[str]) -> List[Dict[str
         A new list of dictionaries, where each dictionary contains only the
         specified key-value pairs.
     """
-    # Using a list comprehension is the most idiomatic and performant
-    # way to accomplish this in pure Python.
     return [{col: getattr(row, col) for col in columns_to_keep} for row in rows]
