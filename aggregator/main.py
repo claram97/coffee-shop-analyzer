@@ -1,5 +1,6 @@
 import logging
 import os
+import signal
 import time
 from configparser import ConfigParser
 
@@ -68,13 +69,17 @@ def main():
         f"aggregator_id: {aggregator_id}"
     )
 
+    def signal_handler(signum, _frame):
+        logging.info(f"Received signal {signum}, initiating graceful shutdown...")
+        if 'server' in locals():
+            server.stop()
+
+    signal.signal(signal.SIGTERM, signal_handler)
+    signal.signal(signal.SIGINT, signal_handler)
+
     server = Aggregator(aggregator_id)
     server.run()
-    try:
-        while True:
-            time.sleep(1)
-    except KeyboardInterrupt:
-        pass
+    signal.pause()
 
 
 def initialize_log(logging_level):

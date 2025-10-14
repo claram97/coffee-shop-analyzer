@@ -200,8 +200,8 @@ class ResultsConsumer:
             if len(self.queries_sent[client_id]) == 4:  # Chequear por cliente
                 logging.info("action: all_queries_sent | result: success | unregistering_client")
                 finished_msg = Finished()
-                finished_msg.agency_id = 0  # Setear agency_id (puedes derivarlo de client_id si necesitas)
                 client_conn.sendall(finished_msg.to_bytes())
+                client_conn.close()  # Cerrar la conexión después de enviar FINISHED
                 self.unregister_client(client_id)
         except Exception as e:
             logging.error(f"action: forward_result | result: fail | query_id: {query_id} | error: {str(e)}")

@@ -153,23 +153,6 @@ class Orchestrator:
         except Exception as e:
             return ResponseHandler.handle_processing_error(msg, client_sock, e)
 
-    # def register_client_for_query(self, query_id, client_sock):
-    #     self.results_consumer.register_client_for_query(query_id, client_sock)
-    #     logging.info("action: client_registered_for_query | query_id: %s", query_id)
-
-    # def _process_query_request(self, msg, client_sock) -> bool:
-    #     try:
-    #         query_id = str(msg.opcode)
-    #         self.register_client_for_query(query_id, client_sock)
-    #         ResponseHandler.send_success(client_sock)
-    #         logging.info("action: query_request_received | query_id: %s", query_id)
-    #         return True
-    #     except Exception as e:
-    #         logging.error(
-    #             "action: query_request_processing | result: fail | error: %s", e
-    #         )
-    #         return ResponseHandler.handle_processing_error(msg, client_sock, e)
-
     def _process_filtered_batch(self, msg, status_text: str):
         """Filtra, empaqueta y publica el DataBatch al exchange del Filter Router."""
         try:

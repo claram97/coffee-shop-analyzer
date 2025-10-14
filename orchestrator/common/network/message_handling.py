@@ -89,7 +89,8 @@ class MessageHandler:
         if self.is_data_message(msg):
             return self._handle_data_message(msg, client_sock)
         elif msg.opcode == Opcodes.FINISHED:
-            return False
+            logging.info("action: client_finished | result: received")
+            return True
 
         logging.warning(
             "action=handle_message result=unknown_opcode opcode=%d", msg.opcode
