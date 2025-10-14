@@ -3,8 +3,8 @@ package common
 import (
 	"bufio"
 	"context"
-	"encoding/json"
 	"encoding/binary"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -53,9 +53,7 @@ func (rh *ResponseHandler) handleResponseMessage(msg interface{}) {
 	// Use type assertion to access the GetOpCode() method
 	if respMsg, ok := msg.(interface{ GetOpCode() byte }); ok {
 		opcode := respMsg.GetOpCode()
-		if opcode != protocol.BatchRecvSuccessOpCode && opcode != protocol.BatchRecvFailOpCode {
-			rh.log.Infof("action: response_received | where: response_handling | opcode: %d", opcode)
-		}
+
 		switch opcode {
 		case protocol.BatchRecvSuccessOpCode:
 			rh.log.Debug("action: batch_enviado | result: success")
@@ -76,6 +74,9 @@ func (rh *ResponseHandler) handleResponseMessage(msg interface{}) {
 			} else {
 				rh.log.Warning("action: response_received | result: unexpected_format | type: databatch")
 			}
+		case protocol.OpCodeFinished:
+			rh.log.Info("action: finished_received | result: success")
+			rh.conn.Close()
 		}
 	}
 }
@@ -220,10 +221,6 @@ func (rh *ResponseHandler) responseReaderLoop(reader *bufio.Reader) {
 			}
 			continue
 		}
-		opcode := msg.(interface{ GetOpCode() byte }).GetOpCode()
-		if opcode != protocol.BatchRecvSuccessOpCode && opcode != protocol.BatchRecvFailOpCode {
-			rh.log.Infof("action: response_received | where: response_reading_loop| opcode: %d", opcode)
-		}
 
 		rh.handleResponseMessage(msg)
 	}
@@ -269,22 +266,16 @@ func NewFinishedMessageSender(conn net.Conn, clientID string, logger *logging.Lo
 	}
 }
 
-// SendFinished sends FINISHED message with the numeric agency ID.
+// SendFinished sends an empty FINISHED message.
 // It logs success or failure for each write. On any serialization/I/O error it logs and returns.
 func (fms *FinishedMessageSender) SendFinished() {
-	agencyID, err := deriveFinishedAgencyID(fms.clientID)
-	if err != nil {
-		fms.log.Warningf("action: send_finished | result: skip | reason: %v", err)
-		return
-	}
-
-	finishedMsg := protocol.Finished{AgencyId: agencyID}
+	finishedMsg := protocol.Finished{}
 	if _, err := finishedMsg.WriteTo(fms.conn); err != nil {
 		fms.log.Errorf("action: send_finished | result: fail | error: %v", err)
 		return
 	}
 
-	fms.log.Infof("action: send_finished | result: success | agencyId: %d", agencyID)
+	fms.log.Infof("action: send_finished | result: success")
 }
 
 func deriveFinishedAgencyID(rawID string) (int32, error) {

@@ -170,7 +170,7 @@ class Aggregator:
         for exchange in self._exchanges.values():
             exchange.stop_consuming()
 
-        for queue in self._out_queues:
+        for queue in self._out_queues.values():
             queue.close()
 
         logging.info("Aggregator server stopped")
