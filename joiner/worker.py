@@ -1,4 +1,3 @@
-# joiner/worker.py
 from __future__ import annotations
 
 import copy
@@ -55,96 +54,6 @@ def _eof_table_id(eof) -> Optional[int]:
     return NAME_TO_ID[s]
 
 
-class _Shard:
-    __slots__ = ("path", "wlock", "rlock", "wfh", "rfh", "index")
-
-    def __init__(self, path: str):
-        self.path = path
-        os.makedirs(os.path.dirname(path), exist_ok=True)
-        self.wfh = open(path, "ab", buffering=1024 * 1024)
-        self.rfh = open(path, "rb", buffering=1024 * 1024)
-        self.wlock = threading.Lock()
-        self.rlock = threading.Lock()
-        self.index: Dict[str, List[_RecordPtr]] = defaultdict(list)
-
-    def close(self):
-        try:
-            self.wfh.close()
-        except Exception:
-            pass
-        try:
-            self.rfh.close()
-        except Exception:
-            pass
-
-
-class FastSpool:
-    """
-    Append-only binario shardeado por uid, client_id.
-    """
-
-    def __init__(self, root_dir: str, shards: int = 64):
-        self._root = root_dir
-        self._shards = max(1, int(shards))
-        self._table = [
-            _Shard(os.path.join(root_dir, f"spool-{i:02d}.dat"))
-            for i in range(self._shards)
-        ]
-        self._keys_lock = threading.Lock()
-        self._keys: Dict[int, set[str]] = {i: set() for i in range(self._shards)}
-        self._hdr = struct.Struct("<I")
-
-    def _shard_of(self, key: str) -> int:
-        h = hashlib.blake2b(key.encode("utf-8"), digest_size=2).digest()
-        return int.from_bytes(h, "little") % self._shards
-
-    def append_list(self, key: str, value_item: Any) -> None:
-        payload = pickle.dumps(value_item, protocol=5)
-        hdr = self._hdr.pack(len(payload))
-        sid = self._shard_of(key)
-        shard = self._table[sid]
-        with shard.wlock:
-            off = shard.wfh.tell()
-            shard.wfh.write(hdr)
-            shard.wfh.write(payload)
-            shard.wfh.flush()
-            shard.index[key].append((off, len(hdr) + len(payload)))
-        with self._keys_lock:
-            self._keys[sid].add(key)
-
-    def pop_all(self, key: str) -> List[Any]:
-        sid = self._shard_of(key)
-        shard = self._table[sid]
-        with shard.wlock:
-            ptrs = shard.index.pop(key, None)
-            if not ptrs:
-                with self._keys_lock:
-                    self._keys[sid].discard(key)
-                return []
-        out: List[Any] = []
-        with shard.rlock:
-            for off, _length in ptrs:
-                shard.rfh.seek(off)
-                size = self._hdr.unpack(shard.rfh.read(self._hdr.size))[0]
-                buf = shard.rfh.read(size)
-                out.append(pickle.loads(buf))
-        with self._keys_lock:
-            self._keys[sid].discard(key)
-        return out
-
-    def keys_with_prefix(self) -> List[str]:
-        with self._keys_lock:
-            keys = []
-            for s in range(self._shards):
-                if self._keys[s]:
-                    keys.extend(self._keys[s])
-            return keys
-
-    def close(self):
-        for s in self._table:
-            s.close()
-
-
 def norm(v) -> str:
     return "" if v is None else str(v)
 
@@ -183,7 +92,6 @@ class JoinerWorker:
         self._out = out_results_mw
         self._out_factory = out_factory
         self._out_lock = threading.Lock()
-        self._store = FastSpool(os.path.join(data_dir, "joiner.shelve"), shards=64)
 
         self._cache_stores: Dict[str, Dict[str, RawStore]] = {}
         self._cache_menu: Dict[str, Dict[str, RawMenuItems]] = {}
@@ -236,11 +144,6 @@ class JoinerWorker:
             self._out.close()
         except Exception as e:
             self._log.warning("Error closing outbound middleware: %s", e)
-
-        try:
-            self._store.close()
-        except Exception as e:
-            self._log.warning("Error closing data store: %s", e)
 
         self._log.info("JoinerWorker shutdown complete.")
 
@@ -502,14 +405,15 @@ class JoinerWorker:
             return
 
         qset = queries_set(db)
+
+        if Q1 in qset:
+            self._log.debug("TX Q1 passthrough")
+            self._send(db)
+            return
+
         tx_rows: List[RawTransaction] = (
             (db.batch_msg.rows or []) if getattr(db, "batch_msg", None) else []
         )
-
-        if Q1 in qset:
-            self._log.debug("TX Q1 passthrough rows=%d", len(tx_rows))
-            self._send(db)
-            return
 
         stores_idx: Optional[Dict[str, RawStore]] = self._cache_stores.get((cid))
         if not stores_idx:
@@ -533,68 +437,16 @@ class JoinerWorker:
                     user_id=norm(getattr(tx, "user_id", "")),
                 )
             )
-
-        if Q3 in qset:
-            self._log.debug(
-                "JOIN Q3: in=%d matched=%d", len(tx_rows), len(joined_tx_st)
-            )
-            msg_join = NewTransactionStores()
-            msg_join.rows = joined_tx_st
-            batch_status = getattr(db.batch_msg, "batch_status", 0)
-            msg_join.batch_status = batch_status
-            self._log.debug("Q3 preserving TX batch_status=%d", batch_status)
-            db.table_ids = [Opcodes.NEW_TRANSACTION_STORES]
-            db.batch_msg = msg_join
-            self._send(db)
-            return
-
-        if Q4 in qset:
-            if not joined_tx_st:
-                self._log.info(
-                    "Q4: no TX×Store rows → forward vacío al finisher como *_STORES_USERS"
-                )
-                empty = NewTransactionStoresUsers()
-                empty.rows = []
-                empty.batch_status = getattr(db.batch_msg, "batch_status", 0)
-                db.table_ids = [Opcodes.NEW_TRANSACTION_STORES_USERS]
-                db.batch_msg = empty
-                self._send(db)
-                return
-            template = copy.copy(db)
-            metadata_only(template)
-
-            by_user: Dict[str, List[Any]] = defaultdict(list)
-            for r in joined_tx_st:
-                uid = norm(getattr(r, "user_id", ""))
-                uid = uid.split(".", maxsplit=1)[0] if uid.endswith(".0") else uid
-                by_user[uid].append(r)
-
-            total_users = len(by_user) if by_user else 0
-            self._log.debug(
-                "JOIN Q4 stage1: users=%d txxstore=%d", total_users, len(joined_tx_st)
-            )
-
-            total = total_users if total_users else 1
-            total_u8 = min(total, 255)
-
-            original_batch_status = getattr(db.batch_msg, "batch_status", 0)
-            template.batch_msg.batch_status = original_batch_status
-            self._log.debug(
-                "Q4 template preserving TX batch_status=%d for later User join",
-                original_batch_status,
-            )
-
-            for idx, (uid, lst) in enumerate(by_user.items()):
-                idx_u8 = idx % 256
-                template.meta[total_u8] = idx_u8
-                template.batch_bytes = template.batch_msg.to_bytes()
-                template_raw = template.to_bytes()
-                key = f"{cid}:{uid}"
-                self._store.append_list(key, (template_raw, lst))
-                self._log.debug(
-                    "Q4 stash key=%s rows=%d chunk=%d/%d", key, len(lst), idx + 1, total
-                )
-            return
+        self._log.debug("JOIN Q3: in=%d matched=%d", len(tx_rows), len(joined_tx_st))
+        msg_join = NewTransactionStores()
+        msg_join.rows = joined_tx_st
+        batch_status = getattr(db.batch_msg, "batch_status", 0)
+        msg_join.batch_status = batch_status
+        self._log.debug("Q3 preserving TX batch_status=%d", batch_status)
+        db.table_ids = [Opcodes.NEW_TRANSACTION_STORES]
+        db.batch_msg = msg_join
+        self._send(db)
+        return
 
         self._send(db)
 
@@ -604,11 +456,10 @@ class JoinerWorker:
             return
         if kind == "eof":
             eof: EOFMessage = msg
-            if self._on_table_eof(
+            self._on_table_eof(
                 _eof_table_id(eof),
                 getattr(eof, "client_id", ""),
-            ):
-                self._flush_remaining_q4_without_user(getattr(eof, "client_id", ""))
+            )
             return
         if kind != "db":
             return
@@ -629,51 +480,7 @@ class JoinerWorker:
             self._requeue(Opcodes.NEW_USERS, raw)
             return
 
-        users: List[RawUser] = (
-            (db.batch_msg.rows or []) if getattr(db, "batch_msg", None) else []
-        )
-
-        if Q4 in queries_set(db):
-            uidx = index_by_attr(users, "user_id")
-
-            for uid, u in uidx.items():
-                key = f"{cid}:{uid}"
-                items = self._store.pop_all(key)
-                if not items:
-                    continue
-
-                self._log.debug(
-                    "Q4 stage2 join key=%s pending_chunks=%d", key, len(items)
-                )
-                for template_raw, txst_rows in items:
-                    out_rows: List[RawTransactionStoreUser] = []
-                    for r in txst_rows:
-                        out_rows.append(
-                            RawTransactionStoreUser(
-                                transaction_id=r.transaction_id,
-                                store_id=r.store_id,
-                                store_name=r.store_name,
-                                user_id=uid,
-                                birthdate=norm(getattr(u, "birthdate", "")),
-                                created_at=r.created_at,
-                            )
-                        )
-
-                    out_db = DataBatch.deserialize_from_bytes(template_raw)
-                    msg_join = NewTransactionStoresUsers()
-                    msg_join.rows = out_rows
-                    batch_status = getattr(out_db.batch_msg, "batch_status", 0)
-                    msg_join.batch_status = batch_status
-                    self._log.debug(
-                        "Q4 preserving TX batch_status=%d from template during User join",
-                        batch_status,
-                    )
-                    out_db.table_ids = [Opcodes.NEW_TRANSACTION_STORES_USERS]
-                    out_db.batch_msg = msg_join
-                    self._log.debug(
-                        "Q4 out rows=%d for uid=%s cid=%s", len(out_rows), uid, cid
-                    )
-                    self._send(out_db)
+        self._send(db)
 
     def _on_table_eof(self, table_id: int, client_id: str) -> bool:
         key = (table_id, client_id)
@@ -704,28 +511,6 @@ class JoinerWorker:
             return True
 
         return False
-
-    def _flush_remaining_q4_without_user(self, client_id):
-        keys = self._store.keys_with_prefix()
-        if keys:
-            self._log.info("Flush Q4 sin user: keys_pendientes=%d", len(keys))
-        for key in keys:
-            if not key.startswith(f"{client_id}"):
-                continue
-            for template_raw, txst_rows in self._store.pop_all(key):
-                out_db = DataBatch.deserialize_from_bytes(template_raw)
-                msg_join = NewTransactionStoresUsers()
-                msg_join.rows = []
-
-                batch_status = getattr(out_db.batch_msg, "batch_status", 0)
-                msg_join.batch_status = batch_status
-                self._log.debug(
-                    "Q4 (sin user) preserving TX batch_status=%d from template",
-                    batch_status,
-                )
-                out_db.batch_msg = msg_join
-                self._log.info("Q4 (sin user) out rows=%d key=%s", len(txst_rows), key)
-                self._send(out_db)
 
     def _safe_send(self, raw: bytes):
         with self._out_lock:
