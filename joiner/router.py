@@ -4,6 +4,7 @@ import copy
 import hashlib
 import logging
 import threading
+from random import randint
 from typing import Any, Callable, Dict, List, Optional, Set, Tuple
 
 from app_config.config_loader import Config
@@ -218,7 +219,12 @@ class JoinerRouter:
         table_id = int(db.batch_msg.opcode)
         tname = ID_TO_NAME.get(table_id, f"#{table_id}")
         queries: List[int] = list(getattr(db, "query_ids", []) or [])
+
         cfg = self._cfg.get(table_id)
+
+        if 1 in queries:
+            self._publish(cfg, randint(0, cfg.joiner_shards - 1), raw)
+
         if cfg is None:
             log.warning("no route cfg for table=%s (%s)", tname, table_id)
             return
@@ -243,9 +249,9 @@ class JoinerRouter:
 
         for r in rows:
             k = _shard_key_for_row(table_id, r, queries)
-            if 1 not in queries and (k is None or not k.strip()):
+            if k is None or not k.strip():
                 continue
-            shard = 0 if k is None else _hash_to_shard(k, cfg.joiner_shards)
+            shard = _hash_to_shard(k, cfg.joiner_shards)
             buckets[shard].append(r)
 
         if log.isEnabledFor(logging.INFO):
@@ -255,10 +261,9 @@ class JoinerRouter:
         for shard, shard_rows in buckets.items():
             db_sh = copy.copy(db)
             db_sh.query_ids = db.query_ids
-            if 1 not in queries:
-                db_sh.shards_info = getattr(db, "shards_info", []) + [
-                    (cfg.joiner_shards, shard)
-                ]
+            db_sh.shards_info = getattr(db, "shards_info", []) + [
+                (cfg.joiner_shards, shard)
+            ]
             if getattr(db_sh, "batch_msg", None) and hasattr(db_sh.batch_msg, "rows"):
                 db_sh.batch_msg.rows = shard_rows
             db_sh.batch_bytes = db_sh.batch_msg.to_bytes()
