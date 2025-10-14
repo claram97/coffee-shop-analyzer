@@ -769,6 +769,13 @@ class Finished:
         if length != self._length:
             raise ProtocolError("invalid length", self.opcode)
 
+    def to_bytes(self) -> bytes:
+        """Serialize the FINISHED message to bytes: [opcode:u8][length:i32] with empty body."""
+        import struct
+        opcode_byte = struct.pack("<B", self.opcode)  # u8
+        length_bytes = struct.pack("<I", self._length)  # i32, length=0
+        return opcode_byte + length_bytes
+
 
 class ClientHello:
     """Inbound CLIENT_HELLO message carrying a 16-byte client UUID."""
