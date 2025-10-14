@@ -6,6 +6,7 @@ by writing the contents of messages to disk.
 import logging
 from typing import Any
 
+
 class MessageLogger:
     """
     Provides a utility for writing the detailed contents of network messages

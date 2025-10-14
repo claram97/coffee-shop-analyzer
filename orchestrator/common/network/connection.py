@@ -8,7 +8,7 @@ import socket
 import threading
 from typing import List, Callable, Optional
 
-from protocol.dispatcher import recv_msg, recv_raw_frame
+from protocol.dispatcher import recv_msg
 from protocol.constants import ProtocolError
 
 
@@ -76,16 +76,21 @@ class ConnectionManager:
                 raise OSError("Server stopped")
             raise
 
-    def create_client_thread(
-        self,
-        client_sock: socket.socket,
-        handshake_handler: Callable,
-        data_handler: Callable
-    ) -> threading.Thread:
-        """Creates a thread that runs the two-phase client handling logic."""
+    def create_client_thread(self, client_sock: socket.socket, message_handler: Callable) -> threading.Thread:
+        """
+        Creates, starts, and tracks a new thread to handle communication with a connected client.
+
+        Args:
+            client_sock: The socket object for the connected client.
+            message_handler: A callable that will be invoked to process messages
+                             received from this client.
+
+        Returns:
+            The newly created and started thread object.
+        """
         thread = threading.Thread(
             target=self._handle_client_connection,
-            args=(client_sock, handshake_handler, data_handler)
+            args=(client_sock, message_handler)
         )
         self._threads.append(thread)
         thread.start()
@@ -99,57 +104,54 @@ class ConnectionManager:
         for thread in self._threads:
             thread.join()
 
-    def _handle_client_connection(
-        self,
-        client_sock: socket.socket,
-        handshake_handler: Callable,
-        data_handler: Callable
-    ):
+    def _handle_client_connection(self, client_sock: socket.socket, message_handler: Callable):
         """
-        Handles a client connection in two distinct phases:
-        1.  Handshake: Processes the initial CLIENT_HELLO message.
-        2.  Data Pumping: Enters a fast loop to read raw frames and pass
-            them to the data handler.
-        """
-        client_id = None
-        try:
-            # --- PHASE 1: HANDSHAKE ---
-            # The handshake handler is responsible for reading the first message.
-            # It should return the client_id on success or None on failure.
-            client_id = handshake_handler(client_sock)
-            if not client_id:
-                # Handshake failed, handler should have logged it.
-                # The connection will be closed in the finally block.
-                return
+        The target function for a client handler thread.
 
-            # --- PHASE 2: DATA PUMPING ---
-            # If the handshake was successful, enter the fast loop.
-            while not self._stop.is_set():
-                # Use the ultra-lean raw frame receiver. No deserialization here.
-                raw_frame = recv_raw_frame(client_sock)
-                
-                # The data handler's only job is to queue the work.
-                # It returns False if the server wants to close the connection.
-                if not data_handler(raw_frame, client_id, client_sock):
+        Enters a loop to continuously receive and process messages from a single
+        client until the connection is closed, an error occurs, or the server stops.
+
+        Args:
+            client_sock: The client's socket object.
+            message_handler: The function to process messages from the client.
+        """
+        while not self._stop.is_set():
+            try:
+                msg = recv_msg(client_sock)
+                addr = client_sock.getpeername()
+                logging.debug(
+                    "action: receive_message | result: success | ip: %s | opcode: %i",
+                    addr[0],
+                    msg.opcode,
+                )
+
+                # The message_handler returns False to signal that the connection
+                # should be closed from the application logic side.
+                if not message_handler(msg, client_sock):
                     break
-        
-        except (ProtocolError, EOFError, OSError) as e:
-            # Handle any network error during either phase
-            logging.error(
-                "action: client_connection_error | client_id: %s | error: %s",
-                client_id or "N/A", e
-            )
-        
-        finally:
-            if self._disconnect_handler is not None:
-                try:
-                    self._disconnect_handler(client_sock)
-                except Exception as exc:
-                    logging.warning(
-                        "action: client_disconnect_cleanup | result: fail | error: %s",
-                        exc,
-                    )
-            client_sock.close()
+
+            except ProtocolError as e:
+                logging.error("action: receive_message | result: protocol error | error: %s", e)
+                break  # Close connection on protocol errors
+            except EOFError:
+                # This occurs when the client gracefully closes the connection.
+                break
+            except OSError as e:
+                # This can happen if the connection is forcibly closed.
+                logging.error("action: receive_message | result: fail | error: %s", e)
+                break
+
+        if self._disconnect_handler is not None:
+            try:
+                self._disconnect_handler(client_sock)
+            except Exception as exc:
+                logging.warning(
+                    "action: client_disconnect_cleanup | result: fail | error: %s",
+                    exc,
+                )
+
+        client_sock.close()
+
 
 class ServerManager:
     """
@@ -161,17 +163,23 @@ class ServerManager:
         self,
         port: int,
         listen_backlog: int,
-        handshake_handler: Callable, # Renamed from message_handler
-        data_handler: Callable,     # New handler
+        message_handler: Callable,
         disconnect_handler: Optional[Callable[[socket.socket], None]] = None,
     ):
+        """
+        Initializes the server manager.
+
+        Args:
+            port: The port number for the server to listen on.
+            listen_backlog: The maximum number of pending connections.
+            message_handler: The function responsible for processing client messages.
+        """
         self.connection_manager = ConnectionManager(
             port,
             listen_backlog,
             disconnect_handler,
         )
-        self.handshake_handler = handshake_handler
-        self.data_handler = data_handler
+        self.message_handler = message_handler
 
     def setup_signal_handler(self):
         """
@@ -182,22 +190,27 @@ class ServerManager:
         signal.signal(signal.SIGTERM, self._handle_sigterm)
 
     def run(self):
+        """
+        Starts the main server loop.
+
+        This method configures signal handling and then continuously accepts new
+        connections, delegating each to a new worker thread until a shutdown is initiated.
+        """
         self.setup_signal_handler()
+
         while not self.connection_manager.is_stopped():
             try:
                 client_sock = self.connection_manager.accept_connection()
-                # --- MODIFIED ---
-                self.connection_manager.create_client_thread(
-                    client_sock, self.handshake_handler, self.data_handler
-                )
+                self.connection_manager.create_client_thread(client_sock, self.message_handler)
             except OSError:
                 if self.connection_manager.is_stopped():
                     break
                 raise
-        
+
+        # After the loop exits, wait for all threads to complete before shutting down.
         self.connection_manager.join_all_threads()
         logging.shutdown()
-        
+
     def _handle_sigterm(self, *_):
         """
         The callback function executed upon receiving a SIGTERM signal.
