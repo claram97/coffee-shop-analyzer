@@ -3,8 +3,8 @@ package common
 import (
 	"bufio"
 	"context"
-	"encoding/json"
 	"encoding/binary"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -269,22 +269,16 @@ func NewFinishedMessageSender(conn net.Conn, clientID string, logger *logging.Lo
 	}
 }
 
-// SendFinished sends FINISHED message with the numeric agency ID.
+// SendFinished sends an empty FINISHED message.
 // It logs success or failure for each write. On any serialization/I/O error it logs and returns.
 func (fms *FinishedMessageSender) SendFinished() {
-	agencyID, err := deriveFinishedAgencyID(fms.clientID)
-	if err != nil {
-		fms.log.Warningf("action: send_finished | result: skip | reason: %v", err)
-		return
-	}
-
-	finishedMsg := protocol.Finished{AgencyId: agencyID}
+	finishedMsg := protocol.Finished{}
 	if _, err := finishedMsg.WriteTo(fms.conn); err != nil {
 		fms.log.Errorf("action: send_finished | result: fail | error: %v", err)
 		return
 	}
 
-	fms.log.Infof("action: send_finished | result: success | agencyId: %d", agencyID)
+	fms.log.Infof("action: send_finished | result: success")
 }
 
 func deriveFinishedAgencyID(rawID string) (int32, error) {

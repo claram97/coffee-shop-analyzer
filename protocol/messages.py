@@ -753,32 +753,21 @@ class EOFMessage(TableMessage):
 
 
 class Finished:
-    """Inbound FINISHED message. Body is a single agency_id (i32 LE)."""
+    """Inbound FINISHED message. Body is empty."""
 
     def __init__(self):
         self.opcode = Opcodes.FINISHED
-        self.agency_id = None
-        self._length = 4
+        self._length = 0
 
     def read_from(self, data, length: int):
-        """Validate fixed body length (4) and read agency_id.
+        """Validate fixed body length (0).
         
         Args:
             data: Either a socket object or bytes buffer
-            length: Expected body length (should be 4)
+            length: Expected body length (should be 0)
         """
         if length != self._length:
             raise ProtocolError("invalid length", self.opcode)
-        
-        # Handle different input types
-        if isinstance(data, bytes):
-            reader = BytesReader(data)
-            (agency_id, _) = read_i32(reader, length, self.opcode)
-        else:
-            from .socket_parsing import read_i32 as socket_read_i32
-            (agency_id, _) = socket_read_i32(data, length, self.opcode)
-        
-        self.agency_id = agency_id
 
 
 class ClientHello:

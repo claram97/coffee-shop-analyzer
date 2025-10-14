@@ -21,16 +21,15 @@ func parseFloat(s string) float64 {
 }
 
 // Finished is a client→server message that indicates the agency finished
-// sending all its batch messages. Body: [agencyId:i32].
+// sending all its batch messages. Body: [] (empty).
 type Finished struct {
-	AgencyId int32
 }
 
 func (msg *Finished) GetOpCode() byte  { return OpCodeFinished }
-func (msg *Finished) GetLength() int32 { return 4 }
+func (msg *Finished) GetLength() int32 { return 0 }
 
-// WriteTo writes the FINISHED frame with little-endian length and agencyId.
-// It returns the total bytes written (1 + 4 + 4) or an error.
+// WriteTo writes the FINISHED frame with little-endian length.
+// It returns the total bytes written (1 + 4) or an error.
 func (msg *Finished) WriteTo(out io.Writer) (int64, error) {
 	var totalWritten int64
 
@@ -40,11 +39,6 @@ func (msg *Finished) WriteTo(out io.Writer) (int64, error) {
 	totalWritten += 1
 
 	if err := binary.Write(out, binary.LittleEndian, msg.GetLength()); err != nil {
-		return totalWritten, err
-	}
-	totalWritten += 4
-
-	if err := binary.Write(out, binary.LittleEndian, msg.AgencyId); err != nil {
 		return totalWritten, err
 	}
 	totalWritten += 4
@@ -106,7 +100,7 @@ type QueryResultTable struct {
 }
 
 type Query1Result struct {
-	FinalAmount  float64 `json:"final_amount"`
+	FinalAmount   float64 `json:"final_amount"`
 	TransactionID string  `json:"transaction_id"`
 }
 
@@ -168,7 +162,7 @@ func (t *QueryResultTable) GetTypedRows() (interface{}, error) {
 		for i, row := range t.Rows {
 			finalAmount, _ := strconv.ParseFloat(row["final_amount"], 64)
 			results[i] = Query1Result{
-				FinalAmount:  finalAmount,
+				FinalAmount:   finalAmount,
 				TransactionID: row["transaction_id"],
 			}
 		}
