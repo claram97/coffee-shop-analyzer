@@ -27,6 +27,7 @@ class WorkersCfg:
     filters: int
     aggregators: int
     joiners: int
+    results: int
 
 
 @dataclass(frozen=True)
@@ -48,15 +49,10 @@ class NamesCfg:
 
 
 @dataclass(frozen=True)
-class BatchesCfg:
-    max_lines: int
-    max_kB: int
-
-
-@dataclass(frozen=True)
 class RoutersCfg:
     filter: int
     joiner: int
+    results: int
 
 
 class ConfigError(Exception):
@@ -110,7 +106,8 @@ class Config:
         w_filters = cp.getint("filters", "workers", fallback=1)
         w_aggs = cp.getint("aggregators", "workers", fallback=1)
         w_joiners = cp.getint("joiners", "workers", fallback=1)
-        self.workers = WorkersCfg(w_filters, w_aggs, w_joiners)
+        w_results = cp.getint("results", "workers", fallback=1)
+        self.workers = WorkersCfg(w_filters, w_aggs, w_joiners, w_results)
 
         n = cp["names"]
         self.names = NamesCfg(
@@ -132,15 +129,10 @@ class Config:
             orch_to_fr_queue_fmt=n.get("orch_to_fr_queue_fmt"),
         )
 
-        batches = cp["batches"]
-        self.batches = BatchesCfg(
-            max_kB=batches.getint("max_kB", 1024),
-            max_lines=batches.getint("max_lines", 1000),
-        )
-
         r_filters = cp.getint("filters", "routers", fallback=1)
         r_joiners = cp.getint("joiners", "routers", fallback=1)
-        self.routers = RoutersCfg(r_filters, r_joiners)
+        r_results = cp.getint("results", "routers", fallback=1)
+        self.routers = RoutersCfg(r_filters, r_joiners, r_results)
 
     def joiner_partitions(self, table: str) -> int:
         """Shards de salida del Joiner Router para TABLE (consumen Joiners)."""

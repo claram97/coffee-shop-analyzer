@@ -31,6 +31,7 @@ def _setup_logging() -> None:
 
 _setup_logging()
 
+
 def current_step_from_mask(mask: int) -> Optional[int]:
     if mask == 0:
         return None
@@ -44,7 +45,8 @@ def current_step_from_mask(mask: int) -> Optional[int]:
 def _parse_dt_local(s: str) -> Optional[datetime]:
     try:
         return datetime.strptime(s, "%Y-%m-%d %H:%M:%S")
-    except Exception:
+    except Exception as e:
+        logger.error("error in hour_filter: %s", e)
         return None
 
 
@@ -68,7 +70,8 @@ def final_amount_filter(rows) -> List[Any]:
             continue
         try:
             amount = float(str(final_amount_raw).strip())
-        except (TypeError, ValueError):
+        except Exception as e:
+            logger.error("error in hour_filter: %s", e)
             continue
         if amount >= 75.0:
             kept.append(r)
@@ -82,7 +85,7 @@ def year_filter(rows, min_year: int = 2024, max_year: int = 2025) -> List[Any]:
         try:
             y = datetime.strptime(ts, "%Y-%m-%d %H:%M:%S").year
         except Exception as e:
-            logger.debug("exception while applying filter: %s", e)
+            logger.error("exception while applying year_filter: %s", e)
             continue
         if min_year <= y <= max_year:
             kept.append(r)
@@ -215,7 +218,7 @@ class FilterWorker:
 
                     sample_data = [row.__dict__ for row in sample_rows]
 
-                    logging.info(
+                    logging.debug(
                         "action: batch_preview | batch_number: %d | opcode: %d | keys: %s | sample_count: %d | sample: %s",
                         getattr(inner, "batch_number", 0),
                         inner.opcode,
@@ -255,7 +258,7 @@ class FilterWorker:
 
             dt_ms = (time.perf_counter() - t0) * 1000
             if table_id == Opcodes.NEW_TRANSACTION:
-                logger.info(
+                logger.debug(
                     "Filtro aplicado y publicado | table_id=%s step=%s queries=%s rows_in=%d rows_out=%d latency_ms=%.2f filter=%s pid=%02d",
                     table_id,
                     step,

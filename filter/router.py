@@ -4,13 +4,18 @@ from __future__ import annotations
 import copy
 import hashlib
 import logging
+import random
+import threading
+import time
 from collections import defaultdict
 from dataclasses import dataclass
 from random import randint
 from typing import Any, Dict, List, Optional, Union
 
-from middleware.middleware_client import (MessageMiddlewareExchange,
-                                          MessageMiddlewareQueue)
+from middleware.middleware_client import (
+    MessageMiddlewareExchange,
+    MessageMiddlewareQueue,
+)
 from protocol.constants import Opcodes
 from protocol.databatch import DataBatch
 from protocol.messages import EOFMessage
@@ -344,6 +349,10 @@ class ExchangeBusProducer:
         in_mw: MessageMiddlewareExchange,
         exchange_fmt: str = "ex.{table}",
         rk_fmt: str = "agg.{table}.{pid:02d}",
+        *,
+        max_retries: int = 5,
+        base_backoff_ms: int = 100,
+        backoff_multiplier: float = 2.0,
     ):
         self._log = logging.getLogger("filter-router.bus")
         self._host = host
@@ -351,22 +360,97 @@ class ExchangeBusProducer:
         self._exchange_fmt = exchange_fmt
         self._rk_fmt = rk_fmt
         self._pub_cache: dict[tuple[str, str], MessageMiddlewareExchange] = {}
+        self._pub_locks: dict[tuple[str, str], threading.Lock] = {}
         self._in_mw = in_mw
 
-    def _get_pub(self, table: str, pid: int) -> MessageMiddlewareExchange:
+        self._max_retries = int(max_retries)
+        self._base_backoff_ms = int(base_backoff_ms)
+        self._backoff_multiplier = float(backoff_multiplier)
+
+    def _key_for(self, table: str, pid: int) -> tuple[str, str]:
         ex = self._exchange_fmt.format(table=table)
         rk = self._rk_fmt.format(table=table, pid=pid)
-        key = (ex, rk)
+        return (ex, rk)
+
+    def _get_pub(self, table: str, pid: int) -> MessageMiddlewareExchange:
+        key = self._key_for(table, pid)
         pub = self._pub_cache.get(key)
+
+        if pub is not None and getattr(pub, "is_closed", None):
+            try:
+                if pub.is_closed():
+                    self._log.debug("publisher cached but closed: %s → recreate", key)
+                    self._drop_pub(key)
+                    pub = None
+            except Exception:
+                pass
+
         if pub is None:
             self._log.debug(
-                "create publisher exchange=%s rk=%s host=%s", ex, rk, self._host
+                "create publisher exchange=%s rk=%s host=%s", key[0], key[1], self._host
             )
             pub = MessageMiddlewareExchange(
-                host=self._host, exchange_name=ex, route_keys=[rk]
+                host=self._host, exchange_name=key[0], route_keys=[key[1]]
             )
             self._pub_cache[key] = pub
+            if key not in self._pub_locks:
+                self._pub_locks[key] = threading.Lock()
         return pub
+
+    def _drop_pub(self, key: tuple[str, str]) -> None:
+        pub = self._pub_cache.pop(key, None)
+        if pub is not None:
+            try:
+                if hasattr(pub, "close"):
+                    pub.close()
+            except Exception:
+                pass
+
+    def _send_with_retry(self, key: tuple[str, str], payload: bytes) -> None:
+        """
+        Envía `payload` al exchange/rk indicado por `key`, con reintentos y recreación del publisher.
+        Bloquea por key para serializar accesos concurrentes al mismo canal.
+        """
+        lock = self._pub_locks.setdefault(key, threading.Lock())
+        with lock:
+            attempt = 0
+            backoff = self._base_backoff_ms / 1000.0
+            last_error = None
+
+            while attempt <= self._max_retries:
+                try:
+                    pub = self._pub_cache.get(key)
+                    if pub is None:
+                        self._log.debug("pub cache miss -> create: %s", key)
+                        pub = MessageMiddlewareExchange(
+                            host=self._host, exchange_name=key[0], route_keys=[key[1]]
+                        )
+                        self._pub_cache[key] = pub
+                    pub.send(payload)
+                    return
+                except Exception as e:
+                    last_error = e
+                    self._log.warning(
+                        "send failed (attempt %d/%d) key=%s: %s",
+                        attempt + 1,
+                        self._max_retries,
+                        key,
+                        e,
+                    )
+                    self._drop_pub(key)
+
+                    attempt += 1
+                    if attempt > self._max_retries:
+                        break
+
+                    jitter = random.uniform(0, backoff * 0.2)
+                    sleep_s = backoff + jitter
+                    time.sleep(sleep_s)
+                    backoff *= self._backoff_multiplier
+
+            raise RuntimeError(
+                f"Error sending message to {key}: retries exhausted"
+            ) from last_error
 
     def send_to_filters_pool(self, batch: DataBatch) -> None:
         try:
@@ -378,14 +462,15 @@ class ExchangeBusProducer:
 
     def send_to_aggregator_partition(self, partition_id: int, batch: DataBatch) -> None:
         table = table_name_of(batch)
+        key = self._key_for(table, int(partition_id))
         try:
             self._log.debug(
-                "publish → aggregator table=%s part=%d",
-                table,
-                int(partition_id),
+                "publish → aggregator table=%s part=%d", table, int(partition_id)
             )
-            batch.batch_bytes = batch.batch_msg.to_bytes()
-            self._get_pub(table, partition_id).send(batch.to_bytes())
+            if getattr(batch, "batch_bytes", None) is None:
+                batch.batch_bytes = batch.batch_msg.to_bytes()
+            payload = batch.to_bytes()
+            self._send_with_retry(key, payload)
         except Exception as e:
             self._log.error(
                 "aggregator send failed table=%s part=%d: %s",
@@ -395,13 +480,6 @@ class ExchangeBusProducer:
             )
 
     def requeue_to_router(self, batch: DataBatch) -> None:
-        """
-        Reenvía un DataBatch de vuelta al router de filtros.
-        Se usa cuando se hace fan-out (duplicación de batches para queries múltiples).
-
-        Args:
-            batch: Instancia de DataBatch a reenviar.
-        """
         try:
             self._log.debug(
                 "requeue_to_router: reinyectando batch table=%s queries=%s",
@@ -418,13 +496,12 @@ class ExchangeBusProducer:
         self, key: tuple[str, str], partition_id: int
     ) -> None:
         try:
-            raw = table_eof_to_bytes(key)
+            payload = table_eof_to_bytes(key)
+            k = self._key_for(key[0], int(partition_id))
             self._log.debug(
-                "publish TABLE_EOF → aggregator key=%s part=%d",
-                key,
-                int(partition_id),
+                "publish TABLE_EOF → aggregator key=%s part=%d", key, int(partition_id)
             )
-            self._get_pub(key[0], partition_id).send(raw)
+            self._send_with_retry(k, payload)
         except Exception as e:
             self._log.error(
                 "aggregator TABLE_EOF send failed key=%s part=%d: %s",
