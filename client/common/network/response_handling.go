@@ -53,9 +53,7 @@ func (rh *ResponseHandler) handleResponseMessage(msg interface{}) {
 	// Use type assertion to access the GetOpCode() method
 	if respMsg, ok := msg.(interface{ GetOpCode() byte }); ok {
 		opcode := respMsg.GetOpCode()
-		if opcode != protocol.BatchRecvSuccessOpCode && opcode != protocol.BatchRecvFailOpCode {
-			rh.log.Infof("action: response_received | where: response_handling | opcode: %d", opcode)
-		}
+
 		switch opcode {
 		case protocol.BatchRecvSuccessOpCode:
 			rh.log.Debug("action: batch_enviado | result: success")
@@ -76,6 +74,9 @@ func (rh *ResponseHandler) handleResponseMessage(msg interface{}) {
 			} else {
 				rh.log.Warning("action: response_received | result: unexpected_format | type: databatch")
 			}
+		case protocol.OpCodeFinished:
+			rh.log.Info("action: finished_received | result: success")
+			rh.conn.Close()
 		}
 	}
 }
@@ -219,10 +220,6 @@ func (rh *ResponseHandler) responseReaderLoop(reader *bufio.Reader) {
 				break
 			}
 			continue
-		}
-		opcode := msg.(interface{ GetOpCode() byte }).GetOpCode()
-		if opcode != protocol.BatchRecvSuccessOpCode && opcode != protocol.BatchRecvFailOpCode {
-			rh.log.Infof("action: response_received | where: response_reading_loop| opcode: %d", opcode)
 		}
 
 		rh.handleResponseMessage(msg)

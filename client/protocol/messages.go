@@ -22,8 +22,7 @@ func parseFloat(s string) float64 {
 
 // Finished is a client→server message that indicates the agency finished
 // sending all its batch messages. Body: [] (empty).
-type Finished struct {
-}
+type Finished struct{}
 
 func (msg *Finished) GetOpCode() byte  { return OpCodeFinished }
 func (msg *Finished) GetLength() int32 { return 0 }
@@ -44,6 +43,19 @@ func (msg *Finished) WriteTo(out io.Writer) (int64, error) {
 	totalWritten += 4
 
 	return totalWritten, nil
+}
+
+// readFrom validates that the next i32 body length is exactly 0.
+// It consumes the field and returns nil on success.
+func (msg *Finished) readFrom(reader *bufio.Reader) error {
+	var length int32
+	if err := binary.Read(reader, binary.LittleEndian, &length); err != nil {
+		return err
+	}
+	if length != msg.GetLength() {
+		return &ProtocolError{"invalid body length", OpCodeFinished}
+	}
+	return nil
 }
 
 // BatchRecvSuccess is the server→client acknowledgment for a batch processed
@@ -511,6 +523,13 @@ func ReadMessage(reader *bufio.Reader, logger *logging.Logger) (Readable, error)
 				logger.Infof("") // Add blank line between rows
 			}
 			return msg, err
+		}
+	case OpCodeFinished:
+		{
+			var msg Finished
+			err := msg.readFrom(reader)
+			logger.Infof("action: finished_received | result: success")
+			return &msg, err
 		}
 	default:
 		return nil, &ProtocolError{"invalid opcode", opcode}
