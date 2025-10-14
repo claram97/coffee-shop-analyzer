@@ -103,7 +103,9 @@ def test_broadcast_table_detection():
 def test_publish_and_broadcast(fake_pool):
     pool, pubs = fake_pool.pool, fake_pool.pubs
     cfgs = make_cfg()
-    router = JoinerRouter(in_mw=None, publisher_pool=pool, route_cfg=cfgs)
+    router = JoinerRouter(
+        in_mw=None, publisher_pool=pool, route_cfg=cfgs, fr_replicas=1
+    )
 
     # Publish explícito
     raw = b"hello"

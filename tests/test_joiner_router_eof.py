@@ -46,7 +46,8 @@ def cfg_obj():
         joiner_router_rk_fmt = "join.{table}.shard.{shard:02d}"
 
     class DummyWorkers:
-        joiners = 3  # default para livianas si no hay joiner_shards específicos
+        joiners = 3
+        aggregators = 3
 
     class DummyBroker:
         host = "in-mem"
@@ -91,7 +92,9 @@ def test_eof_message_round_trip_includes_client_id():
 def test_table_eof_broadcast_transactions(fake_pool, cfg_obj):
     pool, pubs = fake_pool.pool, fake_pool.pubs
     route_cfg = build_route_cfg_from_config(cfg_obj)
-    router = JoinerRouter(in_mw=None, publisher_pool=pool, route_cfg=route_cfg)
+    router = JoinerRouter(
+        in_mw=None, publisher_pool=pool, route_cfg=route_cfg, fr_replicas=1
+    )
 
     # Sanity: aseguramos valores esperados del cfg
     agg_parts = route_cfg[Opcodes.NEW_TRANSACTION].agg_shards  # 3

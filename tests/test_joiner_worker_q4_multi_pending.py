@@ -1,37 +1,12 @@
 import types
 
 import pytest
+from conftest import TEST_CLIENT_ID, _db_with
 
 from joiner.worker import Q4, JoinerWorker
 from protocol.constants import Opcodes
 from protocol.entities import RawStore, RawTransaction, RawTransactionStoreUser, RawUser
-
-
-# --- Helpers de "DataBatch" muy livianos para el test -------------------------
-class _Msg:
-    def __init__(self, opcode, rows):
-        self.opcode = opcode
-        self.rows = rows
-
-    def to_bytes(self):
-        # no se usa realmente (mockeamos _send); el worker lo puede setear
-        return b"MSG"
-
-
-class _DB:
-    """Mock liviano de DataBatch con la interfaz usada por JoinerWorker."""
-
-    def __init__(self, table_ids, query_ids, rows, meta=None, token=b""):
-        self.table_ids = list(table_ids)
-        self.query_ids = list(query_ids)
-        self.meta = {} if meta is None else dict(meta)  # dict<u8,u8> en real
-        self.batch_msg = _Msg(table_ids[0], list(rows))
-        self.batch_bytes = None
-        # token que devolverá to_bytes(); luego lo usaremos para mapear de vuelta
-        self._token = token
-
-    def to_bytes(self):
-        return self._token
+from protocol.messages import NewStores, NewTransactions, NewUsers
 
 
 # --- Fixtures -----------------------------------------------------------------
@@ -78,31 +53,38 @@ def test_q4_two_pending_batches_same_user(
         data_dir=tmp_data_dir,
         logger=None,
         shard_index=0,
+        router_replicas=1,
     )
     emits = []
     monkeypatch.setattr(worker, "_send", lambda db: emits.append(db))
 
+    inner_msg = NewStores()
+    inner_msg.rows = [
+        RawStore(
+            store_id="s1",
+            store_name="S-One",
+            street="",
+            postal_code="",
+            city="C",
+            state="",
+            latitude="",
+            longitude="",
+        )
+    ]
+
     # 2) Cachear STORES para poder joinear TX->Store
-    stores_db = _DB(
+    stores_db = _db_with(
+        inner_msg,
         table_ids=[Opcodes.NEW_STORES],
         query_ids=[],
-        rows=[
-            RawStore(
-                store_id="s1",
-                store_name="S-One",
-                street="",
-                postal_code="",
-                city="C",
-                state="",
-                latitude="",
-                longitude="",
-            )
-        ],
     )
-    monkeypatch.setattr(worker, "_decode_msg", lambda raw: ("db", stores_db))
-    worker._on_raw_stores(b"STORES")
+    worker._on_raw_stores(stores_db)
 
-    # 3) Armar dos TX con Q4 para user 'u1' (distintas transactions)
+    # 3) Enablear fase de transactions
+    worker._on_table_eof(Opcodes.NEW_STORES, TEST_CLIENT_ID)
+    worker._on_table_eof(Opcodes.NEW_MENU_ITEMS, TEST_CLIENT_ID)
+
+    # 4) Armar dos TX con Q4 para user 'u1' (distintas transactions)
     tx_a = RawTransaction(
         transaction_id="txA",
         store_id="s1",
@@ -112,6 +94,7 @@ def test_q4_two_pending_batches_same_user(
         discount_applied="",
         final_amount="10",
         created_at="tA",
+        voucher_id="v-1",
     )
     tx_b = RawTransaction(
         transaction_id="txB",
@@ -122,47 +105,43 @@ def test_q4_two_pending_batches_same_user(
         discount_applied="",
         final_amount="20",
         created_at="tB",
+        voucher_id="v-2",
+    )
+    inner_msg_a = NewTransactions()
+    inner_msg_a.rows = [tx_a]
+    inner_msg_b = NewTransactions()
+    inner_msg_b.rows = [tx_b]
+
+    db_tx_a = _db_with(
+        inner_msg_a,
+        table_ids=[Opcodes.NEW_TRANSACTION],
+        query_ids=[Q4],
+    )
+    db_tx_b = _db_with(
+        inner_msg_b,
+        table_ids=[Opcodes.NEW_TRANSACTION],
+        query_ids=[Q4],
     )
 
-    # Cada _DB tiene un token distinto (simula los bytes del template_raw)
-    db_tx_a = _DB([Opcodes.NEW_TRANSACTION], [Q4], [tx_a], token=b"TEMPLATE_A")
-    db_tx_b = _DB([Opcodes.NEW_TRANSACTION], [Q4], [tx_b], token=b"TEMPLATE_B")
+    worker._on_raw_tx(db_tx_a)
+    worker._on_raw_tx(db_tx_b)
+    assert emits == []
 
-    # _decode_msg devolverá cada uno según el "raw" que pasemos
-    def _decode_for_tx(raw):
-        return ("db", db_tx_a if raw == b"TXA" else db_tx_b)
+    # 5) Enablear fase de Users
+    worker._on_table_eof(Opcodes.NEW_TRANSACTION, TEST_CLIENT_ID)
+    worker._on_table_eof(Opcodes.NEW_TRANSACTION_ITEMS, TEST_CLIENT_ID)
 
-    monkeypatch.setattr(worker, "_decode_msg", _decode_for_tx)
-
-    # En Q4, _on_raw_tx no emite nada; guarda particiones por usuario en el shelve
-    worker._on_raw_tx(b"TXA")
-    worker._on_raw_tx(b"TXB")
-    assert emits == []  # aún nada emitido
-
-    # 4) Simular DataBatch.deserialize_from_bytes(template_raw)
-    # Cuando el worker levante el 'template_raw' (b"TEMPLATE_A" / b"TEMPLATE_B"),
-    # le devolvemos un DB base (se va a sobreescribir table_ids y batch_msg).
-    def _db_deserialize(body):
-        if body == b"TEMPLATE_A":
-            return _DB([Opcodes.NEW_TRANSACTION], [Q4], [])
-        if body == b"TEMPLATE_B":
-            return _DB([Opcodes.NEW_TRANSACTION], [Q4], [])
-        pytest.fail("template_raw inesperado")
-
-    import protocol.databatch as databatch_mod
-
-    monkeypatch.setattr(
-        databatch_mod.DataBatch, "deserialize_from_bytes", staticmethod(_db_deserialize)
+    # 6) Llegan USERS con 'u1' y Q4 → debe emitir dos resultados (uno por cada pending)
+    inner_msg_u = NewUsers()
+    inner_msg_u.rows = [
+        RawUser(user_id="u1", gender="", birthdate="1980-01-01", registered_at="")
+    ]
+    db_u = _db_with(
+        inner_msg_u,
+        table_ids=[Opcodes.NEW_USERS],
+        query_ids=[Q4],
     )
-
-    # 5) Llegan USERS con 'u1' y Q4 → debe emitir dos resultados (uno por cada pending)
-    users_db = _DB(
-        [Opcodes.NEW_USERS],
-        [Q4],
-        [RawUser(user_id="u1", gender="", birthdate="1980-01-01", registered_at="")],
-    )
-    monkeypatch.setattr(worker, "_decode_msg", lambda raw: ("db", users_db))
-    worker._on_raw_users(b"USERS")
+    worker._on_raw_users(db_u)
 
     # Deben haber dos emisiones
     assert len(emits) == 2
