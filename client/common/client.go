@@ -32,7 +32,6 @@ type Client struct {
 	config            ClientConfig
 	connectionManager *network.ConnectionManager
 	fileProcessor     *processing.FileProcessor
-	queryHandler      *QueryHandler
 }
 
 // NewClient constructs a Client with the provided configuration
@@ -85,9 +84,6 @@ func (c *Client) SendBatch() {
 
 	conn := c.connectionManager.GetConnection()
 
-	// Initialize the query handler now that we have a connection
-	c.queryHandler = NewQueryHandler(conn, c.config.ID, log)
-
 	// Set up response handling
 	readDone := make(chan struct{})
 	responseHandler := network.NewResponseHandler(conn, c.config.ID, log)
@@ -104,16 +100,6 @@ func (c *Client) SendBatch() {
 	if lastErr == nil {
 		finishedSender := network.NewFinishedMessageSender(conn, c.config.ID, log)
 		finishedSender.SendFinished()
-
-		// Wait a bit for the server to process finished message
-		// time.Sleep(1 * time.Second)
-
-		// Request query results
-		// log.Info("action: query_phase | result: start | message: Requesting query results")
-		// c.queryHandler.RequestAllQueries()
-
-		// Wait longer to receive query results
-		// time.Sleep(5 * time.Second)
 	}
 
 	// Wait for responses

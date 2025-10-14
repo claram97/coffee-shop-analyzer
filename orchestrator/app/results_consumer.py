@@ -8,7 +8,7 @@ import time
 from middleware.middleware_client import MessageMiddlewareQueue, MessageMiddlewareDisconnectedError
 from protocol import DataBatch, Opcodes, BatchStatus
 from protocol.messages import QueryResult1, QueryResult2, QueryResult3, QueryResult4, QueryResultError
-
+from protocol.messages import Finished
 
 class ResultsConsumer:
     """Consumes result messages from the results-finisher component and forwards them to clients."""
@@ -26,7 +26,7 @@ class ResultsConsumer:
         self.client_connections = {}
         self.middleware = None
         self.stopping = False
-        self.queries_sent = set()
+        self.queries_sent = {}  # Dict: client_id -> set of query_ids
         self.client_lock = threading.Lock()
         
     def start(self):
@@ -62,6 +62,7 @@ class ResultsConsumer:
         """
         with self.client_lock:
             self.client_connections[client_id] = client_connection
+            self.queries_sent[client_id] = set()  # Inicializar set por cliente
             logging.info(
                 "action: client_registered | result: success | client_id: %s",
                 client_id,
@@ -74,10 +75,12 @@ class ResultsConsumer:
             key = client_id
             if key in self.client_connections:
                 del self.client_connections[key]
-                logging.info(
-                    "action: client_unregistered | result: success | client_id: %s",
-                    client_id,
-                )
+            if key in self.queries_sent:
+                del self.queries_sent[key]  # Limpiar queries_sent por cliente
+            logging.info(
+                "action: client_unregistered | result: success | client_id: %s",
+                client_id,
+            )
                 
     def _process_result(self, body):
         """Process a result message from the queue.
@@ -149,8 +152,6 @@ class ResultsConsumer:
             
             # Mine
             self._forward_result_to_client(query_id, data_batch.batch_msg.to_bytes(), client_id)
-            # New
-            self._forward_result_to_client(client_id, query_id, body)
 
         except Exception as e:
             logging.error(f"action: process_result | result: fail | error: {str(e)}")
@@ -193,11 +194,14 @@ class ResultsConsumer:
         try:
             # Send the raw bytes to the client
             client_conn.sendall(result_bytes)
-            self.queries_sent.add(query_id)
+            self.queries_sent[client_id].add(query_id)  # Agregar a set por cliente
             bytes_sent = len(result_bytes)
             logging.info(f"action: forward_result | result: success | query_id: {query_id} | bytes_sent: {bytes_sent}")
-            if len(self.queries_sent) == 4:
+            if len(self.queries_sent[client_id]) == 4:  # Chequear por cliente
                 logging.info("action: all_queries_sent | result: success | unregistering_client")
+                finished_msg = Finished()
+                finished_msg.agency_id = 0  # Setear agency_id (puedes derivarlo de client_id si necesitas)
+                client_conn.sendall(finished_msg.to_bytes())
                 self.unregister_client(client_id)
         except Exception as e:
             logging.error(f"action: forward_result | result: fail | query_id: {query_id} | error: {str(e)}")
