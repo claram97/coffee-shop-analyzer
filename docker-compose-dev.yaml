@@ -17,7 +17,13 @@ services:
       interval: 30s
       timeout: 10s
       retries: 5
-
+    volumes:
+      - ./rabbitmq.conf:/etc/rabbitmq/rabbitmq.conf
+    ulimits:
+      nofile:
+        soft: 65536
+        hard: 65536
+        
   orchestrator:
     container_name: orchestrator
     build:
@@ -33,7 +39,7 @@ services:
       - FILTER_ROUTER_COUNT=8
       - ORCH_PROCESS_COUNT=8
       - ORCH_PROCESS_QUEUE_SIZE=256
-      - ORCH_PROCESS_QUEUE_TIMEOUT=1.0
+      - ORCH_PROCESS_QUEUE_TIMEOUT=10.0
     networks:
       - testing_net
     volumes:

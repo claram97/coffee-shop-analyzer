@@ -7,6 +7,7 @@ import logging
 import multiprocessing as mp
 import os
 import queue
+import time
 from typing import Optional
 
 from app.results_consumer import ResultsConsumer
@@ -210,18 +211,20 @@ class Orchestrator:
             logging.debug("action: stop_worker_processes | result: queue_close_skip")
 
     def _enqueue_processing_task(self, msg, client_id: str):
-        try:
-            self._task_queue.put((msg, client_id), block=True, timeout=self._queue_put_timeout)
-        except queue.Full as full_exc:
-            logging.error(
-                "action: enqueue_data_batch | result: fail | reason: queue_full | batch_number: %d | opcode: %d",
-                getattr(msg, "batch_number", 0),
-                getattr(msg, "opcode", -1),
-            )
-            raise full_exc
-        except Exception:
-            logging.exception("action: enqueue_data_batch | result: fail | reason: unexpected")
-            raise
+        while True:
+            try:
+                self._task_queue.put((msg, client_id), block=True, timeout=self._queue_put_timeout)
+                break  # Exit the loop if the message is successfully added to the queue
+            except queue.Full:
+                logging.warning(
+                    "action: enqueue_data_batch | result: retry | reason: queue_full | batch_number: %d | opcode: %d",
+                    getattr(msg, "batch_number", 0),
+                    getattr(msg, "opcode", -1),
+                )
+                time.sleep(0.1)  # Wait for a short time before retrying
+            except Exception:
+                logging.exception("action: enqueue_data_batch | result: fail | reason: unexpected")
+                raise
 
     def _process_data_message(self, msg, client_sock) -> bool:
         try:
