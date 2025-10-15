@@ -193,21 +193,25 @@ class Orchestrator:
                 state["queries_sent"] += 1
                 self._check_and_close_client(client_id)
 
-    def _check_and_close_client(self, client_id: str):
+    def _cleanup_all_clients(self):
+        """Clean up all remaining clients on shutdown."""
         with self._client_states_lock:
-            state = self._client_states.get(client_id)
-            if state and state["finished"] and state["queries_sent"] >= 4:
+            for client_id, state in list(self._client_states.items()):
                 sock = state["sock"]
-                logging.info("action: close_client | result: closing | client_id: %s", client_id)
                 try:
-                    sock.sendall(Finished().to_bytes())
                     sock.close()
                 except Exception:
-                    logging.exception("action: close_client | result: fail | client_id: %s", client_id)
+                    pass
                 self.results_consumer.unregister_client(sock)
-                self._client_states.pop(client_id)
-                with self._client_ids_lock:
-                    self._client_ids.pop(sock, None)
+            self._client_states.clear()
+        with self._client_ids_lock:
+            for sock in list(self._client_ids.keys()):
+                try:
+                    sock.close()
+                except Exception:
+                    pass
+                self.results_consumer.unregister_client(sock)
+            self._client_ids.clear()
 
     def _start_worker_processes(self):
         if self._worker_count <= 0:
@@ -359,6 +363,7 @@ class Orchestrator:
         finally:
             self._stop_worker_processes()
             self.results_consumer.stop()
+            self._cleanup_all_clients()
 
 
 class MockFilterRouterQueue:
