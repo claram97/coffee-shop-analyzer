@@ -4,7 +4,9 @@ Refactored Orchestrator using modular architecture.
 """
 
 import logging
+import multiprocessing as mp
 import os
+import queue
 from typing import Optional
 
 from app.results_consumer import ResultsConsumer
@@ -13,6 +15,8 @@ from common.processing import create_filtered_data_batch, message_logger
 
 from middleware.middleware_client import MessageMiddlewareExchange
 from protocol.constants import Opcodes
+
+from .worker_pool import processing_worker_main
 
 
 class Orchestrator:
@@ -47,7 +51,25 @@ class Orchestrator:
 
         self._host = rabbitmq_host
 
+        self._mp_context = mp.get_context("spawn")
+        self._queue_maxsize = max(1, int(os.getenv("ORCH_PROCESS_QUEUE_SIZE", "128")))
+        worker_default = os.getenv("ORCH_PROCESS_COUNT") or str(self._num_routers)
+        self._worker_count = max(1, int(worker_default))
+        queue_timeout_raw = os.getenv("ORCH_PROCESS_QUEUE_TIMEOUT")
+        self._queue_put_timeout = None
+        if queue_timeout_raw:
+            try:
+                self._queue_put_timeout = float(queue_timeout_raw)
+            except ValueError:
+                logging.warning(
+                    "action: queue_timeout_parse | result: fail | value: %s",
+                    queue_timeout_raw,
+                )
+        self._task_queue: mp.Queue = self._mp_context.Queue(maxsize=self._queue_maxsize)
+        self._workers: list[mp.Process] = []
+
         self._setup_message_processors()
+        self._start_worker_processes()
 
     def _get_client_id(self, client_sock) -> Optional[str]:
         return self._client_ids.get(client_sock)
@@ -132,24 +154,88 @@ class Orchestrator:
         setattr(msg, "client_id", client_id)
         return self.message_handler.handle_message(msg, client_sock, client_id=client_id)
 
+    def _start_worker_processes(self):
+        if self._worker_count <= 0:
+            return
+
+        logging.info(
+            "action: start_worker_pool | workers: %d | queue_maxsize: %d",
+            self._worker_count,
+            self._queue_maxsize,
+        )
+
+        for worker_idx in range(self._worker_count):
+            proc = self._mp_context.Process(
+                target=processing_worker_main,
+                name=f"orch-worker-{worker_idx}",
+                args=(
+                    self._task_queue,
+                    worker_idx,
+                    self._host,
+                    self._fr_exchange,
+                    self._fr_rk_fmt,
+                    self._num_routers,
+                ),
+                daemon=True,
+            )
+            proc.start()
+            self._workers.append(proc)
+
+    def _stop_worker_processes(self):
+        if not getattr(self, "_workers", None):
+            return
+
+        for _ in self._workers:
+            try:
+                self._task_queue.put(None)
+            except Exception:
+                logging.exception("action: stop_worker_processes | result: put_sentinel_failed")
+
+        for proc in self._workers:
+            proc.join(timeout=5)
+            if proc.is_alive():
+                logging.warning(
+                    "action: stop_worker_processes | result: terminate | worker: %s",
+                    proc.name,
+                )
+                proc.terminate()
+                proc.join(timeout=1)
+
+        self._workers.clear()
+
+        try:
+            self._task_queue.close()
+            self._task_queue.join_thread()
+        except Exception:
+            logging.debug("action: stop_worker_processes | result: queue_close_skip")
+
+    def _enqueue_processing_task(self, msg, client_id: str):
+        try:
+            self._task_queue.put((msg, client_id), block=True, timeout=self._queue_put_timeout)
+        except queue.Full as full_exc:
+            logging.error(
+                "action: enqueue_data_batch | result: fail | reason: queue_full | batch_number: %d | opcode: %d",
+                getattr(msg, "batch_number", 0),
+                getattr(msg, "opcode", -1),
+            )
+            raise full_exc
+        except Exception:
+            logging.exception("action: enqueue_data_batch | result: fail | reason: unexpected")
+            raise
+
     def _process_data_message(self, msg, client_sock) -> bool:
         try:
-    
-            # self.results_consumer.register_client(client_sock)
+            client_id = getattr(msg, "client_id", None)
+            if not client_id:
+                raise RuntimeError("missing client_id for data message")
 
-            status_text = self.message_handler.get_status_text(
-                getattr(msg, "batch_status", 0)
-            )
-
-            message_logger.write_original_message(msg, status_text)
-
-            self._process_filtered_batch(msg, status_text)
-
-            message_logger.log_batch_processing_success(msg, status_text)
-            self.message_handler.log_batch_preview(msg, status_text)
+            self._enqueue_processing_task(msg, client_id)
 
             ResponseHandler.send_success(client_sock)
             return True
+        except queue.Full:
+            ResponseHandler.send_failure(client_sock)
+            return False
         except Exception as e:
             return ResponseHandler.handle_processing_error(msg, client_sock, e)
 
@@ -213,6 +299,7 @@ class Orchestrator:
         try:
             self.server_manager.run()
         finally:
+            self._stop_worker_processes()
             self.results_consumer.stop()
 
 
@@ -224,3 +311,4 @@ class MockFilterRouterQueue:
             "action: mock_queue_send | result: success | message_size: %d bytes",
             len(message_bytes),
         )
+
