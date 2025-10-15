@@ -190,10 +190,12 @@ class Q2Strategy(BaseQueryStrategy):
                 {"name": product_name, "revenue": round(metrics["revenue"], 2)}
             )
 
-        # Sort each month's products by quantity and revenue
+        # Sort each month's products by quantity and revenue and keep only the top entry
         for month_data in result_by_month.values():
             month_data["by_quantity"].sort(key=lambda x: x["quantity"], reverse=True)
             month_data["by_revenue"].sort(key=lambda x: x["revenue"], reverse=True)
+            month_data["by_quantity"] = month_data["by_quantity"][:1]
+            month_data["by_revenue"] = month_data["by_revenue"][:1]
 
         return dict(sorted(result_by_month.items()))
 
