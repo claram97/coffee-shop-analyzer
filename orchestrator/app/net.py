@@ -40,6 +40,9 @@ class Orchestrator:
         self.message_handler = MessageHandler()
         self._client_ids: dict[object, str] = {}
 
+        # Per-client state: {client_id: {"finished": bool, "queries_sent": int, "sock": socket}}
+        self._client_states: dict[str, dict] = {}
+
         results_queue = os.getenv("RESULTS_QUEUE", "orchestrator_results_queue")
         self.results_consumer = ResultsConsumer(results_queue, rabbitmq_host)
 
@@ -78,10 +81,13 @@ class Orchestrator:
     def _register_client(self, client_sock, client_id: str):
         self._client_ids[client_sock] = client_id
         self.results_consumer.register_client(client_sock, client_id)
+        self._client_states[client_id] = {"finished": False, "queries_sent": 0, "sock": client_sock}
 
     def _cleanup_client(self, client_sock):
-        self._client_ids.pop(client_sock, None)
+        client_id = self._client_ids.pop(client_sock, None)
         self.results_consumer.unregister_client(client_sock)
+        if client_id and client_id in self._client_states:
+            self._client_states.pop(client_id)
 
     def _publisher_for_rk(self, rk: str) -> MessageMiddlewareExchange:
         pub = self._publishers.get(rk)
@@ -153,7 +159,39 @@ class Orchestrator:
             return False
 
         setattr(msg, "client_id", client_id)
+
+        # Track 'finished' message
+        if msg.opcode == Opcodes.FINISHED:
+            logging.info("Client finished received in net.py")
+            state = self._client_states.get(client_id)
+            if state:
+                state["finished"] = True
+                self._check_and_close_client(client_id)
+            logging.info("action: client_finished | result: received | client_id: %s", client_id)
+            return True
+
+        # Track queries sent (simulate: increment when sending a query)
+        # You should call self._increment_queries_sent(client_id) wherever you send a query to the client
+
         return self.message_handler.handle_message(msg, client_sock, client_id=client_id)
+
+    def increment_queries_sent(self, client_id: str):
+        state = self._client_states.get(client_id)
+        if state:
+            state["queries_sent"] += 1
+            self._check_and_close_client(client_id)
+
+    def _check_and_close_client(self, client_id: str):
+        state = self._client_states.get(client_id)
+        if state and state["finished"] and state["queries_sent"] >= 4:
+            self.results_consumer.unregister_client(client_id)
+            sock = state["sock"]
+            logging.info("action: close_client | result: closing | client_id: %s", client_id)
+            try:
+                sock.close()
+            except Exception:
+                logging.exception("action: close_client | result: fail | client_id: %s", client_id)
+            self._cleanup_client(sock)
 
     def _start_worker_processes(self):
         if self._worker_count <= 0:
@@ -298,6 +336,7 @@ class Orchestrator:
 
     def run(self):
         """Start the orchestrator server and results consumer."""
+        self.results_consumer.set_orchestrator(self)
         self.results_consumer.start()
         try:
             self.server_manager.run()

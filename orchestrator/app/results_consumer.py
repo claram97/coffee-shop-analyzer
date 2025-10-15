@@ -28,7 +28,16 @@ class ResultsConsumer:
         self.stopping = False
         self.queries_sent = {}  # Dict: client_id -> set of query_ids
         self.client_lock = threading.Lock()
+
+    def set_orchestrator(self, orchestrator):
+        """Set the orchestrator instance for the consumer.
         
+        Args:
+            orchestrator: The orchestrator instance
+        """
+        self.orchestrator = orchestrator
+        logging.info("action: set_orchestrator | result: success")
+
     def start(self):
         """Start consuming results from the queue."""
         try:
@@ -198,11 +207,13 @@ class ResultsConsumer:
             bytes_sent = len(result_bytes)
             logging.info(f"action: forward_result | result: success | query_id: {query_id} | bytes_sent: {bytes_sent}")
             if len(self.queries_sent[client_id]) == 4:  # Chequear por cliente
-                logging.info("action: all_queries_sent | result: success | unregistering_client")
+                logging.info(f"action: all_queries_sent | result: success | client_id: {client_id}")
                 finished_msg = Finished()
                 client_conn.sendall(finished_msg.to_bytes())
-                client_conn.close()  # Cerrar la conexión después de enviar FINISHED
-                self.unregister_client(client_id)
+                # client_conn.close()  # Cerrar la conexión después de enviar FINISHED
+                # self.unregister_client(client_id)
+            self.orchestrator.increment_queries_sent(client_id)  # Incrementar en el orchestrator
+
         except Exception as e:
             logging.error(f"action: forward_result | result: fail | query_id: {query_id} | error: {str(e)}")
             # Clean up the connection on error
