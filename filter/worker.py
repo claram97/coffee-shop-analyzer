@@ -42,54 +42,51 @@ def current_step_from_mask(mask: int) -> Optional[int]:
     return i - 1
 
 
-def _parse_dt_local(s: str) -> Optional[datetime]:
+def _parse_dt_local(value: Optional[str]) -> Optional[datetime]:
+    if not value:
+        return None
     try:
-        return datetime.strptime(s, "%Y-%m-%d %H:%M:%S")
+        return datetime.fromisoformat(value)
     except Exception as e:
-        logger.error("error in hour_filter: %s", e)
+        logger.error("error parsing datetime: %s", e)
+        return None
+
+
+def _parse_final_amount(value: Any) -> Optional[float]:
+    if value is None:
+        return None
+    try:
+        return float(str(value).strip())
+    except Exception as e:
+        logger.error("error in final_amount_filter: %s", e)
         return None
 
 
 def hour_filter(rows) -> List[Any]:
-    kept = []
-    for r in rows:
-        ts = r.created_at
-        dt = _parse_dt_local(ts)
-        if not dt:
-            continue
-        if 6 <= dt.hour <= 23:
-            kept.append(r)
-    return kept
+    return [
+        r
+        for r in rows
+        if (dt := _parse_dt_local(getattr(r, "created_at", None))) is not None
+        and 6 <= dt.hour <= 23
+    ]
 
 
 def final_amount_filter(rows) -> List[Any]:
-    kept = []
-    for r in rows:
-        final_amount_raw = getattr(r, "final_amount", None)
-        if final_amount_raw is None:
-            continue
-        try:
-            amount = float(str(final_amount_raw).strip())
-        except Exception as e:
-            logger.error("error in hour_filter: %s", e)
-            continue
-        if amount >= 75.0:
-            kept.append(r)
-    return kept
+    return [
+        r
+        for r in rows
+        if (amount := _parse_final_amount(getattr(r, "final_amount", None))) is not None
+        and amount >= 75.0
+    ]
 
 
 def year_filter(rows, min_year: int = 2024, max_year: int = 2025) -> List[Any]:
-    kept = []
-    for r in rows:
-        ts = r.created_at
-        try:
-            y = datetime.strptime(ts, "%Y-%m-%d %H:%M:%S").year
-        except Exception as e:
-            logger.error("exception while applying year_filter: %s", e)
-            continue
-        if min_year <= y <= max_year:
-            kept.append(r)
-    return kept
+    return [
+        r
+        for r in rows
+        if (dt := _parse_dt_local(getattr(r, "created_at", None))) is not None
+        and min_year <= dt.year <= max_year
+    ]
 
 
 FilterFn = Callable[[List[Any]], List[Any]]
