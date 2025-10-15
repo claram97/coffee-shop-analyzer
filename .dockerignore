@@ -8,3 +8,5 @@ build
 .gitignore
 .vscode
 *.log
+full_data
+partial_data
