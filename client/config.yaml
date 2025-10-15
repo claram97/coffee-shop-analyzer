@@ -14,4 +14,4 @@ retries:
   attempts: 5
   retryInterval: 2 # in seconds
 time:
-  timeAfterProcessing: "600s" #Time to wait after processing all files before shutting down the client
+  timeAfterProcessing: "1s" #Time to wait after processing all files before shutting down the client

@@ -8,6 +8,7 @@ import multiprocessing as mp
 import os
 import queue
 import time
+import threading
 from typing import Optional
 
 from app.results_consumer import ResultsConsumer
@@ -16,6 +17,7 @@ from common.processing import create_filtered_data_batch, message_logger
 
 from middleware.middleware_client import MessageMiddlewareExchange
 from protocol.constants import Opcodes
+from protocol.messages import Finished
 
 from .worker_pool import processing_worker_main
 
@@ -42,6 +44,9 @@ class Orchestrator:
 
         # Per-client state: {client_id: {"finished": bool, "queries_sent": int, "sock": socket}}
         self._client_states: dict[str, dict] = {}
+
+        self._client_ids_lock = threading.RLock()
+        self._client_states_lock = threading.RLock()
 
         results_queue = os.getenv("RESULTS_QUEUE", "orchestrator_results_queue")
         self.results_consumer = ResultsConsumer(results_queue, rabbitmq_host)
@@ -76,18 +81,23 @@ class Orchestrator:
         self._start_worker_processes()
 
     def _get_client_id(self, client_sock) -> Optional[str]:
-        return self._client_ids.get(client_sock)
+        with self._client_ids_lock:
+            return self._client_ids.get(client_sock)
 
     def _register_client(self, client_sock, client_id: str):
-        self._client_ids[client_sock] = client_id
+        with self._client_ids_lock:
+            self._client_ids[client_sock] = client_id
+        with self._client_states_lock:
+            self._client_states[client_id] = {"finished": False, "queries_sent": 0, "sock": client_sock}
         self.results_consumer.register_client(client_sock, client_id)
-        self._client_states[client_id] = {"finished": False, "queries_sent": 0, "sock": client_sock}
 
     def _cleanup_client(self, client_sock):
-        client_id = self._client_ids.pop(client_sock, None)
+        with self._client_ids_lock:
+            client_id = self._client_ids.pop(client_sock, None)
         self.results_consumer.unregister_client(client_sock)
-        if client_id and client_id in self._client_states:
-            self._client_states.pop(client_id)
+        with self._client_states_lock:
+            if client_id and client_id in self._client_states:
+                self._client_states.pop(client_id)
 
     def _publisher_for_rk(self, rk: str) -> MessageMiddlewareExchange:
         pub = self._publishers.get(rk)
@@ -163,10 +173,11 @@ class Orchestrator:
         # Track 'finished' message
         if msg.opcode == Opcodes.FINISHED:
             logging.info("Client finished received in net.py")
-            state = self._client_states.get(client_id)
-            if state:
-                state["finished"] = True
-                self._check_and_close_client(client_id)
+            with self._client_states_lock:
+                state = self._client_states.get(client_id)
+                if state:
+                    state["finished"] = True
+                    self._check_and_close_client(client_id)
             logging.info("action: client_finished | result: received | client_id: %s", client_id)
             return True
 
@@ -176,22 +187,27 @@ class Orchestrator:
         return self.message_handler.handle_message(msg, client_sock, client_id=client_id)
 
     def increment_queries_sent(self, client_id: str):
-        state = self._client_states.get(client_id)
-        if state:
-            state["queries_sent"] += 1
-            self._check_and_close_client(client_id)
+        with self._client_states_lock:
+            state = self._client_states.get(client_id)
+            if state:
+                state["queries_sent"] += 1
+                self._check_and_close_client(client_id)
 
     def _check_and_close_client(self, client_id: str):
-        state = self._client_states.get(client_id)
-        if state and state["finished"] and state["queries_sent"] >= 4:
-            self.results_consumer.unregister_client(client_id)
-            sock = state["sock"]
-            logging.info("action: close_client | result: closing | client_id: %s", client_id)
-            try:
-                sock.close()
-            except Exception:
-                logging.exception("action: close_client | result: fail | client_id: %s", client_id)
-            self._cleanup_client(sock)
+        with self._client_states_lock:
+            state = self._client_states.get(client_id)
+            if state and state["finished"] and state["queries_sent"] >= 4:
+                sock = state["sock"]
+                logging.info("action: close_client | result: closing | client_id: %s", client_id)
+                try:
+                    sock.sendall(Finished().to_bytes())
+                    sock.close()
+                except Exception:
+                    logging.exception("action: close_client | result: fail | client_id: %s", client_id)
+                self.results_consumer.unregister_client(sock)
+                self._client_states.pop(client_id)
+                with self._client_ids_lock:
+                    self._client_ids.pop(sock, None)
 
     def _start_worker_processes(self):
         if self._worker_count <= 0:
