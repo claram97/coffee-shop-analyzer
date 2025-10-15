@@ -1,0 +1,6 @@
+method_id,method_name,category
+1,cash,cash
+2,credit_card,card
+3,debit_card,card
+4,tng,ewallet
+5,grabpay,ewallet
