@@ -1,3 +1,4 @@
+version: "3.8"
 services:
   rabbitmq:
     image: "rabbitmq:3-management"
@@ -5,3 +6,38 @@ services:
     ports:
       - "5672:5672"
       - "15672:15672"
+    environment:
+      - RABBITMQ_DEFAULT_USER=guest
+      - RABBITMQ_DEFAULT_PASS=guest
+      - RABBITMQ_DEFAULT_VHOST=/
+    healthcheck:
+      test: ["CMD", "rabbitmq-diagnostics", "-q", "ping"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+    volumes:
+      - ../rabbitmq.conf:/etc/rabbitmq/rabbitmq.conf
+    networks:
+      - testing_net
+
+  middleware-tests:
+    build:
+      context: ..
+      dockerfile: middleware/Dockerfile.tests
+    environment:
+      - PYTHONUNBUFFERED=1
+      - RABBITMQ_HOST=rabbitmq
+      - MIDDLEWARE_TEST_TIMEOUT=5
+    depends_on:
+      rabbitmq:
+        condition: service_healthy
+    command: python -m unittest -v middleware.middleware_client_test
+    networks:
+      - testing_net
+
+networks:
+  testing_net:
+    ipam:
+      driver: default
+      config:
+        - subnet: 172.25.125.0/24
