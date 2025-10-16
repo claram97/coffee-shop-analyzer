@@ -87,6 +87,8 @@ def main() -> None:
         env["RUN_RABBITMQ_INTEGRATION"] = "1"
         env["RABBITMQ_HOST"] = args.host
         run([
+            sys.executable,
+            "-m",
             "pytest",
             "tests/test_middleware_client_integration.py",
         ], env=env)
