@@ -93,6 +93,8 @@ class TestMessageMiddlewareQueue(unittest.TestCase):
 
         queue.start_consuming(mock.Mock())
 
+        queue._stop_event.set()
+
         thread_cls.assert_called_once()
         thread.start.assert_called_once()
 
@@ -265,6 +267,8 @@ class TestMessageMiddlewareExchange(unittest.TestCase):
         exchange._cleanup_consumer = mock.Mock()
 
         exchange.start_consuming(mock.Mock())
+
+        exchange._stop_event.set()
 
         self.channel.queue_bind.assert_called_once_with(
             exchange="exchange", queue="generated", routing_key="topic.*"
