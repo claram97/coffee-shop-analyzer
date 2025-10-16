@@ -122,7 +122,7 @@ class Aggregator:
         """Reenvía DataBatch a la cola correcta usando el opcode provisto."""
         try:
             table = TID_TO_NAME.get(opcode)
-            logging.info(
+            logging.debug(
                 "Forwarding DataBatch with opcode=%s to table=%s", opcode, table
             )
             if not table:
@@ -252,7 +252,7 @@ class Aggregator:
             query_id = db.query_ids[0] if db.query_ids else None
 
             if int(query_id) == QueryId.SECOND_QUERY:
-                logging.info("Processing transaction item with query 2")
+                logging.debug("Processing transaction item with query 2")
                 processed = process_query_2(rows)
                 out = serialize_query2_results(processed)
                 db.batch_msg.rows = out
