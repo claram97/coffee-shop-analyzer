@@ -1,8 +1,10 @@
 #!/usr/bin/env python3
-"""Run integration tests against a live RabbitMQ container."""
+"""Run integration tests against a live RabbitMQ container.
+
+Requires `pytest` and `pika` to be installed in the current Python environment.
+"""
 
 import argparse
-import importlib.util
 import os
 import socket
 import subprocess
@@ -23,18 +25,6 @@ def run(command, **kwargs):
     result = subprocess.run(command, cwd=REPO_ROOT, check=False, **kwargs)
     if result.returncode != 0:
         raise SystemExit(result.returncode)
-
-
-def ensure_package(module_name: str, install_name: str | None = None) -> None:
-    if importlib.util.find_spec(module_name) is not None:
-        return
-
-    package = install_name or module_name
-    print(f"Installing missing dependency '{package}'...")
-    subprocess.run(
-        [sys.executable, "-m", "pip", "install", package],
-        check=True,
-    )
 
 
 def wait_for_port(host: str, port: int, timeout: int) -> None:
@@ -99,9 +89,6 @@ def main() -> None:
         env = os.environ.copy()
         env["RUN_RABBITMQ_INTEGRATION"] = "1"
         env["RABBITMQ_HOST"] = args.host
-
-        ensure_package("pytest")
-        ensure_package("pika")
 
         run([
             sys.executable,
