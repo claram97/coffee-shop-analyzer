@@ -1,204 +1,306 @@
 import unittest
+from unittest import mock
 import pika
-import time
-import threading
-from middleware_client import MessageMiddlewareQueue, MessageMiddlewareExchange, MessageMiddlewareDisconnectedError
 
-RABBITMQ_HOST = 'localhost'
+from middleware.middleware_client import (
+    MessageMiddlewareQueue,
+    MessageMiddlewareExchange,
+    MessageMiddlewareDisconnectedError,
+)
 
-# To run these tests we need to have a RabbitMQ instance running.
-class TestRabbitMQClient(unittest.TestCase):
-    def test_work_queue_1_to_1(self):
-        queue_name = "work_queue_single"
-        producer = MessageMiddlewareQueue(RABBITMQ_HOST, queue_name)
-        consumer = MessageMiddlewareQueue(RABBITMQ_HOST, queue_name)
-        
-        message_received = None
-        event = threading.Event()
+RABBITMQ_HOST = "localhost"
 
-        def callback(msg):
-            nonlocal message_received
-            message_received = msg
-            event.set()
+class TestMessageMiddlewareQueue(unittest.TestCase):
+    def setUp(self):
+        self.blocking_connection_patcher = mock.patch(
+            "middleware.middleware_client.pika.BlockingConnection"
+        )
+        self.mock_blocking_connection = self.blocking_connection_patcher.start()
+        self.addCleanup(self.blocking_connection_patcher.stop)
 
-        consumer.start_consuming(callback)
-        time.sleep(0.5)
+        self.connection = mock.Mock()
+        self.connection.is_open = True
+        self.connection.add_callback_threadsafe = mock.Mock()
+        self.channel = mock.Mock()
+        self.channel.is_open = True
+        self.connection.channel.return_value = self.channel
+        self.mock_blocking_connection.return_value = self.connection
 
-        sent_message = "data_package_1"
-        producer.send(sent_message.encode('utf-8'))
+    def _create_queue(self, queue_name="test_queue"):
+        return MessageMiddlewareQueue(RABBITMQ_HOST, queue_name)
 
-        event.wait(timeout=2)
+    def test_initialization_declares_queue(self):
+        queue = self._create_queue()
+        self.connection.channel.assert_called_once()
+        self.channel.queue_declare.assert_called_once_with(
+            queue="test_queue", durable=True
+        )
+        self.assertIsNotNone(queue._channel)
 
-        self.assertIsNotNone(message_received)
-        self.assertEqual(sent_message.encode('utf-8'), message_received)
+    def test_send_requires_bytes(self):
+        queue = self._create_queue()
+        with self.assertRaises(ValueError):
+            queue.send("not-bytes")
 
-        producer.close()
-        consumer.delete()
-        consumer.close()
+    def test_send_publishes_message(self):
+        queue = self._create_queue()
+        queue.send(b"payload")
+        self.channel.basic_publish.assert_called_once()
+        _, kwargs = self.channel.basic_publish.call_args
+        self.assertEqual(kwargs["exchange"], "")
+        self.assertEqual(kwargs["routing_key"], "test_queue")
+        self.assertEqual(kwargs["body"], b"payload")
+        self.assertEqual(kwargs["properties"].delivery_mode, 2)
 
-    def test_work_queue_1_to_N(self):
-        queue_name = "work_queue_multi"
-        producer = MessageMiddlewareQueue(RABBITMQ_HOST, queue_name)
-        consumer1 = MessageMiddlewareQueue(RABBITMQ_HOST, queue_name)
-        consumer2 = MessageMiddlewareQueue(RABBITMQ_HOST, queue_name)
+    def test_callback_wrapper_acknowledges_on_success(self):
+        queue = self._create_queue()
+        handler = mock.Mock()
+        wrapper = queue._create_callback_wrapper(handler)
+        method = mock.Mock(delivery_tag="tag")
+        channel = mock.Mock()
+        queue._stop_event.clear()
 
-        received_messages = []
-        lock = threading.Lock()
-        event = threading.Event()
+        wrapper(channel, method, None, b"body")
 
-        def callback(msg):
-            with lock:
-                received_messages.append(msg)
-                if len(received_messages) == 2:
-                    event.set()
+        handler.assert_called_once_with(b"body")
+        channel.basic_ack.assert_called_once_with(delivery_tag="tag")
+        channel.basic_nack.assert_not_called()
 
-        consumer1.start_consuming(callback)
-        consumer2.start_consuming(callback)
-        time.sleep(0.5)
+    def test_callback_wrapper_nacks_on_failure(self):
+        queue = self._create_queue()
+        handler = mock.Mock(side_effect=RuntimeError("boom"))
+        wrapper = queue._create_callback_wrapper(handler)
+        method = mock.Mock(delivery_tag="tag")
+        channel = mock.Mock()
+        queue._stop_event.clear()
 
-        messages_to_send = ["data_package_1", "data_package_2"]
-        producer.send(messages_to_send[0].encode('utf-8'))
-        producer.send(messages_to_send[1].encode('utf-8'))
+        wrapper(channel, method, None, b"body")
 
-        event.wait(timeout=3)
+        handler.assert_called_once_with(b"body")
+        channel.basic_ack.assert_not_called()
+        channel.basic_nack.assert_called_once_with(delivery_tag="tag", requeue=True)
 
-        self.assertEqual(len(received_messages), 2)
-        self.assertSetEqual(set(received_messages), set(msg.encode('utf-8') for msg in messages_to_send))
+    @mock.patch("middleware.middleware_client.threading.Thread")
+    def test_start_consuming_spawns_thread_once(self, thread_cls):
+        thread = mock.Mock()
+        thread.is_alive.return_value = False
+        thread_cls.return_value = thread
+        self.channel.basic_consume.return_value = "consumer-tag"
+        queue = self._create_queue()
 
-        producer.close()
-        consumer1.stop_consuming()
-        consumer2.stop_consuming()
-        consumer1.close()
-        consumer2.close()
-        
-        # Delete the queue after all consumers are closed
-        temp_client = MessageMiddlewareQueue(RABBITMQ_HOST, queue_name)
-        temp_client.delete()
-        temp_client.close()
+        queue.start_consuming(mock.Mock())
 
-    def test_exchange_1_to_1(self):
-        exchange_name = "direct_exchange"
-        routing_key = "route.key"
-        
-        producer = MessageMiddlewareExchange(RABBITMQ_HOST, exchange_name, route_keys=[routing_key])
-        consumer = MessageMiddlewareExchange(RABBITMQ_HOST, exchange_name, route_keys=[routing_key])
-        
-        message_received = None
-        event = threading.Event()
+        thread_cls.assert_called_once()
+        thread.start.assert_called_once()
+        self.channel.basic_consume.assert_called_once_with(
+            queue="test_queue", on_message_callback=mock.ANY
+        )
 
-        def callback(msg):
-            nonlocal message_received
-            message_received = msg
-            event.set()
+        thread.is_alive.return_value = True
+        queue.start_consuming(mock.Mock())
 
-        consumer.start_consuming(callback)
-        time.sleep(0.5)
+        thread_cls.assert_called_once()
 
-        sent_message = "exchange_data"
-        producer.send(sent_message.encode('utf-8'))
+    def test_stop_consuming_requests_stop_and_joins(self):
+        queue = self._create_queue()
 
-        event.wait(timeout=2)
+        thread = mock.Mock()
+        thread.is_alive.return_value = True
+        queue._consuming_thread = thread
 
-        self.assertIsNotNone(message_received)
-        self.assertEqual(sent_message.encode('utf-8'), message_received)
+        queue.stop_consuming()
 
-        producer.close()
-        consumer.delete()
-        consumer.close()
+        self.connection.add_callback_threadsafe.assert_called_once()
+        thread.join.assert_called_once()
+        self.assertIsNone(queue._consuming_thread)
 
-    def test_exchange_1_to_N_topic(self):
-        exchange_name = "topic_exchange"
-        
-        producer = MessageMiddlewareExchange(RABBITMQ_HOST, exchange_name, route_keys=["topic"])
+    def test_stop_consuming_no_thread(self):
+        queue = self._create_queue()
+        queue.stop_consuming()
+        self.connection.add_callback_threadsafe.assert_not_called()
 
-        consumer_type_a = MessageMiddlewareExchange(RABBITMQ_HOST, exchange_name, route_keys=["topic.type_a.*"])
-        consumer_type_b = MessageMiddlewareExchange(RABBITMQ_HOST, exchange_name, route_keys=["topic.type_b.#"])
+    def test_delete_removes_queue_when_channel_open(self):
+        queue = self._create_queue()
 
-        type_a_messages = []
-        type_b_messages = []
-        type_a_event = threading.Event()
-        type_b_event = threading.Event()
+        queue.delete()
 
-        def type_a_callback(msg):
-            type_a_messages.append(msg)
-            type_a_event.set()
+        self.channel.queue_delete.assert_called_once_with(queue="test_queue")
 
-        def type_b_callback(msg):
-            type_b_messages.append(msg)
-            type_b_event.set()
-        
-        consumer_type_a.start_consuming(type_a_callback)
-        consumer_type_b.start_consuming(type_b_callback)
-        time.sleep(0.5)
+    def test_close_closes_connection(self):
+        queue = self._create_queue()
 
-        type_a_producer = MessageMiddlewareExchange(RABBITMQ_HOST, exchange_name, route_keys=["topic.type_a.sub"])
-        type_a_producer.send("data_for_type_a".encode('utf-8'))
-        type_a_event.wait(timeout=2)
-        
-        self.assertIn(b"data_for_type_a", type_a_messages)
-        self.assertEqual(len(type_b_messages), 0)
+        queue.close()
 
-        type_b_producer = MessageMiddlewareExchange(RABBITMQ_HOST, exchange_name, route_keys=["topic.type_b.sub.detail"])
-        type_b_producer.send("data_for_type_b".encode('utf-8'))
-        type_b_event.wait(timeout=2)
-        
-        self.assertIn(b"data_for_type_b", type_b_messages)
-        self.assertEqual(len(type_a_messages), 1)
+        self.connection.close.assert_called_once()
+        self.assertIsNone(queue._connection)
+        self.assertIsNone(queue._channel)
 
-        producer.close()
-        type_a_producer.close()
-        type_b_producer.close()
-        consumer_type_a.delete()
-        consumer_type_a.close()
-        consumer_type_b.close()
+    def test_connection_error_raises_custom_exception(self):
+        self.mock_blocking_connection.side_effect = pika.exceptions.AMQPConnectionError(
+            "failed"
+        )
 
-    def test_stop_consuming(self):
-        queue_name = "stop_demo"
-        consumer = MessageMiddlewareQueue(RABBITMQ_HOST, queue_name)
-        
-        received_messages = []
-        event = threading.Event()
-
-        def callback(msg):
-            received_messages.append(msg)
-            event.set()
-        
-        consumer.start_consuming(callback)
-        time.sleep(0.5)
-        consumer.stop_consuming()
-        time.sleep(1.0)
-
-        producer = MessageMiddlewareQueue(RABBITMQ_HOST, queue_name)
-        producer.send("should_not_be_received".encode('utf-8'))
-        
-        event_triggered = event.wait(timeout=2.0)
-
-        self.assertFalse(event_triggered)
-        self.assertEqual(len(received_messages), 0)
-        
-        producer.close()
-        consumer.delete()
-        consumer.close()
-
-    def test_delete_queue_removes_it_from_broker(self):
-        queue_name = "queue_to_delete"
-        client = MessageMiddlewareQueue(RABBITMQ_HOST, queue_name)
-        
-        client.delete()
-        client.close()
-
-        connection = pika.BlockingConnection(pika.ConnectionParameters(host=RABBITMQ_HOST))
-        channel = connection.channel()
-        
-        with self.assertRaises(pika.exceptions.ChannelClosedByBroker):
-            channel.queue_declare(queue=queue_name, passive=True)
-            
-        connection.close()
-        
-    def test_connection_error(self):
         with self.assertRaises(MessageMiddlewareDisconnectedError):
-            MessageMiddlewareQueue("non_existent_host_12345", "any_queue")
+            MessageMiddlewareQueue(RABBITMQ_HOST, "queue")
 
 
-if __name__ == '__main__':
-    unittest.main(verbosity=2)
+class TestMessageMiddlewareExchange(unittest.TestCase):
+    def setUp(self):
+        self.blocking_connection_patcher = mock.patch(
+            "middleware.middleware_client.pika.BlockingConnection"
+        )
+        self.mock_blocking_connection = self.blocking_connection_patcher.start()
+        self.addCleanup(self.blocking_connection_patcher.stop)
+
+        self.connection = mock.Mock()
+        self.connection.is_open = True
+        self.connection.add_callback_threadsafe = mock.Mock()
+        self.channel = mock.Mock()
+        self.channel.is_open = True
+        self.connection.channel.return_value = self.channel
+        self.mock_blocking_connection.return_value = self.connection
+
+    def _create_exchange(self, route_keys=None, consumer=None, queue_name=None):
+        keys = route_keys if route_keys is not None else ["route.key"]
+        return MessageMiddlewareExchange(
+            RABBITMQ_HOST,
+            "exchange",
+            route_keys=keys,
+            consumer=consumer,
+            queue_name=queue_name,
+        )
+
+    def test_initialization_declares_exchange(self):
+        self._create_exchange()
+
+        self.channel.exchange_declare.assert_called_once_with(
+            exchange="exchange", exchange_type="topic", durable=True
+        )
+
+    def test_initialization_with_consumer_binds_queue(self):
+        exchange = self._create_exchange(
+            route_keys=["key.one", "key.two"], consumer="consumer", queue_name="queue"
+        )
+
+        self.channel.queue_declare.assert_called_once_with(queue="queue", durable=True)
+        self.assertEqual(self.channel.queue_bind.call_count, 2)
+        self.channel.queue_bind.assert_any_call(
+            exchange="exchange", queue="queue", routing_key="key.one"
+        )
+        self.channel.queue_bind.assert_any_call(
+            exchange="exchange", queue="queue", routing_key="key.two"
+        )
+        self.channel.basic_qos.assert_called_once_with(prefetch_count=3)
+        self.assertEqual(exchange.default_routing_key, "key.one")
+
+    def test_send_requires_bytes(self):
+        exchange = self._create_exchange()
+
+        with self.assertRaises(ValueError):
+            exchange.send("not-bytes")
+
+    def test_send_publishes_message(self):
+        exchange = self._create_exchange(route_keys=["topic.key"])
+
+        exchange.send(b"payload")
+
+        self.channel.basic_publish.assert_called_once()
+        _, kwargs = self.channel.basic_publish.call_args
+        self.assertEqual(kwargs["exchange"], "exchange")
+        self.assertEqual(kwargs["routing_key"], "topic.key")
+        self.assertEqual(kwargs["body"], b"payload")
+        self.assertEqual(kwargs["properties"].delivery_mode, 2)
+
+    def test_callback_wrapper_acknowledges_on_success(self):
+        exchange = self._create_exchange()
+
+        handler = mock.Mock()
+        wrapper = exchange._create_callback_wrapper(handler)
+        method = mock.Mock(delivery_tag="tag")
+        channel = mock.Mock()
+        exchange._stop_event.clear()
+
+        wrapper(channel, method, None, b"body")
+
+        handler.assert_called_once_with(b"body")
+        channel.basic_ack.assert_called_once_with(delivery_tag="tag")
+        channel.basic_nack.assert_not_called()
+
+    def test_callback_wrapper_nacks_on_failure(self):
+        exchange = self._create_exchange()
+
+        handler = mock.Mock(side_effect=RuntimeError("boom"))
+        wrapper = exchange._create_callback_wrapper(handler)
+        method = mock.Mock(delivery_tag="tag")
+        channel = mock.Mock()
+        exchange._stop_event.clear()
+
+        wrapper(channel, method, None, b"body")
+
+        handler.assert_called_once_with(b"body")
+        channel.basic_ack.assert_not_called()
+        channel.basic_nack.assert_called_once_with(delivery_tag="tag", requeue=True)
+
+    @mock.patch("middleware.middleware_client.threading.Thread")
+    def test_start_consuming_declares_queue_and_starts_thread(self, thread_cls):
+        thread = mock.Mock()
+        thread.is_alive.return_value = False
+        thread_cls.return_value = thread
+        result = mock.Mock()
+        result.method.queue = "generated"
+        self.channel.queue_declare.return_value = result
+        self.channel.basic_consume.return_value = "consumer-tag"
+        exchange = self._create_exchange(route_keys=["topic.*"])
+
+        exchange.start_consuming(mock.Mock())
+
+        self.channel.queue_bind.assert_called_once_with(
+            exchange="exchange", queue="generated", routing_key="topic.*"
+        )
+        thread_cls.assert_called_once()
+        thread.start.assert_called_once()
+        self.channel.basic_consume.assert_called_once_with(
+            queue="generated", on_message_callback=mock.ANY
+        )
+
+    def test_stop_consuming_requests_stop_and_joins(self):
+        exchange = self._create_exchange()
+
+        thread = mock.Mock()
+        thread.is_alive.return_value = True
+        exchange._consuming_thread = thread
+
+        exchange.stop_consuming()
+
+        self.connection.add_callback_threadsafe.assert_called_once()
+        thread.join.assert_called_once()
+        self.assertIsNone(exchange._consuming_thread)
+
+    def test_stop_consuming_no_thread(self):
+        exchange = self._create_exchange()
+        exchange.stop_consuming()
+        self.connection.add_callback_threadsafe.assert_not_called()
+
+    def test_delete_exchange_when_channel_open(self):
+        exchange = self._create_exchange()
+
+        exchange.delete()
+
+        self.channel.exchange_delete.assert_called_once_with(exchange="exchange")
+
+    def test_close_closes_connection(self):
+        exchange = self._create_exchange()
+
+        exchange.close()
+
+        self.connection.close.assert_called_once()
+        self.assertIsNone(exchange._connection)
+        self.assertIsNone(exchange._channel)
+
+    def test_requires_at_least_one_route_key(self):
+        with self.assertRaises(ValueError):
+            MessageMiddlewareExchange(RABBITMQ_HOST, "exchange", route_keys=[])
+
+
+if __name__ == "__main__":
+    unittest.main()
