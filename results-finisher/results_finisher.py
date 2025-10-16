@@ -514,6 +514,9 @@ class ResultsFinisher:
             query_type = QueryType(int(query_id))
             result_message = self._create_result_message(query_type, result)
 
+            if query_type == QueryType.Q1 and not result_message.rows:
+                return
+
             # Wrap the result in a DataBatch for consistent protocol handling
             batch = DataBatch(
                 query_ids=[int(query_id)],
