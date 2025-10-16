@@ -11,6 +11,7 @@ Its primary trade-off is higher memory usage.
 import datetime
 from collections import defaultdict
 from typing import Any, Callable, Dict, List
+import logging
 
 from constants import QueryType
 
@@ -67,28 +68,22 @@ class Q1Strategy(BaseQueryStrategy):
 
     def finalize(self, consolidated_data: Dict[str, Any]) -> Dict[str, Any]:
         transactions = consolidated_data.get("Transactions", [])
+        # Log only the first 10 transactions
+        for row in transactions[:10]:
+            logging.info(f"Q1 Transaction: {row}")
+        if len(transactions) > 10:
+            logging.info("Only the first 10 transactions are logged.")
+
         filtered_transactions = []
         for row in transactions:
             try:
-                # Simply extract the data without re-filtering
-                # since it was already filtered upstream
                 final_amount = self._safe_extract_numeric(row, "final_amount")
-
-                # Log transaction data for diagnosis
-                import logging
-
-                logging.info(
-                    f"Q1 Transaction: id={row.transaction_id}, final_amount={final_amount}"
-                )
 
                 filtered_transactions.append(
                     {"transaction_id": row.transaction_id, "final_amount": final_amount}
                 )
             except (ValueError, AttributeError):
                 continue
-
-        # Log summary of processed transactions
-        import logging
 
         logging.info("--- Q1 Final Transactions Summary ---")
         logging.info(f"Total filtered transactions: {len(filtered_transactions)}")
@@ -108,14 +103,6 @@ class Q2Strategy(BaseQueryStrategy):
 
     The results-finisher needs to further aggregate these metrics across batches.
     """
-
-    def _log_metrics(self, month: str, item_name: str, quantity: int, revenue: float):
-        """Helper method to log metrics for debugging."""
-        import logging
-
-        logging.info(
-            f"Q2 Metrics: Month={month}, Item={item_name}, Quantity={quantity}, Revenue={revenue}"
-        )
 
     def finalize(self, consolidated_data: Dict[str, Any]) -> Dict[str, Any]:
         # First, aggregate metrics by month and product across all batches
@@ -141,9 +128,7 @@ class Q2Strategy(BaseQueryStrategy):
                     quantity_val = int(raw_quantity_val)
 
                     # Log the raw values we're seeing for diagnosis
-                    import logging
-
-                    logging.info(
+                    logging.debug(
                         f"Q2 Raw Quantity: month={month_key}, item={item_name}, raw_str={quantity_str}, parsed={raw_quantity_val}, final={quantity_val}"
                     )
                 except (ValueError, TypeError) as e:
@@ -157,20 +142,13 @@ class Q2Strategy(BaseQueryStrategy):
                 revenue_val = self._safe_extract_numeric(row, "subtotal")
                 metrics_by_month_product[key]["revenue"] += revenue_val
 
-                # Debug log the metrics to understand what's happening
-                self._log_metrics(month_key, item_name, quantity_val, revenue_val)
             except (ValueError, AttributeError):
                 continue
 
-        # Format results by month
         result_by_month = {}
 
-        # Log summary of aggregation before formatting
-        import logging
-
-        logging.info("--- Q2 Final Aggregated Metrics Summary ---")
         for (month, product_name), metrics in sorted(metrics_by_month_product.items()):
-            logging.info(
+            logging.debug(
                 f"Month={month}, Product={product_name}, Total Quantity={metrics['quantity']}, Total Revenue={metrics['revenue']:.2f}"
             )
 
@@ -248,9 +226,7 @@ class Q3Strategy(BaseQueryStrategy):
                 amount = self._safe_extract_numeric(row, "final_amount")
 
                 # Log the amount processing for diagnosis
-                import logging
-
-                logging.info(
+                logging.debug(
                     f"Q3 Amount: store={store_name}, created_at={created_at}, raw_str={amount_str}, parsed={amount}"
                 )
 
@@ -277,9 +253,7 @@ class Q3Strategy(BaseQueryStrategy):
         final_result = defaultdict(dict)
 
         # Log summary of aggregation before formatting
-        import logging
-
-        logging.info("--- Q3 Final Aggregated Amounts Summary ---")
+        logging.info("--- Q3 Final ---")
         for (store_name, year_semester), total_amount in sorted(
             tpv_by_store_semester.items()
         ):

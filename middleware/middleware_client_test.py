@@ -20,7 +20,6 @@ def _unique_name(prefix: str) -> str:
     return f"{prefix}_{uuid.uuid4().hex[:10]}"
 
 
-# To run these tests we need to have a RabbitMQ instance running.
 class TestRabbitMQClient(unittest.TestCase):
     def test_work_queue_1_to_1(self):
         queue_name = _unique_name("work_queue_single")
@@ -89,6 +88,13 @@ class TestRabbitMQClient(unittest.TestCase):
         exchange_name = _unique_name("direct_exchange")
         queue_name = _unique_name("direct_exchange_queue")
         routing_key = "route.key"
+
+        # Ensure the queue is declared before binding
+        connection = pika.BlockingConnection(pika.ConnectionParameters(host=RABBITMQ_HOST))
+        channel = connection.channel()
+        channel.queue_declare(queue=queue_name)
+        channel.close()
+        connection.close()
 
         producer = MessageMiddlewareExchange(RABBITMQ_HOST, exchange_name, route_keys=[routing_key])
         consumer = MessageMiddlewareExchange(
@@ -209,6 +215,9 @@ class TestRabbitMQClient(unittest.TestCase):
         queue_name = _unique_name("queue_to_delete")
         client = MessageMiddlewareQueue(RABBITMQ_HOST, queue_name)
 
+        # Ensure the queue exists before attempting to delete it
+        client.send(b"test_message")
+
         client.delete()
         client.close()
 
@@ -218,7 +227,9 @@ class TestRabbitMQClient(unittest.TestCase):
         with self.assertRaises(pika.exceptions.ChannelClosedByBroker):
             channel.queue_declare(queue=queue_name, passive=True)
 
-        channel.close()
+        # Check if the channel is open before closing it
+        if channel.is_open:
+            channel.close()
         connection.close()
 
     def test_connection_error(self):

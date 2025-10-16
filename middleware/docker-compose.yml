@@ -31,7 +31,7 @@ services:
     depends_on:
       rabbitmq:
         condition: service_healthy
-    command: python -m unittest -v middleware.middleware_client_test
+    command: python /app/middleware/run_tests.py
     networks:
       - testing_net
 
