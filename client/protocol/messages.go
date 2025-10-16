@@ -117,10 +117,10 @@ type Query1Result struct {
 }
 
 type Query2Result struct {
-	Month    string  `json:"month"`
-	Name     string  `json:"name"`
-	Quantity int     `json:"quantity"`
-	Revenue  float64 `json:"revenue"`
+	Month    string   `json:"month"`
+	Name     string   `json:"name"`
+	Quantity *int     `json:"quantity,omitempty"`
+	Revenue  *float64 `json:"revenue,omitempty"`
 }
 
 type Query3Result struct {
@@ -182,13 +182,27 @@ func (t *QueryResultTable) GetTypedRows() (interface{}, error) {
 	case OpCodeQueryResult2:
 		results := make([]Query2Result, len(t.Rows))
 		for i, row := range t.Rows {
-			quantity, _ := strconv.Atoi(row["quantity"])
-			revenue, _ := strconv.ParseFloat(row["revenue"], 64)
+			var quantityPtr *int
+			if rawQuantity, ok := row["quantity"]; ok && rawQuantity != "" {
+				if parsedQuantity, err := strconv.Atoi(rawQuantity); err == nil {
+					quantity := parsedQuantity
+					quantityPtr = &quantity
+				}
+			}
+
+			var revenuePtr *float64
+			if rawRevenue, ok := row["revenue"]; ok && rawRevenue != "" {
+				if parsedRevenue, err := strconv.ParseFloat(rawRevenue, 64); err == nil {
+					revenue := parsedRevenue
+					revenuePtr = &revenue
+				}
+			}
+
 			results[i] = Query2Result{
 				Month:    row["month"],
 				Name:     row["name"],
-				Quantity: quantity,
-				Revenue:  revenue,
+				Quantity: quantityPtr,
+				Revenue:  revenuePtr,
 			}
 		}
 		return results, nil
