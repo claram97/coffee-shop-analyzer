@@ -1,5 +1,4 @@
 import logging
-import os
 import threading
 import time
 from dataclasses import dataclass, field
@@ -8,23 +7,11 @@ from typing import Any, Dict, Set, Tuple
 from middleware.middleware_client import MessageMiddlewareQueue
 from protocol import BatchStatus, DataBatch, Opcodes, ProtocolError, entities, messages
 from protocol.messages import TableMessage
-
 logging.basicConfig(
     level=logging.INFO, format="%(asctime)s - %(levelname)s - [%(name)s] - %(message)s"
 )
 logger = logging.getLogger(__name__)
-
-# This is for testing different ways of handling the data.
-# Will use this when we have the whole system running.
-STRATEGY_MODE = os.getenv("STRATEGY_MODE", "append_only").lower()
-if STRATEGY_MODE == "incremental":
-    from query_strategy_incremental import get_strategy
-
-    logger.info("Using INCREMENTAL aggregation strategy.")
-else:
-    from query_strategy_append_only import get_strategy
-
-    logger.info("Using APPEND-ONLY aggregation strategy.")
+from query_strategy_append_only import get_strategy
 from constants import QueryType
 
 OPCODE_TO_TABLE_TYPE = {
