@@ -520,7 +520,7 @@ func ReadMessage(reader *bufio.Reader, logger *logging.Logger) (Readable, error)
 			if err == nil && logger != nil {
 				logger.Infof("action: query_result_received | opcode: %d | status: %d | rows: %d", msg.OpCode, msg.BatchStatus, len(msg.Rows))
 			}
-			for _, row := range msg.Rows {
+			for i, row := range msg.Rows {
 				switch msg.OpCode {
 				case OpCodeQueryResult1:
 					logger.Infof("Transaction ID: %s | Final Amount: $%.2f", row["transaction_id"], parseFloat(row["final_amount"]))
@@ -534,7 +534,13 @@ func ReadMessage(reader *bufio.Reader, logger *logging.Logger) (Readable, error)
 					rowJson, _ := json.Marshal(row)
 					logger.Infof("Error Row: %s", string(rowJson))
 				}
-				logger.Infof("") // Add blank line between rows
+				logger.Infof("")
+				if i == 49 {
+					break
+				}
+			}
+			if len(msg.Rows) > 50 {
+				logger.Infof("Only the first 50 transactions are shown as an example. Total transactions: %d", len(msg.Rows))
 			}
 			return msg, err
 		}

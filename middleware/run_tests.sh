@@ -16,7 +16,14 @@ echo "Running tests..."
 docker-compose -f "$COMPOSE_FILE" up --abort-on-container-exit
 
 # Step 3: Capture the exit code of the test container
-TEST_EXIT_CODE=$(docker-compose -f "$COMPOSE_FILE" ps -q middleware-tests | xargs docker inspect -f '{{.State.ExitCode}}')
+CONTAINER_ID=$(docker-compose -f "$COMPOSE_FILE" ps -q middleware-tests)
+if [ -z "$CONTAINER_ID" ]; then
+    echo "Error: Test container 'middleware-tests' not found or not running."
+    docker-compose -f "$COMPOSE_FILE" down
+    exit 1
+fi
+
+TEST_EXIT_CODE=$(docker inspect -f '{{.State.ExitCode}}' "$CONTAINER_ID")
 
 # Step 4: Clean up the containers
 echo "Cleaning up..."
