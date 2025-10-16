@@ -12,7 +12,8 @@ def _return_if_dict_list(rows):
     if isinstance(rows, list):
         if not rows:
             return rows
-        if all(isinstance(row, dict) for row in rows):
+        first = rows[0]
+        if isinstance(first, dict):
             return rows
     return None
 
@@ -36,15 +37,14 @@ def filter_menu_items_columns(rows: List[RawMenuItems]) -> List[Dict]:
     if passthrough is not None:
         return passthrough
 
-    filtered_rows = []
-    for row in rows:
-        filtered_row = {
+    return [
+        {
             "product_id": row.product_id,
             "name": row.name,
-            "price": row.price
+            "price": row.price,
         }
-        filtered_rows.append(filtered_row)
-    return filtered_rows
+        for row in rows
+    ]
 
 
 def filter_stores_columns(rows: List[RawStore]) -> List[Dict]:
@@ -65,14 +65,13 @@ def filter_stores_columns(rows: List[RawStore]) -> List[Dict]:
     if passthrough is not None:
         return passthrough
 
-    filtered_rows = []
-    for row in rows:
-        filtered_row = {
+    return [
+        {
             "store_id": row.store_id,
-            "store_name": row.store_name
+            "store_name": row.store_name,
         }
-        filtered_rows.append(filtered_row)
-    return filtered_rows
+        for row in rows
+    ]
 
 
 def filter_transaction_items_columns(rows: List[RawTransactionItem]) -> List[Dict]:
@@ -93,17 +92,16 @@ def filter_transaction_items_columns(rows: List[RawTransactionItem]) -> List[Dic
     if passthrough is not None:
         return passthrough
 
-    filtered_rows = []
-    for row in rows:
-        filtered_row = {
+    return [
+        {
             "transaction_id": row.transaction_id,
             "item_id": row.item_id,
             "quantity": row.quantity,
             "subtotal": row.subtotal,
-            "created_at": row.created_at
+            "created_at": row.created_at,
         }
-        filtered_rows.append(filtered_row)
-    return filtered_rows
+        for row in rows
+    ]
 
 
 def filter_transactions_columns(rows: List[RawTransaction]) -> List[Dict]:
@@ -124,17 +122,16 @@ def filter_transactions_columns(rows: List[RawTransaction]) -> List[Dict]:
     if passthrough is not None:
         return passthrough
 
-    filtered_rows = []
-    for row in rows:
-        filtered_row = {
+    return [
+        {
             "transaction_id": row.transaction_id,
             "store_id": row.store_id,
             "user_id": row.user_id,
             "final_amount": row.final_amount,
-            "created_at": row.created_at
+            "created_at": row.created_at,
         }
-        filtered_rows.append(filtered_row)
-    return filtered_rows
+        for row in rows
+    ]
 
 
 def filter_users_columns(rows: List[RawUser]) -> List[Dict]:
@@ -151,15 +148,10 @@ def filter_users_columns(rows: List[RawUser]) -> List[Dict]:
         A new list of dictionaries, each representing a user with only
         their ID and birthdate.
     """
-    passthrough = _return_if_dict_list(rows)
-    if passthrough is not None:
-        return passthrough
-
-    filtered_rows = []
-    for row in rows:
-        filtered_row = {
+    return _return_if_dict_list(rows) or [
+        {
             "user_id": row.user_id,
-            "birthdate": row.birthdate
+            "birthdate": row.birthdate,
         }
-        filtered_rows.append(filtered_row)
-    return filtered_rows
+        for row in rows
+    ]

@@ -4,7 +4,11 @@ Refactored Orchestrator using modular architecture.
 """
 
 import logging
+import multiprocessing as mp
 import os
+import queue
+import time
+import threading
 from typing import Optional
 
 from app.results_consumer import ResultsConsumer
@@ -13,6 +17,9 @@ from common.processing import create_filtered_data_batch, message_logger
 
 from middleware.middleware_client import MessageMiddlewareExchange
 from protocol.constants import Opcodes
+from protocol.messages import Finished
+
+from .worker_pool import processing_worker_main
 
 
 class Orchestrator:
@@ -35,6 +42,12 @@ class Orchestrator:
         self.message_handler = MessageHandler()
         self._client_ids: dict[object, str] = {}
 
+        # Per-client state: {client_id: {"finished": bool, "queries_sent": int, "sock": socket}}
+        self._client_states: dict[str, dict] = {}
+
+        self._client_ids_lock = threading.RLock()
+        self._client_states_lock = threading.RLock()
+
         results_queue = os.getenv("RESULTS_QUEUE", "orchestrator_results_queue")
         self.results_consumer = ResultsConsumer(results_queue, rabbitmq_host)
 
@@ -47,18 +60,44 @@ class Orchestrator:
 
         self._host = rabbitmq_host
 
+        self._mp_context = mp.get_context("spawn")
+        self._queue_maxsize = max(1, int(os.getenv("ORCH_PROCESS_QUEUE_SIZE", "128")))
+        worker_default = os.getenv("ORCH_PROCESS_COUNT") or str(self._num_routers)
+        self._worker_count = max(1, int(worker_default))
+        queue_timeout_raw = os.getenv("ORCH_PROCESS_QUEUE_TIMEOUT")
+        self._queue_put_timeout = None
+        if queue_timeout_raw:
+            try:
+                self._queue_put_timeout = float(queue_timeout_raw)
+            except ValueError:
+                logging.warning(
+                    "action: queue_timeout_parse | result: fail | value: %s",
+                    queue_timeout_raw,
+                )
+        self._task_queue: mp.Queue = self._mp_context.Queue(maxsize=self._queue_maxsize)
+        self._workers: list[mp.Process] = []
+
         self._setup_message_processors()
+        self._start_worker_processes()
 
     def _get_client_id(self, client_sock) -> Optional[str]:
-        return self._client_ids.get(client_sock)
+        with self._client_ids_lock:
+            return self._client_ids.get(client_sock)
 
     def _register_client(self, client_sock, client_id: str):
-        self._client_ids[client_sock] = client_id
+        with self._client_ids_lock:
+            self._client_ids[client_sock] = client_id
+        with self._client_states_lock:
+            self._client_states[client_id] = {"finished": False, "queries_sent": 0, "sock": client_sock}
         self.results_consumer.register_client(client_sock, client_id)
 
     def _cleanup_client(self, client_sock):
-        self._client_ids.pop(client_sock, None)
+        with self._client_ids_lock:
+            client_id = self._client_ids.pop(client_sock, None)
         self.results_consumer.unregister_client(client_sock)
+        with self._client_states_lock:
+            if client_id and client_id in self._client_states:
+                self._client_states.pop(client_id)
 
     def _publisher_for_rk(self, rk: str) -> MessageMiddlewareExchange:
         pub = self._publishers.get(rk)
@@ -130,26 +169,150 @@ class Orchestrator:
             return False
 
         setattr(msg, "client_id", client_id)
+
+        # Track 'finished' message
+        if msg.opcode == Opcodes.FINISHED:
+            logging.info("Client finished received in net.py")
+            with self._client_states_lock:
+                state = self._client_states.get(client_id)
+                if state:
+                    state["finished"] = True
+                    self._check_and_close_client(client_id)
+            logging.info("action: client_finished | result: received | client_id: %s", client_id)
+            return True
+
+        # Track queries sent (simulate: increment when sending a query)
+        # You should call self._increment_queries_sent(client_id) wherever you send a query to the client
+
         return self.message_handler.handle_message(msg, client_sock, client_id=client_id)
+
+    def increment_queries_sent(self, client_id: str):
+        with self._client_states_lock:
+            state = self._client_states.get(client_id)
+            if state:
+                state["queries_sent"] += 1
+                self._check_and_close_client(client_id)
+
+    def _check_and_close_client(self, client_id: str):
+        with self._client_states_lock:
+            state = self._client_states.get(client_id)
+            if state and state["finished"] and state["queries_sent"] >= 4:
+                sock = state["sock"]
+                logging.info("action: close_client | result: closing | client_id: %s", client_id)
+                try:
+                    sock.sendall(Finished().to_bytes())
+                    sock.close()
+                except Exception:
+                    logging.exception("action: close_client | result: fail | client_id: %s", client_id)
+                self.results_consumer.unregister_client(sock)
+                self._client_states.pop(client_id)
+                with self._client_ids_lock:
+                    self._client_ids.pop(sock, None)
+
+    def _cleanup_all_clients(self):
+        """Clean up all remaining clients on shutdown."""
+        with self._client_states_lock:
+            for client_id, state in list(self._client_states.items()):
+                sock = state["sock"]
+                try:
+                    sock.close()
+                except Exception:
+                    pass
+                self.results_consumer.unregister_client(sock)
+            self._client_states.clear()
+        with self._client_ids_lock:
+            for sock in list(self._client_ids.keys()):
+                try:
+                    sock.close()
+                except Exception:
+                    pass
+                self.results_consumer.unregister_client(sock)
+            self._client_ids.clear()
+
+    def _start_worker_processes(self):
+        if self._worker_count <= 0:
+            return
+
+        logging.info(
+            "action: start_worker_pool | workers: %d | queue_maxsize: %d",
+            self._worker_count,
+            self._queue_maxsize,
+        )
+
+        for worker_idx in range(self._worker_count):
+            proc = self._mp_context.Process(
+                target=processing_worker_main,
+                name=f"orch-worker-{worker_idx}",
+                args=(
+                    self._task_queue,
+                    worker_idx,
+                    self._host,
+                    self._fr_exchange,
+                    self._fr_rk_fmt,
+                    self._num_routers,
+                ),
+                daemon=True,
+            )
+            proc.start()
+            self._workers.append(proc)
+
+    def _stop_worker_processes(self):
+        if not getattr(self, "_workers", None):
+            return
+
+        for _ in self._workers:
+            try:
+                self._task_queue.put(None)
+            except Exception:
+                logging.exception("action: stop_worker_processes | result: put_sentinel_failed")
+
+        for proc in self._workers:
+            proc.join(timeout=5)
+            if proc.is_alive():
+                logging.warning(
+                    "action: stop_worker_processes | result: terminate | worker: %s",
+                    proc.name,
+                )
+                proc.terminate()
+                proc.join(timeout=1)
+
+        self._workers.clear()
+
+        try:
+            self._task_queue.close()
+            self._task_queue.join_thread()
+        except Exception:
+            logging.debug("action: stop_worker_processes | result: queue_close_skip")
+
+    def _enqueue_processing_task(self, msg, client_id: str):
+        while True:
+            try:
+                self._task_queue.put((msg, client_id), block=True, timeout=self._queue_put_timeout)
+                break  # Exit the loop if the message is successfully added to the queue
+            except queue.Full:
+                logging.warning(
+                    "action: enqueue_data_batch | result: retry | reason: queue_full | batch_number: %d | opcode: %d",
+                    getattr(msg, "batch_number", 0),
+                    getattr(msg, "opcode", -1),
+                )
+                time.sleep(0.1)  # Wait for a short time before retrying
+            except Exception:
+                logging.exception("action: enqueue_data_batch | result: fail | reason: unexpected")
+                raise
 
     def _process_data_message(self, msg, client_sock) -> bool:
         try:
-    
-            # self.results_consumer.register_client(client_sock)
+            client_id = getattr(msg, "client_id", None)
+            if not client_id:
+                raise RuntimeError("missing client_id for data message")
 
-            status_text = self.message_handler.get_status_text(
-                getattr(msg, "batch_status", 0)
-            )
-
-            message_logger.write_original_message(msg, status_text)
-
-            self._process_filtered_batch(msg, status_text)
-
-            message_logger.log_batch_processing_success(msg, status_text)
-            self.message_handler.log_batch_preview(msg, status_text)
+            self._enqueue_processing_task(msg, client_id)
 
             ResponseHandler.send_success(client_sock)
             return True
+        except queue.Full:
+            ResponseHandler.send_failure(client_sock)
+            return False
         except Exception as e:
             return ResponseHandler.handle_processing_error(msg, client_sock, e)
 
@@ -209,11 +372,14 @@ class Orchestrator:
 
     def run(self):
         """Start the orchestrator server and results consumer."""
+        self.results_consumer.set_orchestrator(self)
         self.results_consumer.start()
         try:
             self.server_manager.run()
         finally:
+            self._stop_worker_processes()
             self.results_consumer.stop()
+            self._cleanup_all_clients()
 
 
 class MockFilterRouterQueue:
@@ -224,3 +390,4 @@ class MockFilterRouterQueue:
             "action: mock_queue_send | result: success | message_size: %d bytes",
             len(message_bytes),
         )
+

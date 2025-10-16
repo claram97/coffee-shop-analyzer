@@ -1,5 +1,4 @@
 import logging
-import os
 import threading
 import time
 from dataclasses import dataclass, field
@@ -8,23 +7,11 @@ from typing import Any, Dict, Set, Tuple
 from middleware.middleware_client import MessageMiddlewareQueue
 from protocol import BatchStatus, DataBatch, Opcodes, ProtocolError, entities, messages
 from protocol.messages import TableMessage
-
 logging.basicConfig(
     level=logging.INFO, format="%(asctime)s - %(levelname)s - [%(name)s] - %(message)s"
 )
 logger = logging.getLogger(__name__)
-
-# This is for testing different ways of handling the data.
-# Will use this when we have the whole system running.
-STRATEGY_MODE = os.getenv("STRATEGY_MODE", "append_only").lower()
-if STRATEGY_MODE == "incremental":
-    from query_strategy_incremental import get_strategy
-
-    logger.info("Using INCREMENTAL aggregation strategy.")
-else:
-    from query_strategy_append_only import get_strategy
-
-    logger.info("Using APPEND-ONLY aggregation strategy.")
+from query_strategy_append_only import get_strategy
 from constants import QueryType
 
 OPCODE_TO_TABLE_TYPE = {
@@ -527,6 +514,9 @@ class ResultsFinisher:
             query_type = QueryType(int(query_id))
             result_message = self._create_result_message(query_type, result)
 
+            if query_type == QueryType.Q1 and not result_message.rows:
+                return
+
             # Wrap the result in a DataBatch for consistent protocol handling
             batch = DataBatch(
                 query_ids=[int(query_id)],
@@ -591,43 +581,33 @@ class ResultsFinisher:
             return message
 
         elif query_type == QueryType.Q2:
-            # Q2: Product metrics by month
+            # Q2: Product metrics by month (top quantity and top revenue per month)
             message = messages.QueryResult2()
-            # Create a dictionary to merge quantity and revenue for each product
             for month, data in result.items():
-                # Create a dictionary to store product metrics by name
-                product_metrics = {}
+                quantity_entries = data.get("by_quantity", [])
+                revenue_entries = data.get("by_revenue", [])
 
-                # Process quantity metrics
-                for product in data.get("by_quantity", []):
-                    name = product.get("name", "")
-                    quantity = product.get("quantity", 0)
-                    product_metrics[name] = product_metrics.get(
-                        name, {"quantity": 0, "revenue": 0.0}
-                    )
-                    product_metrics[name]["quantity"] = quantity
-
-                # Process revenue metrics
-                for product in data.get("by_revenue", []):
-                    name = product.get("name", "")
-                    revenue = product.get("revenue", 0.0)
-                    product_metrics[name] = product_metrics.get(
-                        name, {"quantity": 0, "revenue": 0.0}
-                    )
-                    product_metrics[name]["revenue"] = revenue
-
-                # Create result rows with both quantity and revenue
-                for name, metrics in product_metrics.items():
-                    # Only include products with either non-zero quantity or revenue
-                    if metrics["quantity"] != 0 or metrics["revenue"] != 0:
-                        message.rows.append(
-                            entities.ResultProductMetrics(
-                                month=month,
-                                name=name,
-                                quantity=str(metrics["quantity"]),
-                                revenue=str(metrics["revenue"]),
-                            )
+                if quantity_entries:
+                    top_q = quantity_entries[0]
+                    message.rows.append(
+                        entities.ResultProductMetrics(
+                            month=month,
+                            name=top_q.get("name", ""),
+                            quantity=str(top_q.get("quantity", 0)),
+                            revenue=None,
                         )
+                    )
+
+                if revenue_entries:
+                    top_r = revenue_entries[0]
+                    message.rows.append(
+                        entities.ResultProductMetrics(
+                            month=month,
+                            name=top_r.get("name", ""),
+                            quantity=None,
+                            revenue=str(top_r.get("revenue", 0.0)),
+                        )
+                    )
             return message
 
         elif query_type == QueryType.Q3:

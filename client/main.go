@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"os"
 	"strings"
+	"time"
 
 	"github.com/op/go-logging"
 	"github.com/spf13/viper"
@@ -104,5 +105,9 @@ func main() {
 
 	client := common.NewClient(clientConfig)
 
+	timeAfterProcessing := v.GetDuration("time.timeAfterProcessing")
+	log.Infof("Will wait %s seconds before shutting down the client", timeAfterProcessing)
 	client.SendBatch()
+
+	time.Sleep(timeAfterProcessing)
 }

@@ -125,7 +125,7 @@ def run_test():
         # 1. & 2. Start services
         print("--- Starting all services ---")
         initiate_system.start_services(
-            topology=Topology.ONE_TO_ONE,
+            topology=Topology.ONE_TO_MANY,
             project_root=PROJECT_ROOT,
         )
         time.sleep(5)
@@ -155,7 +155,7 @@ def run_test():
         if services_started:
             initiate_client.stop_docker_services(project_root=PROJECT_ROOT)
             initiate_system.stop_services(
-                project_root=PROJECT_ROOT, topology=Topology.ONE_TO_ONE
+                project_root=PROJECT_ROOT, topology=Topology.ONE_TO_MANY
             )
         print("Cleanup complete.")
 

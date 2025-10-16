@@ -2,19 +2,11 @@
   {
     "month": "2024-01",
     "name": "Mocha",
-    "quantity": 3,
-    "revenue": 28.5
+    "quantity": 3
   },
   {
     "month": "2024-01",
     "name": "Flat White",
-    "quantity": 2,
-    "revenue": 18
-  },
-  {
-    "month": "2024-01",
-    "name": "Matcha Latte",
-    "quantity": 1,
-    "revenue": 10
+    "revenue": 60
   }
 ]

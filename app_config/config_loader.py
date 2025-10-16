@@ -28,6 +28,7 @@ class WorkersCfg:
     aggregators: int
     joiners: int
     results: int
+    orchestrators: int
 
 
 @dataclass(frozen=True)
@@ -107,7 +108,10 @@ class Config:
         w_aggs = cp.getint("aggregators", "workers", fallback=1)
         w_joiners = cp.getint("joiners", "workers", fallback=1)
         w_results = cp.getint("results", "workers", fallback=1)
-        self.workers = WorkersCfg(w_filters, w_aggs, w_joiners, w_results)
+        w_orchestrators = cp.getint("orchestrator", "workers", fallback=1)
+        self.workers = WorkersCfg(
+            w_filters, w_aggs, w_joiners, w_results, w_orchestrators
+        )
 
         n = cp["names"]
         self.names = NamesCfg(

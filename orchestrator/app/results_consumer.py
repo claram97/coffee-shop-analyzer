@@ -26,9 +26,17 @@ class ResultsConsumer:
         self.client_connections = {}
         self.middleware = None
         self.stopping = False
-        self.queries_sent = {}  # Dict: client_id -> set of query_ids
         self.client_lock = threading.Lock()
+
+    def set_orchestrator(self, orchestrator):
+        """Set the orchestrator instance for the consumer.
         
+        Args:
+            orchestrator: The orchestrator instance
+        """
+        self.orchestrator = orchestrator
+        logging.info("action: set_orchestrator | result: success")
+
     def start(self):
         """Start consuming results from the queue."""
         try:
@@ -54,29 +62,20 @@ class ResultsConsumer:
                 logging.error(f"action: results_consumer_stop | result: fail | error: {e}")
 
     def register_client(self, client_connection, client_id: str):
-
-        """Register a client connection to receive results for a specific query.
-        
-        Args:
-            client_connection: The client socket or connection object
-        """
+        """Register a client connection to receive results for a specific query."""
         with self.client_lock:
             self.client_connections[client_id] = client_connection
-            self.queries_sent[client_id] = set()  # Inicializar set por cliente
             logging.info(
                 "action: client_registered | result: success | client_id: %s",
                 client_id,
             )
 
     def unregister_client(self, client_id: str):
-        """Unregister the client from receiving results.
-        """
+        """Unregister the client from receiving results."""
         with self.client_lock:
             key = client_id
             if key in self.client_connections:
                 del self.client_connections[key]
-            if key in self.queries_sent:
-                del self.queries_sent[key]  # Limpiar queries_sent por cliente
             logging.info(
                 "action: client_unregistered | result: success | client_id: %s",
                 client_id,
@@ -177,32 +176,20 @@ class ResultsConsumer:
 
             
     def _forward_result_to_client(self, query_id, result_bytes, client_id: str):
-        """Forward the result to the appropriate client.
-        
-        Args:
-            query_id: The query ID to find the associated client
-            result_bytes: The raw result bytes to forward
-        """
+        """Forward the result to the appropriate client."""
         client_conn = None
         with self.client_lock:
             client_conn = self.client_connections.get(client_id)
-            
         if not client_conn:
             logging.warning(f"action: forward_result | result: no_client | query_id: {query_id}")
             return
-            
         try:
             # Send the raw bytes to the client
             client_conn.sendall(result_bytes)
-            self.queries_sent[client_id].add(query_id)  # Agregar a set por cliente
             bytes_sent = len(result_bytes)
             logging.info(f"action: forward_result | result: success | query_id: {query_id} | bytes_sent: {bytes_sent}")
-            if len(self.queries_sent[client_id]) == 4:  # Chequear por cliente
-                logging.info("action: all_queries_sent | result: success | unregistering_client")
-                finished_msg = Finished()
-                client_conn.sendall(finished_msg.to_bytes())
-                client_conn.close()  # Cerrar la conexión después de enviar FINISHED
-                self.unregister_client(client_id)
+            # Orchestrator tracks queries sent and handles FINISHED/close logic
+            self.orchestrator.increment_queries_sent(client_id)
         except Exception as e:
             logging.error(f"action: forward_result | result: fail | query_id: {query_id} | error: {str(e)}")
             # Clean up the connection on error

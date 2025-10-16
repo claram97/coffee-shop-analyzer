@@ -23,6 +23,12 @@ services:
       interval: 30s
       timeout: 10s
       retries: 5
+    volumes:
+      - ./rabbitmq.conf:/etc/rabbitmq/rabbitmq.conf
+    ulimits:
+      nofile:
+        soft: 65536
+        hard: 65536
 
   orchestrator:
     container_name: orchestrator
@@ -37,6 +43,9 @@ services:
       - ORCH_TO_FR_EXCHANGE=fr.ex
       - ORCH_TO_FR_RK_FMT=fr.{pid:02d}
       - FILTER_ROUTER_COUNT=1
+      - ORCH_PROCESS_COUNT=1
+      - ORCH_PROCESS_QUEUE_SIZE=256
+      - ORCH_PROCESS_QUEUE_TIMEOUT=10.0
     networks:
       - testing_net
     volumes:
@@ -59,7 +68,7 @@ services:
     networks:
       - testing_net
     volumes:
-      - ./integration_tests/sys_config.ini:/config/config.ini:ro
+      - ./integration_tests/sys_config_one_to_one.ini:/config/config.ini:ro
     depends_on:
       rabbitmq:
         condition: service_healthy
@@ -77,7 +86,7 @@ services:
     networks:
       - testing_net
     volumes:
-      - ./integration_tests/sys_config.ini:/config/config.ini:ro
+      - ./integration_tests/sys_config_one_to_one.ini:/config/config.ini:ro
     depends_on:
       rabbitmq:
         condition: service_healthy
@@ -97,7 +106,7 @@ services:
     networks:
       - testing_net
     volumes:
-      - ./integration_tests/sys_config.ini:/config/config.ini:ro
+      - ./integration_tests/sys_config_one_to_one.ini:/config/config.ini:ro
     depends_on:
       rabbitmq:
         condition: service_healthy
@@ -117,7 +126,7 @@ services:
     networks:
       - testing_net
     volumes:
-      - ./integration_tests/sys_config.ini:/config/config.ini:ro
+      - ./integration_tests/sys_config_one_to_one.ini:/config/config.ini:ro
     depends_on:
       rabbitmq:
         condition: service_healthy
@@ -137,7 +146,7 @@ services:
     networks:
       - testing_net
     volumes:
-      - ./integration_tests/sys_config.ini:/config/config.ini:ro
+      - ./integration_tests/sys_config_one_to_one.ini:/config/config.ini:ro
     depends_on:
       rabbitmq:
         condition: service_healthy
@@ -213,6 +222,12 @@ services:
       interval: 30s
       timeout: 10s
       retries: 5
+    volumes:
+      - ./rabbitmq.conf:/etc/rabbitmq/rabbitmq.conf
+    ulimits:
+      nofile:
+        soft: 65536
+        hard: 65536
 
   orchestrator:
     container_name: orchestrator
@@ -227,6 +242,9 @@ services:
       - ORCH_TO_FR_EXCHANGE=fr.ex
       - ORCH_TO_FR_RK_FMT=fr.{pid:02d}
       - FILTER_ROUTER_COUNT=6
+      - ORCH_PROCESS_COUNT=1
+      - ORCH_PROCESS_QUEUE_SIZE=256
+      - ORCH_PROCESS_QUEUE_TIMEOUT=10.0
     networks:
       - testing_net
     volumes:
@@ -249,7 +267,7 @@ services:
     networks:
       - testing_net
     volumes:
-      - ./integration_tests/sys_config.ini:/config/config.ini:ro
+      - ./integration_tests/sys_config_one_to_many.ini:/config/config.ini:ro
     depends_on:
       rabbitmq:
         condition: service_healthy
@@ -268,7 +286,7 @@ services:
     networks:
       - testing_net
     volumes:
-      - ./integration_tests/sys_config.ini:/config/config.ini:ro
+      - ./integration_tests/sys_config_one_to_many.ini:/config/config.ini:ro
     depends_on:
       rabbitmq:
         condition: service_healthy
@@ -287,7 +305,7 @@ services:
     networks:
       - testing_net
     volumes:
-      - ./integration_tests/sys_config.ini:/config/config.ini:ro
+      - ./integration_tests/sys_config_one_to_many.ini:/config/config.ini:ro
     depends_on:
       rabbitmq:
         condition: service_healthy
@@ -306,7 +324,7 @@ services:
     networks:
       - testing_net
     volumes:
-      - ./integration_tests/sys_config.ini:/config/config.ini:ro
+      - ./integration_tests/sys_config_one_to_many.ini:/config/config.ini:ro
     depends_on:
       rabbitmq:
         condition: service_healthy
@@ -325,7 +343,7 @@ services:
     networks:
       - testing_net
     volumes:
-      - ./integration_tests/sys_config.ini:/config/config.ini:ro
+      - ./integration_tests/sys_config_one_to_many.ini:/config/config.ini:ro
     depends_on:
       rabbitmq:
         condition: service_healthy
@@ -344,7 +362,7 @@ services:
     networks:
       - testing_net
     volumes:
-      - ./integration_tests/sys_config.ini:/config/config.ini:ro
+      - ./integration_tests/sys_config_one_to_many.ini:/config/config.ini:ro
     depends_on:
       rabbitmq:
         condition: service_healthy
@@ -362,7 +380,7 @@ services:
     networks:
       - testing_net
     volumes:
-      - ./integration_tests/sys_config.ini:/config/config.ini:ro
+      - ./integration_tests/sys_config_one_to_many.ini:/config/config.ini:ro
     depends_on:
       rabbitmq:
         condition: service_healthy
@@ -382,7 +400,7 @@ services:
     networks:
       - testing_net
     volumes:
-      - ./integration_tests/sys_config.ini:/config/config.ini:ro
+      - ./integration_tests/sys_config_one_to_many.ini:/config/config.ini:ro
     depends_on:
       rabbitmq:
         condition: service_healthy
@@ -402,7 +420,7 @@ services:
     networks:
       - testing_net
     volumes:
-      - ./integration_tests/sys_config.ini:/config/config.ini:ro
+      - ./integration_tests/sys_config_one_to_many.ini:/config/config.ini:ro
     depends_on:
       rabbitmq:
         condition: service_healthy
@@ -422,7 +440,7 @@ services:
     networks:
       - testing_net
     volumes:
-      - ./integration_tests/sys_config.ini:/config/config.ini:ro
+      - ./integration_tests/sys_config_one_to_many.ini:/config/config.ini:ro
     depends_on:
       rabbitmq:
         condition: service_healthy
@@ -442,7 +460,7 @@ services:
     networks:
       - testing_net
     volumes:
-      - ./integration_tests/sys_config.ini:/config/config.ini:ro
+      - ./integration_tests/sys_config_one_to_many.ini:/config/config.ini:ro
     depends_on:
       rabbitmq:
         condition: service_healthy
@@ -462,7 +480,7 @@ services:
     networks:
       - testing_net
     volumes:
-      - ./integration_tests/sys_config.ini:/config/config.ini:ro
+      - ./integration_tests/sys_config_one_to_many.ini:/config/config.ini:ro
     depends_on:
       rabbitmq:
         condition: service_healthy
@@ -482,7 +500,7 @@ services:
     networks:
       - testing_net
     volumes:
-      - ./integration_tests/sys_config.ini:/config/config.ini:ro
+      - ./integration_tests/sys_config_one_to_many.ini:/config/config.ini:ro
     depends_on:
       rabbitmq:
         condition: service_healthy
@@ -502,7 +520,7 @@ services:
     networks:
       - testing_net
     volumes:
-      - ./integration_tests/sys_config.ini:/config/config.ini:ro
+      - ./integration_tests/sys_config_one_to_many.ini:/config/config.ini:ro
     depends_on:
       rabbitmq:
         condition: service_healthy
@@ -522,7 +540,7 @@ services:
     networks:
       - testing_net
     volumes:
-      - ./integration_tests/sys_config.ini:/config/config.ini:ro
+      - ./integration_tests/sys_config_one_to_many.ini:/config/config.ini:ro
     depends_on:
       rabbitmq:
         condition: service_healthy
@@ -542,7 +560,7 @@ services:
     networks:
       - testing_net
     volumes:
-      - ./integration_tests/sys_config.ini:/config/config.ini:ro
+      - ./integration_tests/sys_config_one_to_many.ini:/config/config.ini:ro
     depends_on:
       rabbitmq:
         condition: service_healthy
@@ -562,7 +580,7 @@ services:
     networks:
       - testing_net
     volumes:
-      - ./integration_tests/sys_config.ini:/config/config.ini:ro
+      - ./integration_tests/sys_config_one_to_many.ini:/config/config.ini:ro
     depends_on:
       rabbitmq:
         condition: service_healthy
@@ -582,7 +600,7 @@ services:
     networks:
       - testing_net
     volumes:
-      - ./integration_tests/sys_config.ini:/config/config.ini:ro
+      - ./integration_tests/sys_config_one_to_many.ini:/config/config.ini:ro
     depends_on:
       rabbitmq:
         condition: service_healthy
@@ -602,7 +620,7 @@ services:
     networks:
       - testing_net
     volumes:
-      - ./integration_tests/sys_config.ini:/config/config.ini:ro
+      - ./integration_tests/sys_config_one_to_many.ini:/config/config.ini:ro
     depends_on:
       rabbitmq:
         condition: service_healthy
@@ -622,7 +640,7 @@ services:
     networks:
       - testing_net
     volumes:
-      - ./integration_tests/sys_config.ini:/config/config.ini:ro
+      - ./integration_tests/sys_config_one_to_many.ini:/config/config.ini:ro
     depends_on:
       rabbitmq:
         condition: service_healthy
@@ -642,27 +660,7 @@ services:
     networks:
       - testing_net
     volumes:
-      - ./integration_tests/sys_config.ini:/config/config.ini:ro
-    depends_on:
-      rabbitmq:
-        condition: service_healthy
-      aggregator-0:
-        condition: service_started
-
-  joiner-router-3:
-    container_name: joiner-router-3
-    build:
-      context: .
-      dockerfile: joiner/Dockerfile.router
-    environment:
-      - PYTHONUNBUFFERED=1
-      - LOG_LEVEL=INFO
-      - CONFIG_PATH=/config/config.ini
-      - JOINER_ROUTER_INDEX=3
-    networks:
-      - testing_net
-    volumes:
-      - ./integration_tests/sys_config.ini:/config/config.ini:ro
+      - ./integration_tests/sys_config_one_to_many.ini:/config/config.ini:ro
     depends_on:
       rabbitmq:
         condition: service_healthy
@@ -682,7 +680,7 @@ services:
     networks:
       - testing_net
     volumes:
-      - ./integration_tests/sys_config.ini:/config/config.ini:ro
+      - ./integration_tests/sys_config_one_to_many.ini:/config/config.ini:ro
     depends_on:
       rabbitmq:
         condition: service_healthy
@@ -702,7 +700,7 @@ services:
     networks:
       - testing_net
     volumes:
-      - ./integration_tests/sys_config.ini:/config/config.ini:ro
+      - ./integration_tests/sys_config_one_to_many.ini:/config/config.ini:ro
     depends_on:
       rabbitmq:
         condition: service_healthy
@@ -722,7 +720,7 @@ services:
     networks:
       - testing_net
     volumes:
-      - ./integration_tests/sys_config.ini:/config/config.ini:ro
+      - ./integration_tests/sys_config_one_to_many.ini:/config/config.ini:ro
     depends_on:
       rabbitmq:
         condition: service_healthy
@@ -742,47 +740,724 @@ services:
     networks:
       - testing_net
     volumes:
-      - ./integration_tests/sys_config.ini:/config/config.ini:ro
+      - ./integration_tests/sys_config_one_to_many.ini:/config/config.ini:ro
     depends_on:
       rabbitmq:
         condition: service_healthy
       joiner-router-0:
         condition: service_started
 
-  joiner-worker-4:
-    container_name: joiner-worker-4
+  results-router-0:
+    container_name: results-router-0
+    build:
+      context: .
+      dockerfile: results-finisher/Dockerfile.router
+    environment:
+      - PYTHONUNBUFFERED=1
+      - RABBITMQ_HOST=rabbitmq
+      - LOG_LEVEL=INFO
+      - INPUT_QUEUE=results.controller.in
+      - OUTPUT_QUEUES=finisher_input_queue_0,finisher_input_queue_1,finisher_input_queue_2,finisher_input_queue_3
+    networks:
+      - testing_net
+    volumes:
+      - ./results-finisher:/app/results-finisher:ro
+    depends_on:
+      rabbitmq:
+        condition: service_healthy
+
+  results-router-1:
+    container_name: results-router-1
+    build:
+      context: .
+      dockerfile: results-finisher/Dockerfile.router
+    environment:
+      - PYTHONUNBUFFERED=1
+      - RABBITMQ_HOST=rabbitmq
+      - LOG_LEVEL=INFO
+      - INPUT_QUEUE=results.controller.in
+      - OUTPUT_QUEUES=finisher_input_queue_0,finisher_input_queue_1,finisher_input_queue_2,finisher_input_queue_3
+    networks:
+      - testing_net
+    volumes:
+      - ./results-finisher:/app/results-finisher:ro
+    depends_on:
+      rabbitmq:
+        condition: service_healthy
+
+  results-router-2:
+    container_name: results-router-2
+    build:
+      context: .
+      dockerfile: results-finisher/Dockerfile.router
+    environment:
+      - PYTHONUNBUFFERED=1
+      - RABBITMQ_HOST=rabbitmq
+      - LOG_LEVEL=INFO
+      - INPUT_QUEUE=results.controller.in
+      - OUTPUT_QUEUES=finisher_input_queue_0,finisher_input_queue_1,finisher_input_queue_2,finisher_input_queue_3
+    networks:
+      - testing_net
+    volumes:
+      - ./results-finisher:/app/results-finisher:ro
+    depends_on:
+      rabbitmq:
+        condition: service_healthy
+
+  results-router-3:
+    container_name: results-router-3
+    build:
+      context: .
+      dockerfile: results-finisher/Dockerfile.router
+    environment:
+      - PYTHONUNBUFFERED=1
+      - RABBITMQ_HOST=rabbitmq
+      - LOG_LEVEL=INFO
+      - INPUT_QUEUE=results.controller.in
+      - OUTPUT_QUEUES=finisher_input_queue_0,finisher_input_queue_1,finisher_input_queue_2,finisher_input_queue_3
+    networks:
+      - testing_net
+    volumes:
+      - ./results-finisher:/app/results-finisher:ro
+    depends_on:
+      rabbitmq:
+        condition: service_healthy
+
+  results-finisher-0:
+    container_name: results-finisher-0
+    build:
+      context: .
+      dockerfile: results-finisher/Dockerfile
+    environment:
+      - PYTHONUNBUFFERED=1
+      - RABBITMQ_HOST=rabbitmq
+      - LOG_LEVEL=INFO
+      - STRATEGY_MODE=append_only  # Can be 'append_only' or 'incremental'
+      - INPUT_QUEUE=finisher_input_queue_0
+      - OUTPUT_QUEUE=orchestrator_results_queue
+    networks:
+      - testing_net
+    volumes:
+      - ./results-finisher:/app/results-finisher:ro
+    depends_on:
+      rabbitmq:
+        condition: service_healthy
+      results-router-0:
+        condition: service_started
+
+  results-finisher-1:
+    container_name: results-finisher-1
+    build:
+      context: .
+      dockerfile: results-finisher/Dockerfile
+    environment:
+      - PYTHONUNBUFFERED=1
+      - RABBITMQ_HOST=rabbitmq
+      - LOG_LEVEL=INFO
+      - STRATEGY_MODE=append_only  # Can be 'append_only' or 'incremental'
+      - INPUT_QUEUE=finisher_input_queue_1
+      - OUTPUT_QUEUE=orchestrator_results_queue
+    networks:
+      - testing_net
+    volumes:
+      - ./results-finisher:/app/results-finisher:ro
+    depends_on:
+      rabbitmq:
+        condition: service_healthy
+      results-router-0:
+        condition: service_started
+
+  results-finisher-2:
+    container_name: results-finisher-2
+    build:
+      context: .
+      dockerfile: results-finisher/Dockerfile
+    environment:
+      - PYTHONUNBUFFERED=1
+      - RABBITMQ_HOST=rabbitmq
+      - LOG_LEVEL=INFO
+      - STRATEGY_MODE=append_only  # Can be 'append_only' or 'incremental'
+      - INPUT_QUEUE=finisher_input_queue_2
+      - OUTPUT_QUEUE=orchestrator_results_queue
+    networks:
+      - testing_net
+    volumes:
+      - ./results-finisher:/app/results-finisher:ro
+    depends_on:
+      rabbitmq:
+        condition: service_healthy
+      results-router-0:
+        condition: service_started
+
+  results-finisher-3:
+    container_name: results-finisher-3
+    build:
+      context: .
+      dockerfile: results-finisher/Dockerfile
+    environment:
+      - PYTHONUNBUFFERED=1
+      - RABBITMQ_HOST=rabbitmq
+      - LOG_LEVEL=INFO
+      - STRATEGY_MODE=append_only  # Can be 'append_only' or 'incremental'
+      - INPUT_QUEUE=finisher_input_queue_3
+      - OUTPUT_QUEUE=orchestrator_results_queue
+    networks:
+      - testing_net
+    volumes:
+      - ./results-finisher:/app/results-finisher:ro
+    depends_on:
+      rabbitmq:
+        condition: service_healthy
+      results-router-0:
+        condition: service_started
+
+networks:
+  testing_net:
+    ipam:
+      driver: default
+      config:
+        - subnet: 172.25.125.0/24
+"""
+
+DOCKER_COMPOSE_MANY_TO_MANY = """
+version: '3.8'
+services:
+  rabbitmq:
+    container_name: rabbitmq
+    image: rabbitmq:3-management
+    ports:
+      - "5672:5672"
+      - "15672:15672"
+    environment:
+      - RABBITMQ_DEFAULT_USER=guest
+      - RABBITMQ_DEFAULT_PASS=guest
+      - RABBITMQ_DEFAULT_VHOST=/
+    networks:
+      - testing_net
+    healthcheck:
+      test: ["CMD", "rabbitmq-diagnostics", "-q", "ping"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+    volumes:
+      - ./rabbitmq.conf:/etc/rabbitmq/rabbitmq.conf
+    ulimits:
+      nofile:
+        soft: 65536
+        hard: 65536
+
+  orchestrator:
+    container_name: orchestrator
+    build:
+      context: .
+      dockerfile: orchestrator/Dockerfile
+    entrypoint: python3 /main.py
+    environment:
+      - PYTHONUNBUFFERED=1
+      - CLIENTS_AMOUNT=1
+      - RABBITMQ_HOST=rabbitmq
+      - ORCH_TO_FR_EXCHANGE=fr.ex
+      - ORCH_TO_FR_RK_FMT=fr.{pid:02d}
+      - FILTER_ROUTER_COUNT=6
+      - ORCH_PROCESS_COUNT=8
+      - ORCH_PROCESS_QUEUE_SIZE=256
+      - ORCH_PROCESS_QUEUE_TIMEOUT=10.0
+    networks:
+      - testing_net
+    volumes:
+      - ./orchestrator/config.ini:/app/config.ini:ro
+    depends_on:
+      rabbitmq:
+        condition: service_healthy
+
+  filter-router-0:
+    container_name: filter-router-0
+    build:
+      context: .
+      dockerfile: filter/Dockerfile.router
+    environment:
+      - PYTHONUNBUFFERED=1
+      - RABBITMQ_HOST=rabbitmq
+      - LOG_LEVEL=INFO
+      - CONFIG_PATH=/config/config.ini
+      - FILTER_ROUTER_INDEX=0
+    networks:
+      - testing_net
+    volumes:
+      - ./integration_tests/sys_config_many_to_many.ini:/config/config.ini:ro
+    depends_on:
+      rabbitmq:
+        condition: service_healthy
+
+  filter-router-1:
+    container_name: filter-router-1
+    build:
+      context: .
+      dockerfile: filter/Dockerfile.router
+    environment:
+      - PYTHONUNBUFFERED=1
+      - RABBITMQ_HOST=rabbitmq
+      - LOG_LEVEL=INFO
+      - CONFIG_PATH=/config/config.ini
+      - FILTER_ROUTER_INDEX=1
+    networks:
+      - testing_net
+    volumes:
+      - ./integration_tests/sys_config_many_to_many.ini:/config/config.ini:ro
+    depends_on:
+      rabbitmq:
+        condition: service_healthy
+
+  filter-router-2:
+    container_name: filter-router-2
+    build:
+      context: .
+      dockerfile: filter/Dockerfile.router
+    environment:
+      - PYTHONUNBUFFERED=1
+      - RABBITMQ_HOST=rabbitmq
+      - LOG_LEVEL=INFO
+      - CONFIG_PATH=/config/config.ini
+      - FILTER_ROUTER_INDEX=2
+    networks:
+      - testing_net
+    volumes:
+      - ./integration_tests/sys_config_many_to_many.ini:/config/config.ini:ro
+    depends_on:
+      rabbitmq:
+        condition: service_healthy
+
+  filter-router-3:
+    container_name: filter-router-3
+    build:
+      context: .
+      dockerfile: filter/Dockerfile.router
+    environment:
+      - PYTHONUNBUFFERED=1
+      - RABBITMQ_HOST=rabbitmq
+      - LOG_LEVEL=INFO
+      - CONFIG_PATH=/config/config.ini
+      - FILTER_ROUTER_INDEX=3
+    networks:
+      - testing_net
+    volumes:
+      - ./integration_tests/sys_config_many_to_many.ini:/config/config.ini:ro
+    depends_on:
+      rabbitmq:
+        condition: service_healthy
+
+  filter-router-4:
+    container_name: filter-router-4
+    build:
+      context: .
+      dockerfile: filter/Dockerfile.router
+    environment:
+      - PYTHONUNBUFFERED=1
+      - RABBITMQ_HOST=rabbitmq
+      - LOG_LEVEL=INFO
+      - CONFIG_PATH=/config/config.ini
+      - FILTER_ROUTER_INDEX=4
+    networks:
+      - testing_net
+    volumes:
+      - ./integration_tests/sys_config_many_to_many.ini:/config/config.ini:ro
+    depends_on:
+      rabbitmq:
+        condition: service_healthy
+
+  filter-router-5:
+    container_name: filter-router-5
+    build:
+      context: .
+      dockerfile: filter/Dockerfile.router
+    environment:
+      - PYTHONUNBUFFERED=1
+      - RABBITMQ_HOST=rabbitmq
+      - LOG_LEVEL=INFO
+      - CONFIG_PATH=/config/config.ini
+      - FILTER_ROUTER_INDEX=5
+    networks:
+      - testing_net
+    volumes:
+      - ./integration_tests/sys_config_many_to_many.ini:/config/config.ini:ro
+    depends_on:
+      rabbitmq:
+        condition: service_healthy
+
+  filter-worker-0:
+    container_name: filter-worker-0
+    build:
+      context: .
+      dockerfile: filter/Dockerfile.worker
+    environment:
+      - PYTHONUNBUFFERED=1
+      - RABBITMQ_HOST=rabbitmq
+      - LOG_LEVEL=INFO
+      - CONFIG_PATH=/config/config.ini
+    networks:
+      - testing_net
+    volumes:
+      - ./integration_tests/sys_config_many_to_many.ini:/config/config.ini:ro
+    depends_on:
+      rabbitmq:
+        condition: service_healthy
+      filter-router-0:
+        condition: service_started
+
+  filter-worker-1:
+    container_name: filter-worker-1
+    build:
+      context: .
+      dockerfile: filter/Dockerfile.worker
+    environment:
+      - PYTHONUNBUFFERED=1
+      - RABBITMQ_HOST=rabbitmq
+      - LOG_LEVEL=INFO
+      - CONFIG_PATH=/config/config.ini
+    networks:
+      - testing_net
+    volumes:
+      - ./integration_tests/sys_config_many_to_many.ini:/config/config.ini:ro
+    depends_on:
+      rabbitmq:
+        condition: service_healthy
+      filter-router-0:
+        condition: service_started
+
+  filter-worker-2:
+    container_name: filter-worker-2
+    build:
+      context: .
+      dockerfile: filter/Dockerfile.worker
+    environment:
+      - PYTHONUNBUFFERED=1
+      - RABBITMQ_HOST=rabbitmq
+      - LOG_LEVEL=INFO
+      - CONFIG_PATH=/config/config.ini
+    networks:
+      - testing_net
+    volumes:
+      - ./integration_tests/sys_config_many_to_many.ini:/config/config.ini:ro
+    depends_on:
+      rabbitmq:
+        condition: service_healthy
+      filter-router-0:
+        condition: service_started
+
+  filter-worker-3:
+    container_name: filter-worker-3
+    build:
+      context: .
+      dockerfile: filter/Dockerfile.worker
+    environment:
+      - PYTHONUNBUFFERED=1
+      - RABBITMQ_HOST=rabbitmq
+      - LOG_LEVEL=INFO
+      - CONFIG_PATH=/config/config.ini
+    networks:
+      - testing_net
+    volumes:
+      - ./integration_tests/sys_config_many_to_many.ini:/config/config.ini:ro
+    depends_on:
+      rabbitmq:
+        condition: service_healthy
+      filter-router-0:
+        condition: service_started
+
+  filter-worker-4:
+    container_name: filter-worker-4
+    build:
+      context: .
+      dockerfile: filter/Dockerfile.worker
+    environment:
+      - PYTHONUNBUFFERED=1
+      - RABBITMQ_HOST=rabbitmq
+      - LOG_LEVEL=INFO
+      - CONFIG_PATH=/config/config.ini
+    networks:
+      - testing_net
+    volumes:
+      - ./integration_tests/sys_config_many_to_many.ini:/config/config.ini:ro
+    depends_on:
+      rabbitmq:
+        condition: service_healthy
+      filter-router-0:
+        condition: service_started
+
+  filter-worker-5:
+    container_name: filter-worker-5
+    build:
+      context: .
+      dockerfile: filter/Dockerfile.worker
+    environment:
+      - PYTHONUNBUFFERED=1
+      - RABBITMQ_HOST=rabbitmq
+      - LOG_LEVEL=INFO
+      - CONFIG_PATH=/config/config.ini
+    networks:
+      - testing_net
+    volumes:
+      - ./integration_tests/sys_config_many_to_many.ini:/config/config.ini:ro
+    depends_on:
+      rabbitmq:
+        condition: service_healthy
+      filter-router-0:
+        condition: service_started
+
+  filter-worker-6:
+    container_name: filter-worker-6
+    build:
+      context: .
+      dockerfile: filter/Dockerfile.worker
+    environment:
+      - PYTHONUNBUFFERED=1
+      - RABBITMQ_HOST=rabbitmq
+      - LOG_LEVEL=INFO
+      - CONFIG_PATH=/config/config.ini
+    networks:
+      - testing_net
+    volumes:
+      - ./integration_tests/sys_config_many_to_many.ini:/config/config.ini:ro
+    depends_on:
+      rabbitmq:
+        condition: service_healthy
+      filter-router-0:
+        condition: service_started
+
+  filter-worker-7:
+    container_name: filter-worker-7
+    build:
+      context: .
+      dockerfile: filter/Dockerfile.worker
+    environment:
+      - PYTHONUNBUFFERED=1
+      - RABBITMQ_HOST=rabbitmq
+      - LOG_LEVEL=INFO
+      - CONFIG_PATH=/config/config.ini
+    networks:
+      - testing_net
+    volumes:
+      - ./integration_tests/sys_config_many_to_many.ini:/config/config.ini:ro
+    depends_on:
+      rabbitmq:
+        condition: service_healthy
+      filter-router-0:
+        condition: service_started
+
+  aggregator-0:
+    container_name: aggregator-0
+    build:
+      context: .
+      dockerfile: aggregator/Dockerfile
+    environment:
+      - PYTHONUNBUFFERED=1
+      - CONFIG_PATH=/config/config.ini
+      - LOG_LEVEL=INFO
+      - AGGREGATOR_ID=0
+    networks:
+      - testing_net
+    volumes:
+      - ./integration_tests/sys_config_many_to_many.ini:/config/config.ini:ro
+    depends_on:
+      rabbitmq:
+        condition: service_healthy
+      filter-router-0:
+        condition: service_started
+
+  aggregator-1:
+    container_name: aggregator-1
+    build:
+      context: .
+      dockerfile: aggregator/Dockerfile
+    environment:
+      - PYTHONUNBUFFERED=1
+      - CONFIG_PATH=/config/config.ini
+      - LOG_LEVEL=INFO
+      - AGGREGATOR_ID=1
+    networks:
+      - testing_net
+    volumes:
+      - ./integration_tests/sys_config_many_to_many.ini:/config/config.ini:ro
+    depends_on:
+      rabbitmq:
+        condition: service_healthy
+      filter-router-0:
+        condition: service_started
+
+  aggregator-2:
+    container_name: aggregator-2
+    build:
+      context: .
+      dockerfile: aggregator/Dockerfile
+    environment:
+      - PYTHONUNBUFFERED=1
+      - CONFIG_PATH=/config/config.ini
+      - LOG_LEVEL=INFO
+      - AGGREGATOR_ID=2
+    networks:
+      - testing_net
+    volumes:
+      - ./integration_tests/sys_config_many_to_many.ini:/config/config.ini:ro
+    depends_on:
+      rabbitmq:
+        condition: service_healthy
+      filter-router-0:
+        condition: service_started
+
+  aggregator-3:
+    container_name: aggregator-3
+    build:
+      context: .
+      dockerfile: aggregator/Dockerfile
+    environment:
+      - PYTHONUNBUFFERED=1
+      - CONFIG_PATH=/config/config.ini
+      - LOG_LEVEL=INFO
+      - AGGREGATOR_ID=3
+    networks:
+      - testing_net
+    volumes:
+      - ./integration_tests/sys_config_many_to_many.ini:/config/config.ini:ro
+    depends_on:
+      rabbitmq:
+        condition: service_healthy
+      filter-router-0:
+        condition: service_started
+
+  joiner-router-0:
+    container_name: joiner-router-0
+    build:
+      context: .
+      dockerfile: joiner/Dockerfile.router
+    environment:
+      - PYTHONUNBUFFERED=1
+      - LOG_LEVEL=INFO
+      - CONFIG_PATH=/config/config.ini
+      - JOINER_ROUTER_INDEX=0
+    networks:
+      - testing_net
+    volumes:
+      - ./integration_tests/sys_config_many_to_many.ini:/config/config.ini:ro
+    depends_on:
+      rabbitmq:
+        condition: service_healthy
+      aggregator-0:
+        condition: service_started
+
+  joiner-router-1:
+    container_name: joiner-router-1
+    build:
+      context: .
+      dockerfile: joiner/Dockerfile.router
+    environment:
+      - PYTHONUNBUFFERED=1
+      - LOG_LEVEL=INFO
+      - CONFIG_PATH=/config/config.ini
+      - JOINER_ROUTER_INDEX=1
+    networks:
+      - testing_net
+    volumes:
+      - ./integration_tests/sys_config_many_to_many.ini:/config/config.ini:ro
+    depends_on:
+      rabbitmq:
+        condition: service_healthy
+      aggregator-0:
+        condition: service_started
+
+  joiner-router-2:
+    container_name: joiner-router-2
+    build:
+      context: .
+      dockerfile: joiner/Dockerfile.router
+    environment:
+      - PYTHONUNBUFFERED=1
+      - LOG_LEVEL=INFO
+      - CONFIG_PATH=/config/config.ini
+      - JOINER_ROUTER_INDEX=2
+    networks:
+      - testing_net
+    volumes:
+      - ./integration_tests/sys_config_many_to_many.ini:/config/config.ini:ro
+    depends_on:
+      rabbitmq:
+        condition: service_healthy
+      aggregator-0:
+        condition: service_started
+
+  joiner-worker-0:
+    container_name: joiner-worker-0
     build:
       context: .
       dockerfile: joiner/Dockerfile.worker
     environment:
       - PYTHONUNBUFFERED=1
       - LOG_LEVEL=INFO
-      - JOINER_WORKER_INDEX=4
+      - JOINER_WORKER_INDEX=0
       - CONFIG_PATH=/config/config.ini
     networks:
       - testing_net
     volumes:
-      - ./integration_tests/sys_config.ini:/config/config.ini:ro
+      - ./integration_tests/sys_config_many_to_many.ini:/config/config.ini:ro
     depends_on:
       rabbitmq:
         condition: service_healthy
       joiner-router-0:
         condition: service_started
 
-  joiner-worker-5:
-    container_name: joiner-worker-5
+  joiner-worker-1:
+    container_name: joiner-worker-1
     build:
       context: .
       dockerfile: joiner/Dockerfile.worker
     environment:
       - PYTHONUNBUFFERED=1
       - LOG_LEVEL=INFO
-      - JOINER_WORKER_INDEX=5
+      - JOINER_WORKER_INDEX=1
       - CONFIG_PATH=/config/config.ini
     networks:
       - testing_net
     volumes:
-      - ./integration_tests/sys_config.ini:/config/config.ini:ro
+      - ./integration_tests/sys_config_many_to_many.ini:/config/config.ini:ro
+    depends_on:
+      rabbitmq:
+        condition: service_healthy
+      joiner-router-0:
+        condition: service_started
+
+  joiner-worker-2:
+    container_name: joiner-worker-2
+    build:
+      context: .
+      dockerfile: joiner/Dockerfile.worker
+    environment:
+      - PYTHONUNBUFFERED=1
+      - LOG_LEVEL=INFO
+      - JOINER_WORKER_INDEX=2
+      - CONFIG_PATH=/config/config.ini
+    networks:
+      - testing_net
+    volumes:
+      - ./integration_tests/sys_config_many_to_many.ini:/config/config.ini:ro
+    depends_on:
+      rabbitmq:
+        condition: service_healthy
+      joiner-router-0:
+        condition: service_started
+
+  joiner-worker-3:
+    container_name: joiner-worker-3
+    build:
+      context: .
+      dockerfile: joiner/Dockerfile.worker
+    environment:
+      - PYTHONUNBUFFERED=1
+      - LOG_LEVEL=INFO
+      - JOINER_WORKER_INDEX=3
+      - CONFIG_PATH=/config/config.ini
+    networks:
+      - testing_net
+    volumes:
+      - ./integration_tests/sys_config_many_to_many.ini:/config/config.ini:ro
     depends_on:
       rabbitmq:
         condition: service_healthy
@@ -1009,7 +1684,12 @@ def start_services(topology: Topology, project_root: Path | None = None):
     print(f"Writing {compose_filename} to: {compose_file_path}")
     try:
         with open(compose_file_path, "w") as f:
-            f.write(DOCKER_COMPOSE_ONE_TO_ONE_YAML)
+            if topology == Topology.ONE_TO_ONE:
+                f.write(DOCKER_COMPOSE_ONE_TO_ONE_YAML)
+            elif topology == Topology.ONE_TO_MANY:
+                f.write(DOCKER_COMPOSE_ONE_TO_MANY_YAML)
+            elif topology == Topology.MANY_TO_MANY:
+                f.write(DOCKER_COMPOSE_MANY_TO_MANY)
         print("File created successfully.")
     except IOError as e:
         print(f"Error writing to file {compose_file_path}: {e}")
