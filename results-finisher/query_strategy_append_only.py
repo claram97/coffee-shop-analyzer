@@ -197,7 +197,28 @@ class Q2Strategy(BaseQueryStrategy):
             month_data["by_quantity"] = month_data["by_quantity"][:1]
             month_data["by_revenue"] = month_data["by_revenue"][:1]
 
-        return dict(sorted(result_by_month.items()))
+        flattened_results = []
+        for month, data in sorted(result_by_month.items()):
+            if data["by_quantity"]:
+                top_quantity = data["by_quantity"][0]
+                flattened_results.append(
+                    {
+                        "month": month,
+                        "name": top_quantity["name"],
+                        "quantity": top_quantity["quantity"],
+                    }
+                )
+            if data["by_revenue"]:
+                top_revenue = data["by_revenue"][0]
+                flattened_results.append(
+                    {
+                        "month": month,
+                        "name": top_revenue["name"],
+                        "revenue": top_revenue["revenue"],
+                    }
+                )
+
+        return flattened_results
 
 
 class Q3Strategy(BaseQueryStrategy):
