@@ -66,20 +66,19 @@ class Q1Strategy(BaseQueryStrategy):
     """Strategy for Q1: Handles pre-filtered transactions (already filtered by amount and time)."""
 
     def finalize(self, consolidated_data: Dict[str, Any]) -> Dict[str, Any]:
-        transactions = consolidated_data.get("Transactions", [])
+        # Limit logging to 10 rows for Q1Strategy
+        transactions = consolidated_data.get("Transactions", [])[:10]
+        for row in transactions:
+            logging.info(f"Q1 Transaction: {row}")
+        if len(consolidated_data.get("Transactions", [])) > 10:
+            logging.info("Only the first 10 transactions are logged.")
+
         filtered_transactions = []
         for row in transactions:
             try:
                 # Simply extract the data without re-filtering
                 # since it was already filtered upstream
                 final_amount = self._safe_extract_numeric(row, "final_amount")
-
-                # Log transaction data for diagnosis
-                import logging
-
-                logging.info(
-                    f"Q1 Transaction: id={row.transaction_id}, final_amount={final_amount}"
-                )
 
                 filtered_transactions.append(
                     {"transaction_id": row.transaction_id, "final_amount": final_amount}

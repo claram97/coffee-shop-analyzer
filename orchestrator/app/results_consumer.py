@@ -132,20 +132,35 @@ class ResultsConsumer:
                 f"opcode: {inner_opcode} ({opcode_name}) | batch_status: {batch_status} ({status_text}) | rows: {row_count}"
             )
             
-            # Log ALL rows from the result
+            # Log ALL rows from the result for queries other than QUERY_RESULT_1
             if row_count > 0 and hasattr(data_batch.batch_msg, "rows"):
                 try:
-                    for i, row in enumerate(data_batch.batch_msg.rows):
-                        row_data = {}
-                        if isinstance(row, dict):
-                            # For dictionary rows
-                            row_data = row
-                        else:
-                            # For object rows, convert to dict for logging
-                            attrs = [attr for attr in dir(row) if not attr.startswith('_') and not callable(getattr(row, attr))]
-                            row_data = {attr: getattr(row, attr) for attr in attrs}
-                        
-                        logging.info(f"action: result_row | query_id: {query_id} | row: {i+1}/{row_count} | data: {row_data}")
+                    if inner_opcode == Opcodes.QUERY_RESULT_1:
+                        max_rows_to_log = 10
+                        rows_to_log = data_batch.batch_msg.rows[:max_rows_to_log]
+                        logging.info(f"action: query_1_amount_rows | query_id: {query_id} | total_rows: {row_count} | logging_first: {max_rows_to_log}")
+                        for i, row in enumerate(rows_to_log):
+                            row_data = {}
+                            if isinstance(row, dict):
+                                row_data = row
+                            else:
+                                attrs = [attr for attr in dir(row) if not attr.startswith('_') and not callable(getattr(row, attr))]
+                                row_data = {attr: getattr(row, attr) for attr in attrs}
+                            logging.info(f"action: result_row | query_id: {query_id} | row: {i+1}/{row_count} | data: {row_data}")
+                        if row_count > max_rows_to_log:
+                            logging.info(f"action: result_row | query_id: {query_id} | message: 'Only logged first {max_rows_to_log} rows out of {row_count}'")
+                    else:
+                        # Log all rows for other query types
+                        for i, row in enumerate(data_batch.batch_msg.rows):
+                            row_data = {}
+                            if isinstance(row, dict):
+                                # For dictionary rows
+                                row_data = row
+                            else:
+                                # For object rows, convert to dict for logging
+                                attrs = [attr for attr in dir(row) if not attr.startswith('_') and not callable(getattr(row, attr))]
+                                row_data = {attr: getattr(row, attr) for attr in attrs}
+                            logging.info(f"action: result_row | query_id: {query_id} | row: {i+1}/{row_count} | data: {row_data}")
                 except Exception as e:
                     logging.warning(f"action: log_row_data | result: fail | error: {str(e)}")
             
