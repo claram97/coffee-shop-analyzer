@@ -103,7 +103,7 @@ cat >> "$OUT_PATH" <<YAML
     networks:
       - testing_net
     volumes:
-      - ./app_config/config.ini:/config/config.ini:ro
+      - $INI_PATH:/config/config.ini:ro
     depends_on:
       rabbitmq:
         condition: service_healthy
@@ -127,7 +127,7 @@ cat >> "$OUT_PATH" <<YAML
     networks:
       - testing_net
     volumes:
-      - ./app_config/config.ini:/config/config.ini:ro
+      - $INI_PATH:/config/config.ini:ro
     depends_on:
       rabbitmq:
         condition: service_healthy
@@ -153,7 +153,7 @@ cat >> "$OUT_PATH" <<YAML
     networks:
       - testing_net
     volumes:
-      - ./app_config/config.ini:/config/config.ini:ro
+      - $INI_PATH:/config/config.ini:ro
     depends_on:
       rabbitmq:
         condition: service_healthy
@@ -179,7 +179,7 @@ cat >> "$OUT_PATH" <<YAML
     networks:
       - testing_net
     volumes:
-      - ./app_config/config.ini:/config/config.ini:ro
+      - $INI_PATH:/config/config.ini:ro
     depends_on:
       rabbitmq:
         condition: service_healthy
@@ -205,7 +205,7 @@ cat >> "$OUT_PATH" <<YAML
     networks:
       - testing_net
     volumes:
-      - ./app_config/config.ini:/config/config.ini:ro
+      - $INI_PATH:/config/config.ini:ro
     depends_on:
       rabbitmq:
         condition: service_healthy
