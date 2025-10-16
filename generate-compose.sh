@@ -20,7 +20,7 @@ while getopts "c:o:" opt; do
   esac
 done
 
-read FILTERS AGGS JOINERS FINISHERS < <(python3 ./app_config/config_subscript.py -c "$INI_PATH" workers --format=plain)
+read FILTERS AGGS JOINERS FINISHERS ORCHESTRATORS < <(python3 ./app_config/config_subscript.py -c "$INI_PATH" workers --format=plain)
 read FR_ROUTERS J_ROUTERS RESULTS_ROUTERS < <(python3 ./app_config/config_subscript.py -c "$INI_PATH" routers --format=plain)
 
 eval "$(python3 ./app_config/config_subscript.py -c "$INI_PATH" broker --format=env)"
@@ -53,6 +53,12 @@ services:
       interval: 30s
       timeout: 10s
       retries: 5
+    volumes:
+      - ./rabbitmq.conf:/etc/rabbitmq/rabbitmq.conf
+    ulimits:
+      nofile:
+        soft: 65536
+        hard: 65536
 
   orchestrator:
     container_name: orchestrator
@@ -67,6 +73,9 @@ services:
       - ORCH_TO_FR_EXCHANGE=fr.ex
       - ORCH_TO_FR_RK_FMT=fr.{pid:02d}
       - FILTER_ROUTER_COUNT=${FR_ROUTERS}
+      - ORCH_PROCESS_COUNT=${ORCHESTRATORS}
+      - ORCH_PROCESS_QUEUE_SIZE=256
+      - ORCH_PROCESS_QUEUE_TIMEOUT=10.0
     networks:
       - testing_net
     volumes:
