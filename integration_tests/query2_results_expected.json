@@ -2,13 +2,11 @@
   {
     "month": "2024-01",
     "name": "Mocha",
-    "quantity": 3,
-    "revenue": 0
+    "quantity": 3
   },
   {
     "month": "2024-01",
     "name": "Flat White",
-    "quantity": 0,
     "revenue": 60
   }
 ]
