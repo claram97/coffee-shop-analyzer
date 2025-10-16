@@ -174,8 +174,9 @@ def test_queue_send_receive_1_to_n():
         producer.close()
         consumer_a.close()
         consumer_b.close()
-        with MessageMiddlewareQueue(RABBITMQ_HOST, queue_name) as cleanup:
-            cleanup.delete()
+        cleanup = MessageMiddlewareQueue(RABBITMQ_HOST, queue_name)
+        cleanup.delete()
+        cleanup.close()
 
 
 def test_exchange_publish_subscribe_1_to_1():

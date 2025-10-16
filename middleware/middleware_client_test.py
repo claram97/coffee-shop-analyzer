@@ -88,13 +88,22 @@ class TestMessageMiddlewareQueue(unittest.TestCase):
         self.channel.basic_consume.return_value = "consumer-tag"
         queue = self._create_queue()
 
+        queue._process_events_until_stopped = mock.Mock()
+        queue._cleanup_consumer = mock.Mock()
+
         queue.start_consuming(mock.Mock())
 
         thread_cls.assert_called_once()
         thread.start.assert_called_once()
-        self.channel.basic_consume.assert_called_once_with(
-            queue="test_queue", on_message_callback=mock.ANY
-        )
+
+        target = thread_cls.call_args.kwargs["target"]
+        args = thread_cls.call_args.kwargs["args"]
+        target(*args)
+
+        self.channel.basic_consume.assert_called_once()
+        call_kwargs = self.channel.basic_consume.call_args.kwargs
+        self.assertEqual(call_kwargs["queue"], "test_queue")
+        self.assertIn("on_message_callback", call_kwargs)
 
         thread.is_alive.return_value = True
         queue.start_consuming(mock.Mock())
@@ -252,6 +261,9 @@ class TestMessageMiddlewareExchange(unittest.TestCase):
         self.channel.basic_consume.return_value = "consumer-tag"
         exchange = self._create_exchange(route_keys=["topic.*"])
 
+        exchange._process_events_until_stopped = mock.Mock()
+        exchange._cleanup_consumer = mock.Mock()
+
         exchange.start_consuming(mock.Mock())
 
         self.channel.queue_bind.assert_called_once_with(
@@ -259,9 +271,15 @@ class TestMessageMiddlewareExchange(unittest.TestCase):
         )
         thread_cls.assert_called_once()
         thread.start.assert_called_once()
-        self.channel.basic_consume.assert_called_once_with(
-            queue="generated", on_message_callback=mock.ANY
-        )
+
+        target = thread_cls.call_args.kwargs["target"]
+        args = thread_cls.call_args.kwargs["args"]
+        target(*args)
+
+        self.channel.basic_consume.assert_called_once()
+        call_kwargs = self.channel.basic_consume.call_args.kwargs
+        self.assertEqual(call_kwargs["queue"], "generated")
+        self.assertIn("on_message_callback", call_kwargs)
 
     def test_stop_consuming_requests_stop_and_joins(self):
         exchange = self._create_exchange()
