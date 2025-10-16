@@ -7,7 +7,9 @@ import random
 import threading
 import time
 from collections import defaultdict
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
+from queue import Queue, Empty
 from random import randint
 from typing import Any, Dict, List, Optional, Union
 
@@ -202,6 +204,7 @@ class FilterRouter:
         self._log = logging.getLogger("filter-router")
         self._pending_batches: Dict[tuple[str, str], int] = defaultdict(int)
         self._pending_eof: Dict[tuple[str, str], EOFMessage] = {}
+        self._state_lock = threading.Lock()
 
     def process_message(self, msg: Any) -> None:
         try:
@@ -236,7 +239,8 @@ class FilterRouter:
         key = (cid, table)
 
         if mask == 0:
-            self._pending_batches[table] += 1
+            with self._state_lock:
+                self._pending_batches[table] += 1
             self._log.debug("pending++ %s -> %d", table, self._pending_batches[key])
 
         total_steps = self._pol.total_steps(table, queries)
@@ -264,7 +268,8 @@ class FilterRouter:
             )
 
             try:
-                self._pending_batches[table] += dup_count
+                with self._state_lock:
+                    self._pending_batches[table] += dup_count
                 for i in range(dup_count):
                     new_queries = self._pol.get_new_batch_queries(
                         table, queries, copy_number=i
@@ -278,7 +283,8 @@ class FilterRouter:
             except Exception as e:
                 self._log.error("requeue_to_router failed: %s", e)
 
-            self._pending_batches[table] = max(0, self._pending_batches[key] - 1)
+            with self._state_lock:
+                self._pending_batches[table] = max(0, self._pending_batches[key] - 1)
             self._log.debug(
                 "pending-- (fanout parent) %s -> %d",
                 key,
@@ -291,7 +297,8 @@ class FilterRouter:
         except Exception as e:
             self._log.error("send_sharded failed: %s", e)
 
-        self._pending_batches[table] = max(0, self._pending_batches[table] - 1)
+        with self._state_lock:
+            self._pending_batches[table] = max(0, self._pending_batches[table] - 1)
         self._log.debug("pending-- %s -> %d", table, self._pending_batches[table])
         self._maybe_flush_pending_eof(key)
 
@@ -314,33 +321,37 @@ class FilterRouter:
     def _handle_table_eof(self, eof: EOFMessage) -> None:
         key = (eof.table_type, eof.client_id)
         self._log.info("TABLE_EOF received: key=%s", key)
-        self._pending_eof[key] = eof
+        with self._state_lock:
+            self._pending_eof[key] = eof
         self._maybe_flush_pending_eof(key)
 
     def _maybe_flush_pending_eof(self, key: tuple[str, str]) -> None:
-        pending = self._pending_batches.get(key, 0)
-        eof = self._pending_eof.get(key)
-        if eof is None or pending > 0:
-            if eof is not None:
-                self._log.info("TABLE_EOF deferred: key=%s pending=%d", key, pending)
-            return
-        total_parts = max(1, int(self._cfg.aggregators))
-        self._log.info("TABLE_EOF -> aggregators: key=%s parts=%d", key, total_parts)
-        for part in range(total_parts):
-            try:
-                self._p.send_table_eof_to_aggregator_partition(key, part)
-            except Exception as e:
-                self._log.error(
-                    "send_table_eof_to_aggregator_partition failed part=%d key=%s: %s",
-                    part,
-                    key,
-                    e,
-                )
-        self._pending_eof.pop(key, None)
-        self._pending_batches.pop(key, None)
+        with self._state_lock:
+            pending = self._pending_batches.get(key, 0)
+            eof = self._pending_eof.get(key)
+            if eof is None or pending > 0:
+                if eof is not None:
+                    self._log.info("TABLE_EOF deferred: key=%s pending=%d", key, pending)
+                return
+            total_parts = max(1, int(self._cfg.aggregators))
+            self._log.info("TABLE_EOF -> aggregators: key=%s parts=%d", key, total_parts)
+            for part in range(total_parts):
+                try:
+                    self._p.send_table_eof_to_aggregator_partition(key, part)
+                except Exception as e:
+                    self._log.error(
+                        "send_table_eof_to_aggregator_partition failed part=%d key=%s: %s",
+                        part,
+                        key,
+                        e,
+                    )
+            self._pending_eof.pop(key, None)
+            self._pending_batches.pop(key, None)
 
 
 class ExchangeBusProducer:
+    """Thread-safe producer using thread-local connections"""
+    
     def __init__(
         self,
         host: str,
@@ -355,33 +366,42 @@ class ExchangeBusProducer:
     ):
         self._log = logging.getLogger("filter-router.bus")
         self._host = host
-        self._filters_pub = MessageMiddlewareQueue(host, filters_pool_queue)
+        self._filters_pool_queue = filters_pool_queue
         self._exchange_fmt = exchange_fmt
         self._rk_fmt = rk_fmt
-        self._pub_cache: dict[tuple[str, str], MessageMiddlewareExchange] = {}
-        self._pub_locks: dict[tuple[str, str], threading.Lock] = {}
         self._in_mw = in_mw
 
         self._max_retries = int(max_retries)
         self._base_backoff_ms = int(base_backoff_ms)
         self._backoff_multiplier = float(backoff_multiplier)
+        
+        # Thread-local storage for connections (Pika is NOT thread-safe)
+        self._thread_local = threading.local()
+
+    def _get_filters_pub(self):
+        """Get or create thread-local filters publisher"""
+        if not hasattr(self._thread_local, 'filters_pub') or self._thread_local.filters_pub is None:
+            self._thread_local.filters_pub = MessageMiddlewareQueue(
+                self._host, self._filters_pool_queue
+            )
+        return self._thread_local.filters_pub
+
+    def _get_exchange_pub(self, exchange: str, rk: str):
+        """Get or create thread-local exchange publisher"""
+        if not hasattr(self._thread_local, 'exchange_pubs'):
+            self._thread_local.exchange_pubs = {}
+        
+        key = (exchange, rk)
+        if key not in self._thread_local.exchange_pubs:
+            self._thread_local.exchange_pubs[key] = MessageMiddlewareExchange(
+                host=self._host, exchange_name=exchange, route_keys=[rk]
+            )
+        return self._thread_local.exchange_pubs[key]
 
     def shutdown(self):
         """Closes all active publisher connections."""
         self._log.info("Shutting down ExchangeBusProducer...")
-
-        try:
-            self._filters_pub.close()
-        except Exception as e:
-            self._log.warning(f"Error closing filters_pool publisher: {e}")
-
-        for pub in self._pub_cache.values():
-            try:
-                pub.close()
-            except Exception as e:
-                self._log.warning(f"Error closing cached publisher for key {pub}: {e}")
-
-        self._pub_cache.clear()
+        # Note: thread-local connections will be garbage collected
         self._log.info("ExchangeBusProducer shutdown complete.")
 
     def _key_for(self, table: str, pid: int) -> tuple[str, str]:
@@ -389,97 +409,56 @@ class ExchangeBusProducer:
         rk = self._rk_fmt.format(table=table, pid=pid)
         return (ex, rk)
 
-    def _get_pub(self, table: str, pid: int) -> MessageMiddlewareExchange:
-        key = self._key_for(table, pid)
-        pub = self._pub_cache.get(key)
+    def _send_with_retry(self, exchange: str, rk: str, payload: bytes) -> None:
+        """Send with retries using thread-local connection"""
+        attempt = 0
+        backoff = self._base_backoff_ms / 1000.0
+        last_error = None
 
-        if pub is not None and getattr(pub, "is_closed", None):
+        while attempt <= self._max_retries:
             try:
-                if pub.is_closed():
-                    self._log.debug("publisher cached but closed: %s → recreate", key)
-                    self._drop_pub(key)
-                    pub = None
-            except Exception:
-                pass
+                pub = self._get_exchange_pub(exchange, rk)
+                pub.send(payload)
+                return
+            except Exception as e:
+                last_error = e
+                self._log.warning(
+                    "send failed (attempt %d/%d) ex=%s rk=%s: %s",
+                    attempt + 1,
+                    self._max_retries,
+                    exchange,
+                    rk,
+                    e,
+                )
+                # Recreate connection on failure
+                if hasattr(self._thread_local, 'exchange_pubs'):
+                    self._thread_local.exchange_pubs.pop((exchange, rk), None)
 
-        if pub is None:
-            self._log.debug(
-                "create publisher exchange=%s rk=%s host=%s", key[0], key[1], self._host
-            )
-            pub = MessageMiddlewareExchange(
-                host=self._host, exchange_name=key[0], route_keys=[key[1]]
-            )
-            self._pub_cache[key] = pub
-            if key not in self._pub_locks:
-                self._pub_locks[key] = threading.Lock()
-        return pub
+                attempt += 1
+                if attempt > self._max_retries:
+                    break
 
-    def _drop_pub(self, key: tuple[str, str]) -> None:
-        pub = self._pub_cache.pop(key, None)
-        if pub is not None:
-            try:
-                if hasattr(pub, "close"):
-                    pub.close()
-            except Exception:
-                pass
+                jitter = random.uniform(0, backoff * 0.2)
+                sleep_s = backoff + jitter
+                time.sleep(sleep_s)
+                backoff *= self._backoff_multiplier
 
-    def _send_with_retry(self, key: tuple[str, str], payload: bytes) -> None:
-        """
-        Envía `payload` al exchange/rk indicado por `key`, con reintentos y recreación del publisher.
-        Bloquea por key para serializar accesos concurrentes al mismo canal.
-        """
-        lock = self._pub_locks.setdefault(key, threading.Lock())
-        with lock:
-            attempt = 0
-            backoff = self._base_backoff_ms / 1000.0
-            last_error = None
-
-            while attempt <= self._max_retries:
-                try:
-                    pub = self._pub_cache.get(key)
-                    if pub is None:
-                        self._log.debug("pub cache miss -> create: %s", key)
-                        pub = MessageMiddlewareExchange(
-                            host=self._host, exchange_name=key[0], route_keys=[key[1]]
-                        )
-                        self._pub_cache[key] = pub
-                    pub.send(payload)
-                    return
-                except Exception as e:
-                    last_error = e
-                    self._log.warning(
-                        "send failed (attempt %d/%d) key=%s: %s",
-                        attempt + 1,
-                        self._max_retries,
-                        key,
-                        e,
-                    )
-                    self._drop_pub(key)
-
-                    attempt += 1
-                    if attempt > self._max_retries:
-                        break
-
-                    jitter = random.uniform(0, backoff * 0.2)
-                    sleep_s = backoff + jitter
-                    time.sleep(sleep_s)
-                    backoff *= self._backoff_multiplier
-
-            raise RuntimeError(
-                f"Error sending message to {key}: retries exhausted"
-            ) from last_error
+        self._log.error(
+            f"Error sending message to {exchange}/{rk}: retries exhausted - {last_error}"
+        )
 
     def send_to_filters_pool(self, batch: DataBatch) -> None:
         try:
             self._log.debug("publish → filters_pool")
             batch.batch_bytes = batch.batch_msg.to_bytes()
-            self._filters_pub.send(batch.to_bytes())
+            pub = self._get_filters_pub()
+            pub.send(batch.to_bytes())
         except Exception as e:
             self._log.error("filters_pool send failed: %s", e)
 
     def send_to_aggregator_partition(self, partition_id: int, batch: DataBatch) -> None:
         table = table_name_of(batch)
-        key = self._key_for(table, int(partition_id))
+        ex, rk = self._key_for(table, int(partition_id))
         try:
             self._log.debug(
                 "publish → aggregator table=%s part=%d", table, int(partition_id)
@@ -487,7 +466,7 @@ class ExchangeBusProducer:
             if getattr(batch, "batch_bytes", None) is None:
                 batch.batch_bytes = batch.batch_msg.to_bytes()
             payload = batch.to_bytes()
-            self._send_with_retry(key, payload)
+            self._send_with_retry(ex, rk, payload)
         except Exception as e:
             self._log.error(
                 "aggregator send failed table=%s part=%d: %s",
@@ -514,11 +493,11 @@ class ExchangeBusProducer:
     ) -> None:
         try:
             payload = table_eof_to_bytes(key)
-            k = self._key_for(key[0], int(partition_id))
+            ex, rk = self._key_for(key[0], int(partition_id))
             self._log.debug(
                 "publish TABLE_EOF → aggregator key=%s part=%d", key, int(partition_id)
             )
-            self._send_with_retry(k, payload)
+            self._send_with_retry(ex, rk, payload)
         except Exception as e:
             self._log.error(
                 "aggregator TABLE_EOF send failed key=%s part=%d: %s",
@@ -537,6 +516,7 @@ class RouterServer:
         policy: QueryPolicyResolver,
         table_cfg: TableConfig,
         stop_event: threading.Event,
+        worker_threads: int = 10,
     ):
         self._producer = producer
         self._mw_in = router_in
@@ -545,39 +525,45 @@ class RouterServer:
         )
         self._log = logging.getLogger("filter-router-server")
         self._stop_event = stop_event
+        self._executor = ThreadPoolExecutor(
+            max_workers=worker_threads,
+            thread_name_prefix="router-worker"
+        )
 
     def run(self) -> None:
-        self._log.debug("RouterServer starting consume")
+        self._log.info(f"RouterServer starting with {self._executor._max_workers} workers")
 
         def _cb(body: bytes):
             if self._stop_event.is_set():
                 self._log.warning("Shutdown in progress, skipping incoming message.")
                 return
-
-            try:
-                if len(body) < 1:
-                    self._log.error("Received empty message")
-                    return
-
-                opcode = body[0]
-                if opcode == Opcodes.EOF:
-                    eof_msg = EOFMessage.deserialize_from_bytes(body)
-                    self._router.process_message(eof_msg)
-                elif opcode == Opcodes.DATA_BATCH:
-                    db = DataBatch.deserialize_from_bytes(body)
-                    self._router.process_message(db)
-                else:
-                    self._log.warning(f"Unwanted message opcode: {opcode}")
-            except Exception as e:
-                self._log.exception("Error in router callback: %s", e)
-            except Exception as e:
-                self._log.exception("Error in router callback: %s", e)
+            # Submit to thread pool - each thread gets its own Pika connection
+            self._executor.submit(self._process_single_message, body)
 
         try:
             self._mw_in.start_consuming(_cb)
-            self._log.debug("RouterServer consuming (thread started)")
+            self._log.info("RouterServer consuming started")
         except Exception as e:
             self._log.exception("start_consuming failed: %s", e)
+
+    def _process_single_message(self, body: bytes) -> None:
+        """Process a single message - called from thread pool"""
+        try:
+            if len(body) < 1:
+                self._log.error("Received empty message")
+                return
+
+            opcode = body[0]
+            if opcode == Opcodes.EOF:
+                eof_msg = EOFMessage.deserialize_from_bytes(body)
+                self._router.process_message(eof_msg)
+            elif opcode == Opcodes.DATA_BATCH:
+                db = DataBatch.deserialize_from_bytes(body)
+                self._router.process_message(db)
+            else:
+                self._log.warning(f"Unwanted message opcode: {opcode}")
+        except Exception as e:
+            self._log.exception("Error in router callback: %s", e)
 
     def stop(self) -> None:
         """Stops the consumer and shuts down the producer."""
@@ -588,6 +574,9 @@ class RouterServer:
             self._log.info("Input consumer stopped.")
         except Exception as e:
             self._log.warning(f"Error stopping input consumer: {e}")
+
+        self._log.info("Waiting for worker threads to complete...")
+        self._executor.shutdown(wait=True, timeout=30)
 
         try:
             self._producer.shutdown()

@@ -23,7 +23,7 @@ services:
       nofile:
         soft: 65536
         hard: 65536
-        
+
   orchestrator:
     container_name: orchestrator
     build:
@@ -36,7 +36,7 @@ services:
       - RABBITMQ_HOST=rabbitmq
       - ORCH_TO_FR_EXCHANGE=fr.ex
       - ORCH_TO_FR_RK_FMT=fr.{pid:02d}
-      - FILTER_ROUTER_COUNT=8
+      - FILTER_ROUTER_COUNT=6
       - ORCH_PROCESS_COUNT=8
       - ORCH_PROCESS_QUEUE_SIZE=256
       - ORCH_PROCESS_QUEUE_TIMEOUT=10.0
@@ -162,44 +162,6 @@ services:
       rabbitmq:
         condition: service_healthy
 
-  filter-router-6:
-    container_name: filter-router-6
-    build:
-      context: .
-      dockerfile: filter/Dockerfile.router
-    environment:
-      - PYTHONUNBUFFERED=1
-      - RABBITMQ_HOST=rabbitmq
-      - LOG_LEVEL=INFO
-      - CONFIG_PATH=/config/config.ini
-      - FILTER_ROUTER_INDEX=6
-    networks:
-      - testing_net
-    volumes:
-      - ./app_config/config.ini:/config/config.ini:ro
-    depends_on:
-      rabbitmq:
-        condition: service_healthy
-
-  filter-router-7:
-    container_name: filter-router-7
-    build:
-      context: .
-      dockerfile: filter/Dockerfile.router
-    environment:
-      - PYTHONUNBUFFERED=1
-      - RABBITMQ_HOST=rabbitmq
-      - LOG_LEVEL=INFO
-      - CONFIG_PATH=/config/config.ini
-      - FILTER_ROUTER_INDEX=7
-    networks:
-      - testing_net
-    volumes:
-      - ./app_config/config.ini:/config/config.ini:ro
-    depends_on:
-      rabbitmq:
-        condition: service_healthy
-
   filter-worker-0:
     container_name: filter-worker-0
     build:
@@ -280,6 +242,86 @@ services:
       filter-router-0:
         condition: service_started
 
+  filter-worker-4:
+    container_name: filter-worker-4
+    build:
+      context: .
+      dockerfile: filter/Dockerfile.worker
+    environment:
+      - PYTHONUNBUFFERED=1
+      - RABBITMQ_HOST=rabbitmq
+      - LOG_LEVEL=INFO
+      - CONFIG_PATH=/config/config.ini
+    networks:
+      - testing_net
+    volumes:
+      - ./app_config/config.ini:/config/config.ini:ro
+    depends_on:
+      rabbitmq:
+        condition: service_healthy
+      filter-router-0:
+        condition: service_started
+
+  filter-worker-5:
+    container_name: filter-worker-5
+    build:
+      context: .
+      dockerfile: filter/Dockerfile.worker
+    environment:
+      - PYTHONUNBUFFERED=1
+      - RABBITMQ_HOST=rabbitmq
+      - LOG_LEVEL=INFO
+      - CONFIG_PATH=/config/config.ini
+    networks:
+      - testing_net
+    volumes:
+      - ./app_config/config.ini:/config/config.ini:ro
+    depends_on:
+      rabbitmq:
+        condition: service_healthy
+      filter-router-0:
+        condition: service_started
+
+  filter-worker-6:
+    container_name: filter-worker-6
+    build:
+      context: .
+      dockerfile: filter/Dockerfile.worker
+    environment:
+      - PYTHONUNBUFFERED=1
+      - RABBITMQ_HOST=rabbitmq
+      - LOG_LEVEL=INFO
+      - CONFIG_PATH=/config/config.ini
+    networks:
+      - testing_net
+    volumes:
+      - ./app_config/config.ini:/config/config.ini:ro
+    depends_on:
+      rabbitmq:
+        condition: service_healthy
+      filter-router-0:
+        condition: service_started
+
+  filter-worker-7:
+    container_name: filter-worker-7
+    build:
+      context: .
+      dockerfile: filter/Dockerfile.worker
+    environment:
+      - PYTHONUNBUFFERED=1
+      - RABBITMQ_HOST=rabbitmq
+      - LOG_LEVEL=INFO
+      - CONFIG_PATH=/config/config.ini
+    networks:
+      - testing_net
+    volumes:
+      - ./app_config/config.ini:/config/config.ini:ro
+    depends_on:
+      rabbitmq:
+        condition: service_healthy
+      filter-router-0:
+        condition: service_started
+
   aggregator-0:
     container_name: aggregator-0
     build:
@@ -293,7 +335,7 @@ services:
     networks:
       - testing_net
     volumes:
-      - ./app_config/config.ini:/config/config.ini:ro
+      - ./app_config/config.ini:/config/config.ini:row
     depends_on:
       rabbitmq:
         condition: service_healthy
@@ -313,7 +355,7 @@ services:
     networks:
       - testing_net
     volumes:
-      - ./app_config/config.ini:/config/config.ini:ro
+      - ./app_config/config.ini:/config/config.ini:row
     depends_on:
       rabbitmq:
         condition: service_healthy
@@ -333,7 +375,7 @@ services:
     networks:
       - testing_net
     volumes:
-      - ./app_config/config.ini:/config/config.ini:ro
+      - ./app_config/config.ini:/config/config.ini:row
     depends_on:
       rabbitmq:
         condition: service_healthy
@@ -353,7 +395,7 @@ services:
     networks:
       - testing_net
     volumes:
-      - ./app_config/config.ini:/config/config.ini:ro
+      - ./app_config/config.ini:/config/config.ini:row
     depends_on:
       rabbitmq:
         condition: service_healthy
@@ -410,26 +452,6 @@ services:
       - LOG_LEVEL=INFO
       - CONFIG_PATH=/config/config.ini
       - JOINER_ROUTER_INDEX=2
-    networks:
-      - testing_net
-    volumes:
-      - ./app_config/config.ini:/config/config.ini:ro
-    depends_on:
-      rabbitmq:
-        condition: service_healthy
-      aggregator-0:
-        condition: service_started
-
-  joiner-router-3:
-    container_name: joiner-router-3
-    build:
-      context: .
-      dockerfile: joiner/Dockerfile.router
-    environment:
-      - PYTHONUNBUFFERED=1
-      - LOG_LEVEL=INFO
-      - CONFIG_PATH=/config/config.ini
-      - JOINER_ROUTER_INDEX=3
     networks:
       - testing_net
     volumes:
@@ -509,46 +531,6 @@ services:
       - PYTHONUNBUFFERED=1
       - LOG_LEVEL=INFO
       - JOINER_WORKER_INDEX=3
-      - CONFIG_PATH=/config/config.ini
-    networks:
-      - testing_net
-    volumes:
-      - ./app_config/config.ini:/config/config.ini:ro
-    depends_on:
-      rabbitmq:
-        condition: service_healthy
-      joiner-router-0:
-        condition: service_started
-
-  joiner-worker-4:
-    container_name: joiner-worker-4
-    build:
-      context: .
-      dockerfile: joiner/Dockerfile.worker
-    environment:
-      - PYTHONUNBUFFERED=1
-      - LOG_LEVEL=INFO
-      - JOINER_WORKER_INDEX=4
-      - CONFIG_PATH=/config/config.ini
-    networks:
-      - testing_net
-    volumes:
-      - ./app_config/config.ini:/config/config.ini:ro
-    depends_on:
-      rabbitmq:
-        condition: service_healthy
-      joiner-router-0:
-        condition: service_started
-
-  joiner-worker-5:
-    container_name: joiner-worker-5
-    build:
-      context: .
-      dockerfile: joiner/Dockerfile.worker
-    environment:
-      - PYTHONUNBUFFERED=1
-      - LOG_LEVEL=INFO
-      - JOINER_WORKER_INDEX=5
       - CONFIG_PATH=/config/config.ini
     networks:
       - testing_net
