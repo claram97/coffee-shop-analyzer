@@ -1,0 +1,4 @@
+transaction_id,item_id,quantity,unit_price,subtotal,created_at
+fe688cc1-4b28-4a05-af82-fe6d0071bf81,8,1,10.0,10.0,2024-01-01 07:00:00
+256cef7d-b06d-4956-b76d-24c6c7cbe79b,5,2,9.0,18.0,2024-01-01 15:15:53
+048ba7ab-ee42-4e67-b28f-f9d6fd4e2ef3,6,3,9.5,28.5,2024-01-01 15:15:56

@@ -1,0 +1,15 @@
+# id: 1
+orchestrator:
+  address: "orchestrator:12345"
+loop:
+  amount: 5
+  period: "5s"
+log:
+  level: "info"
+batch:
+  maxAmount: 50000
+data:
+  folder: "/data"
+retries:
+  attempts: 5
+  retryInterval: 2
