@@ -522,7 +522,6 @@ class QueryResult2(TableMessage):
     
     def __init__(self):
         required = ("month", "name")
-        # Optional fields: quantity, revenue (depending on metric type)
         super().__init__(
             opcode=Opcodes.QUERY_RESULT_2,
             required_keys=required,

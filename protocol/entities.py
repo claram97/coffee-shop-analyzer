@@ -253,12 +253,16 @@ class ResultProductMetrics:
     def __init__(self, month: str, name: str, quantity: str = None, revenue: str = None):
         self.month = month
         self.name = name
-        self.quantity = "0" if quantity is None else quantity
-        self.revenue = revenue or "0"
-        
+        if quantity is not None:
+            self.quantity = str(quantity)
+        if revenue is not None:
+            self.revenue = str(revenue)
+
     def __str__(self):
         """String representation for debugging"""
-        return f"ResultProductMetrics(month={self.month}, name={self.name}, quantity={self.quantity}, revenue={self.revenue})"
+        quantity = getattr(self, "quantity", None)
+        revenue = getattr(self, "revenue", None)
+        return f"ResultProductMetrics(month={self.month}, name={self.name}, quantity={quantity}, revenue={revenue})"
 
 
 class ResultStoreTPV:
