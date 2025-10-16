@@ -67,11 +67,11 @@ class Q1Strategy(BaseQueryStrategy):
     """Strategy for Q1: Handles pre-filtered transactions (already filtered by amount and time)."""
 
     def finalize(self, consolidated_data: Dict[str, Any]) -> Dict[str, Any]:
-        # Limit logging to 10 rows for Q1Strategy
-        transactions = consolidated_data.get("Transactions", [])[:10]
-        if len(consolidated_data.get("Transactions", [])) > 10:
-            for row in consolidated_data.get("Transactions", [])[:10]:
-                logging.info(f"Q1 Transaction: {row}")
+        transactions = consolidated_data.get("Transactions", [])
+        # Log only the first 10 transactions
+        for row in transactions[:10]:
+            logging.info(f"Q1 Transaction: {row}")
+        if len(transactions) > 10:
             logging.info("Only the first 10 transactions are logged.")
 
         filtered_transactions = []
@@ -103,12 +103,6 @@ class Q2Strategy(BaseQueryStrategy):
 
     The results-finisher needs to further aggregate these metrics across batches.
     """
-
-    def _log_metrics(self, month: str, item_name: str, quantity: int, revenue: float):
-        """Helper method to log metrics for debugging."""
-        logging.info(
-            f"Q2 Metrics: Month={month}, Item={item_name}, Quantity={quantity}, Revenue={revenue}"
-        )
 
     def finalize(self, consolidated_data: Dict[str, Any]) -> Dict[str, Any]:
         # First, aggregate metrics by month and product across all batches
@@ -148,8 +142,6 @@ class Q2Strategy(BaseQueryStrategy):
                 revenue_val = self._safe_extract_numeric(row, "subtotal")
                 metrics_by_month_product[key]["revenue"] += revenue_val
 
-                # Debug log the metrics to understand what's happening
-                self._log_metrics(month_key, item_name, quantity_val, revenue_val)
             except (ValueError, AttributeError):
                 continue
 
