@@ -34,6 +34,7 @@ func InitConfig() (*viper.Viper, error) {
 	v.BindEnv("id")
 	v.BindEnv("orchestrator", "address")
 	v.BindEnv("log", "level")
+	v.BindEnv("output", "baseDir")
 
 	// Try to read configuration from config file. If config file
 	// does not exists then ReadInConfig will fail but configuration
@@ -94,6 +95,11 @@ func main() {
 	// Print program config with debugging purposes
 	PrintConfig(v)
 
+	outputDir := strings.TrimSpace(v.GetString("output.baseDir"))
+	if outputDir == "" {
+		outputDir = "./client_runs"
+	}
+
 	clientConfig := common.ClientConfig{
 		ServerAddress:   v.GetString("orchestrator.address"),
 		ID:              v.GetString("id"),
@@ -101,6 +107,7 @@ func main() {
 		BatchLimit:      v.GetInt32("batch.maxAmount"),
 		Attempts:        v.GetInt("retries.attempts"),
 		RetryInterval:   v.GetDuration("retries.retryInterval"),
+		OutputDirectory: outputDir,
 	}
 
 	client := common.NewClient(clientConfig)

@@ -10,6 +10,7 @@ import (
 	"io"
 	"net"
 	"os"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"time"
@@ -22,17 +23,19 @@ import (
 
 // ResponseHandler handles server response communication
 type ResponseHandler struct {
-	conn     net.Conn
-	clientID string
-	log      *logging.Logger
+	conn          net.Conn
+	clientID      string
+	outputBaseDir string
+	log           *logging.Logger
 }
 
 // NewResponseHandler creates a new response handler
-func NewResponseHandler(conn net.Conn, clientID string, logger *logging.Logger) *ResponseHandler {
+func NewResponseHandler(conn net.Conn, clientID string, outputBaseDir string, logger *logging.Logger) *ResponseHandler {
 	return &ResponseHandler{
-		conn:     conn,
-		clientID: clientID,
-		log:      logger,
+		conn:          conn,
+		clientID:      clientID,
+		outputBaseDir: outputBaseDir,
+		log:           logger,
 	}
 }
 
@@ -129,20 +132,26 @@ func (rh *ResponseHandler) handleQueryResult(dataBatch *protocol.DataBatch) {
 			return
 		}
 
-		file, err := os.OpenFile(filename, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644)
+		filePath, err := rh.prepareOutputFilePath(filename)
 		if err != nil {
-			rh.log.Errorf("action: write_results | result: fail | error: opening file %s: %v", filename, err)
+			rh.log.Errorf("action: write_results | result: fail | error: %v", err)
+			return
+		}
+
+		file, err := os.OpenFile(filePath, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644)
+		if err != nil {
+			rh.log.Errorf("action: write_results | result: fail | error: opening file %s: %v", filePath, err)
 			return
 		}
 		defer file.Close()
 
 		encoder := json.NewEncoder(file)
 		if err := encoder.Encode(typedRows); err != nil {
-			rh.log.Errorf("action: write_results | result: fail | error: encoding to %s: %v", filename, err)
+			rh.log.Errorf("action: write_results | result: fail | error: encoding to %s: %v", filePath, err)
 			return
 		}
 
-		rh.log.Infof("action: write_results | result: success | file: %s | rows: %d", filename, len(dataBatch.ResultTable.Rows))
+		rh.log.Infof("action: write_results | result: success | file: %s | rows: %d", filePath, len(dataBatch.ResultTable.Rows))
 	}
 }
 
@@ -193,9 +202,15 @@ func (rh *ResponseHandler) handleQueryResultTable(queryResult *protocol.QueryRes
 		return
 	}
 
-	file, err := os.OpenFile(filename, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644)
+	filePath, err := rh.prepareOutputFilePath(filename)
 	if err != nil {
-		rh.log.Errorf("action: write_results | result: fail | error: opening file %s: %v", filename, err)
+		rh.log.Errorf("action: write_results | result: fail | error: %v", err)
+		return
+	}
+
+	file, err := os.OpenFile(filePath, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644)
+	if err != nil {
+		rh.log.Errorf("action: write_results | result: fail | error: opening file %s: %v", filePath, err)
 		return
 	}
 	defer file.Close()
@@ -203,11 +218,25 @@ func (rh *ResponseHandler) handleQueryResultTable(queryResult *protocol.QueryRes
 	encoder := json.NewEncoder(file)
 	encoder.SetIndent("", "  ") // Pretty-print with 2 spaces
 	if err := encoder.Encode(typedRows); err != nil {
-		rh.log.Errorf("action: write_results | result: fail | error: encoding to %s: %v", filename, err)
+		rh.log.Errorf("action: write_results | result: fail | error: encoding to %s: %v", filePath, err)
 		return
 	}
 
-	rh.log.Infof("action: write_results | result: success | file: %s | rows: %d", filename, len(queryResult.Rows))
+	rh.log.Infof("action: write_results | result: success | file: %s | rows: %d", filePath, len(queryResult.Rows))
+}
+
+func (rh *ResponseHandler) prepareOutputFilePath(filename string) (string, error) {
+	baseDir := rh.outputBaseDir
+	if strings.TrimSpace(baseDir) == "" {
+		baseDir = "./client_runs"
+	}
+
+	clientDir := filepath.Join(baseDir, rh.clientID)
+	if err := os.MkdirAll(clientDir, 0o755); err != nil {
+		return "", fmt.Errorf("creating client output directory %s: %w", clientDir, err)
+	}
+
+	return filepath.Join(clientDir, filename), nil
 }
 
 // responseReaderLoop executes the main response reading loop
@@ -278,6 +307,7 @@ func (fms *FinishedMessageSender) SendFinished() {
 	fms.log.Infof("action: send_finished | result: success")
 }
 
+//lint:ignore U1000 kept for compatibility with potential callers outside current build
 func deriveFinishedAgencyID(rawID string) (int32, error) {
 	trimmed := strings.TrimSpace(rawID)
 	if trimmed == "" {
