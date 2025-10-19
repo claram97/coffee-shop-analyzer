@@ -1,0 +1,10 @@
+syntax = "proto3";
+
+package protocol;
+
+import "table_data.proto";
+
+message EOFMessage {
+  TableName table = 1;
+  string client_id = 2;
+}

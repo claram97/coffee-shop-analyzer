@@ -1,0 +1,27 @@
+syntax = "proto3";
+
+package protocol;
+
+import "databatch.proto";
+import "eof_message.proto";
+import "table_data.proto";
+import "query_result.proto";
+
+message Envelope {
+  enum MessageType {
+    UNKNOWN = 0;
+    DATA_BATCH = 1;
+    EOF = 2;
+    TABLE_DATA = 3;
+    QUERY_RESULT = 4;
+  }
+
+  MessageType type = 1;
+
+  oneof payload {
+    DataBatch data_batch = 2;
+    EOFMessage eof = 3;
+    TableData table = 4;
+    QueryResult query_result = 5;
+  }
+}
