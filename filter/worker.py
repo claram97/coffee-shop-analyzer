@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import logging
 import os
+import threading
 import time
 from datetime import datetime
 from typing import Any, Callable, Dict, List, Optional, Tuple
@@ -10,8 +11,11 @@ from middleware.middleware_client import (
     MessageMiddlewareExchange,
     MessageMiddlewareQueue,
 )
-from protocol.constants import Opcodes
-from protocol.databatch import DataBatch
+from protocol2.databatch_pb2 import DataBatch, Query
+from protocol2.envelope_pb2 import Envelope, MessageType
+from protocol2.eof_message_pb2 import EOFMessage
+from protocol2.table_data import Row, TableData, TableName, TableSchema, TableStatus
+from protocol2.table_data_utils import iterate_rows_as_dicts
 
 LOGGER_NAME = "filter_worker"
 logger = logging.getLogger(LOGGER_NAME)
@@ -62,46 +66,54 @@ def _parse_final_amount(value: Any) -> Optional[float]:
         return None
 
 
-def hour_filter(rows) -> List[Any]:
+def hour_filter(td) -> List[Any]:
     return [
         r
-        for r in rows
-        if (dt := _parse_dt_local(getattr(r, "created_at", None))) is not None
-        and 6 <= dt.hour <= 23
+        for r in iterate_rows_as_dicts(td)
+        if (dt := _parse_dt_local(r["created_at"])) is not None and 6 <= dt.hour <= 23
     ]
 
 
-def final_amount_filter(rows) -> List[Any]:
+def final_amount_filter(td) -> List[Any]:
     return [
         r
-        for r in rows
-        if (amount := _parse_final_amount(getattr(r, "final_amount", None))) is not None
+        for r in iterate_rows_as_dicts(td)
+        if (amount := _parse_final_amount(r["final_amount"])) is not None
         and amount >= 75.0
     ]
 
 
-def year_filter(rows, min_year: int = 2024, max_year: int = 2025) -> List[Any]:
+def year_filter(td, min_year: int = 2024, max_year: int = 2025) -> List[Any]:
     return [
         r
-        for r in rows
-        if (dt := _parse_dt_local(getattr(r, "created_at", None))) is not None
+        for r in iterate_rows_as_dicts(td)
+        if (dt := _parse_dt_local(r["created_at"])) is not None
         and min_year <= dt.year <= max_year
     ]
 
 
 FilterFn = Callable[[List[Any]], List[Any]]
-FilterRegistry = Dict[Tuple[int, int, str], FilterFn]
+FilterRegistry = Dict[Tuple[TableName, int, str], FilterFn]
+
+QUERY_TO_INT = {
+    Query.Q1: 1,
+    Query.Q2: 2,
+    Query.Q3: 3,
+    Query.Q4: 4,
+}
 
 
-def qkey(queries: List[int]) -> str:
-    return ",".join(str(q) for q in sorted(set(int(x) for x in queries)))
+def qkey(queries: List[Query]) -> str:
+    return ",".join(str(q) for q in sorted(set(QUERY_TO_INT[x] for x in queries)))
 
 
 REGISTRY: FilterRegistry = {}
-REGISTRY[(Opcodes.NEW_TRANSACTION, 0, qkey([1, 3, 4]))] = year_filter
-REGISTRY[(Opcodes.NEW_TRANSACTION, 1, qkey([1, 3]))] = hour_filter
-REGISTRY[(Opcodes.NEW_TRANSACTION, 2, qkey([1]))] = final_amount_filter
-REGISTRY[(Opcodes.NEW_TRANSACTION_ITEMS, 0, qkey([2]))] = year_filter
+REGISTRY[(TableName.TRANSACTIONS, 0, qkey([Query.Q1, Query.Q3, Query.Q4]))] = (
+    year_filter
+)
+REGISTRY[(TableName.TRANSACTIONS, 1, qkey([Query.Q1, Query.Q3]))] = hour_filter
+REGISTRY[(TableName.TRANSACTIONS, 2, qkey([Query.Q1]))] = final_amount_filter
+REGISTRY[(TableName.TRANSACTION_ITEMS, 0, qkey([Query.Q2]))] = year_filter
 
 
 class FilterWorker:
@@ -188,116 +200,65 @@ class FilterWorker:
             logger.warning("Shutdown in progress, skipping message.")
             return
         t0 = time.perf_counter()
-        try:
-            db = DataBatch.deserialize_from_bytes(raw)
-        except Exception:
-            logger.exception("Fallo deserializando DataBatch; reenviando sin cambios")
-            self._send_to_router(raw, batch_number=None)
+        env = Envelope.ParseFromString(raw)
+        if env.type != MessageType.DATA_BATCH:
+            logger.warning("Expected databatch, got %s", env.type)
             return
-
-        bn = int(getattr(db, "batch_number", 0) or 0)
-
-        if not getattr(db, "batch_msg", None):
+        db = env.data_batch
+        bn = db.batch_number
+        if not db.payload:
             logger.warning("Batch sin batch_msg: reenvío sin cambios")
             self._send_to_router(raw, bn)
             return
-        try:
-            table_id = int(db.batch_msg.opcode)
-        except Exception:
-            logger.warning("table_id inválido; reenvío sin cambios")
-            self._send_to_router(raw, bn)
-            return
 
-        step_mask = int(getattr(db, "reserved_u16", 0) or 0)
+        inner = db.payload
+        step_mask = db.filter_steps
         step = current_step_from_mask(step_mask)
         if step is None:
             logger.debug(
                 "Sin step activo en máscara: reenvío sin cambios | table_id=%s mask=%s",
-                table_id,
+                inner.name,
                 step_mask,
             )
             self._send_to_router(raw, bn)
             return
-
-        inner = getattr(db, "batch_msg", None)
-        if inner is None or not hasattr(inner, "rows"):
+        if inner is None or not inner.rows:
             logger.warning(
                 "Batch sin 'rows': reenvío sin cambios | table_id=%s step=%s",
-                table_id,
+                inner.name,
                 step,
             )
             self._send_to_router(raw, bn)
             return
-        rows = getattr(inner, "rows") or []
-        in_rows = len(rows)
-        if inner.opcode == Opcodes.NEW_TRANSACTION:
-            try:
-                if in_rows > 0:
-                    sample_rows = rows[:2]
-                    all_keys = set()
-                    for row in sample_rows:
-                        all_keys.update(row.__dict__.keys())
 
-                    sample_data = [row.__dict__ for row in sample_rows]
-
-                    logging.debug(
-                        "action: batch_preview | batch_number: %d | opcode: %d | keys: %s | sample_count: %d | sample: %s",
-                        getattr(inner, "batch_number", 0),
-                        inner.opcode,
-                        sorted(list(all_keys)),
-                        len(sample_rows),
-                        sample_data,
-                    )
-            except Exception as e:
-                logging.exception(
-                    "action: batch_preview | batch_number: %d | result: skip | exception: %s",
-                    getattr(inner, "batch_number", 0),
-                    e,
-                )
-        queries = list(getattr(db, "query_ids", []) or [])
+        queries = list(db.query_ids)
         queries_key = qkey(queries)
-        key = (table_id, step, queries_key)
+        key = (inner.name, step, queries_key)
 
         fn = self._filters.get(key)
         if fn is None:
             logger.warning(
-                "No hay filtro registrado para queries=%s: reenvío sin cambios | table_id=%s step=%s rows=%d",
+                "No hay filtro registrado para queries=%s: reenvío sin cambios | table_id=%s step=%s",
                 queries_key,
-                table_id,
+                inner.name,
                 step,
-                in_rows,
             )
             self._send_to_router(raw, bn)
             return
 
         try:
-            new_rows = fn(rows) or []
-            out_rows = len(new_rows)
+            new_rows = fn(inner) or []
             inner.rows = new_rows
-            db.batch_bytes = inner.to_bytes()
-            out_raw = db.to_bytes()
+            env.data_batch = db
+            out_raw = env.SerializeToString()
             self._send_to_router(out_raw, bn)
 
-            dt_ms = (time.perf_counter() - t0) * 1000
-            if table_id == Opcodes.NEW_TRANSACTION:
-                logger.debug(
-                    "Filtro aplicado y publicado | table_id=%s step=%s queries=%s rows_in=%d rows_out=%d latency_ms=%.2f filter=%s pid=%02d",
-                    table_id,
-                    step,
-                    queries_key,
-                    in_rows,
-                    out_rows,
-                    dt_ms,
-                    getattr(fn, "__name__", "unknown"),
-                    (bn % self._num_routers),
-                )
         except Exception:
             logger.exception(
-                "Error aplicando filtro; reenvío sin cambios | table_id=%s step=%s queries=%s rows_in=%d filter=%s",
-                table_id,
+                "Error aplicando filtro; reenvío sin cambios | table_id=%s step=%s queries=%s filter=%s",
+                inner.name,
                 step,
                 queries_key,
-                in_rows,
                 getattr(fn, "__name__", "unknown"),
             )
             self._send_to_router(raw, bn)
