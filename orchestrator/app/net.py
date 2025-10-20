@@ -389,20 +389,59 @@ class Orchestrator:
         try:
             table_type = msg.get_table_type()
             logging.info(
-                "action: eof_received | result: success | table_type: %s | batch_number: %d",
+                "action: eof_received | result: enqueue_to_workers | table_type: %s | batch_number: %d",
                 table_type,
                 getattr(msg, "batch_number", 0),
             )
 
-            message_bytes = msg.to_bytes()
+            # Enqueue a copy of the EOF message into each worker's queue.
+            # If any worker queue is full, retry until the configured timeout
+            # elapses. Use an overall deadline so the total waiting time is
+            # bounded.
+            if not getattr(self, "_task_queues", None):
+                raise RuntimeError("no task queues available for workers")
 
-            self._broadcast_eof_to_all(message_bytes)
+            now = time.time()
+            overall_deadline = None if self._queue_put_timeout is None else now + self._queue_put_timeout
+            client_id = getattr(msg, "client_id", None)
+
+            message_bytes = msg.to_bytes()
+            for idx, q in enumerate(self._task_queues):
+                enqueued = False
+                while True:
+                    try:
+                        # enqueue a marker with the raw bytes to avoid pickling
+                        # issues with message objects (EOFMessage may contain
+                        # lambdas/locals that aren't picklable).
+                        q.put(("__eof__", message_bytes, client_id), block=False)
+                        enqueued = True
+                        logging.info(
+                            "action: eof_enqueue | result: success | worker_queue: %d | table_type: %s | batch_number: %d",
+                            idx,
+                            table_type,
+                            getattr(msg, "batch_number", 0),
+                        )
+                        break
+                    except queue.Full:
+                        if overall_deadline is not None and time.time() >= overall_deadline:
+                            logging.error(
+                                "action: eof_enqueue | result: fail | reason: timeout | worker_queue: %d | table_type: %s | batch_number: %d",
+                                idx,
+                                table_type,
+                                getattr(msg, "batch_number", 0),
+                            )
+                            raise
+                        # short sleep before retrying
+                        time.sleep(0.1)
+
+                if not enqueued:
+                    # should not reach here because we either enqueued or raised
+                    raise queue.Full()
 
             logging.info(
-                "action: eof_forwarded | result: success | table_type: %s | bytes_length: %d | replicas: %d",
+                "action: eof_enqueued_all | result: success | table_type: %s | replicas: %d",
                 table_type,
-                len(message_bytes),
-                self._num_routers,
+                len(self._task_queues),
             )
 
             ResponseHandler.send_success(client_sock)
