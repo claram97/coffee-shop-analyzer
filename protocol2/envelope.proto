@@ -7,15 +7,16 @@ import "eof_message.proto";
 import "table_data.proto";
 import "query_result.proto";
 
-message Envelope {
-  enum MessageType {
-    UNKNOWN = 0;
-    DATA_BATCH = 1;
-    EOF = 2;
-    TABLE_DATA = 3;
-    QUERY_RESULT = 4;
-  }
+enum MessageType {
+  UNKNOWN = 0;
+  DATA_BATCH = 1;
+  EOF_MESSAGE = 2;
+  TABLE_DATA = 3;
+  QUERY_RESULT = 4;
+}
 
+
+message Envelope {
   MessageType type = 1;
 
   oneof payload {
