@@ -25,6 +25,7 @@ type ClientConfig struct {
 	BatchLimit      int32
 	Attempts        int
 	RetryInterval   time.Duration
+	OutputDirectory string
 }
 
 // Client encapsulates the client behavior and orchestrates all components
@@ -86,7 +87,7 @@ func (c *Client) SendBatch() {
 
 	// Set up response handling
 	readDone := make(chan struct{})
-	responseHandler := network.NewResponseHandler(conn, c.config.ID, log)
+	responseHandler := network.NewResponseHandler(conn, c.config.ID, c.config.OutputDirectory, log)
 	responseHandler.ReadResponses(readDone)
 
 	// Process all tables with a factory function to create batch processors
