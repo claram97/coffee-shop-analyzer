@@ -115,8 +115,10 @@ class FilterRouter:
     def process_message(self, msg: Envelope) -> None:
         if msg.type == MessageType.DATA_BATCH:
             self._handle_data(msg.data_batch)
-        if msg.type == MessageType.EOF_MESSAGE:
-            self._handle_data(msg.eof)
+        elif msg.type == MessageType.EOF_MESSAGE:
+            # EOF messages carry an EOFMessage, handle them with the
+            # dedicated EOF handler instead of the DataBatch handler.
+            self._handle_table_eof(msg.eof)
         else:
             self._log.warning("Unknown message type: %r", type(msg))
 

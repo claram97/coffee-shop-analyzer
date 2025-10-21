@@ -17,6 +17,8 @@ from common.network import MessageHandler, ResponseHandler, ServerManager
 from middleware.middleware_client import MessageMiddlewareExchange
 from protocol.constants import Opcodes
 from protocol.messages import Finished
+from protocol2.eof_message_pb2 import EOFMessage as PB_EOFMessage
+from protocol2.envelope_pb2 import Envelope, MessageType
 
 from .worker_pool import processing_worker_main
 
@@ -315,7 +317,7 @@ class Orchestrator:
         except Exception as e:
             return ResponseHandler.handle_processing_error(msg, client_sock, e)
 
-    def _process_eof_message(self, msg, client_sock) -> bool:
+    def _old_process_eof_message(self, msg, client_sock) -> bool:
         """Reenvía EOFs al exchange del Filter Router (broadcast a todas las réplicas)."""
         try:
             table_type = msg.get_table_type()
@@ -342,6 +344,67 @@ class Orchestrator:
         except Exception as e:
             logging.error(
                 "action: eof_processing | result: fail | table_type: %s | batch_number: %d | error: %s",
+                getattr(msg, "table_type", "unknown"),
+                getattr(msg, "batch_number", 0),
+                str(e),
+            )
+            return ResponseHandler.handle_processing_error(msg, client_sock, e)
+
+    def _process_eof_message(self, msg, client_sock) -> bool:
+        """Reenvía EOFs al exchange del Filter Router (broadcast a todas las réplicas) usando protocol2 Envelope."""
+        try:
+            table_type = msg.get_table_type()
+            logging.info(
+                "action: eof_received_proto | result: success | table_type: %s | batch_number: %d",
+                table_type,
+                getattr(msg, "batch_number", 0),
+            )
+
+            # Build protobuf EOFMessage
+            pb_eof = PB_EOFMessage()
+            client_id = getattr(msg, "client_id", None)
+            if client_id:
+                pb_eof.client_id = client_id
+
+            # Best-effort mapping of textual table_type to proto enum if available
+            try:
+                from protocol2.table_data_pb2 import TableName as PBTableName
+
+                t = (table_type or "").lower()
+                mapping = {
+                    "menu_items": PBTableName.MENU_ITEMS,
+                    "stores": PBTableName.STORES,
+                    "transaction_items": PBTableName.TRANSACTION_ITEMS,
+                    "transactions": PBTableName.TRANSACTIONS,
+                    "users": PBTableName.USERS,
+                }
+                if t in mapping:
+                    pb_eof.table = mapping[t]
+            except Exception:
+                # ignore mapping failures
+                pass
+
+            env = Envelope()
+            env.type = MessageType.EOF_MESSAGE
+            env.eof.CopyFrom(pb_eof)
+
+            payload = env.SerializeToString()
+
+            self._broadcast_eof_to_all(payload)
+
+            logging.info(
+                "action: eof_forwarded_proto | result: success | table_type: %s | bytes_length: %d | replicas: %d",
+                table_type,
+                len(payload),
+                self._num_routers,
+            )
+
+            ResponseHandler.send_success(client_sock)
+            return True
+
+        except Exception as e:
+            logging.error(
+                "action: eof_processing_proto | result: fail | table_type: %s | batch_number: %d | error: %s",
                 getattr(msg, "table_type", "unknown"),
                 getattr(msg, "batch_number", 0),
                 str(e),
