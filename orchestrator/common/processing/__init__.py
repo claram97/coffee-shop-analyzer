@@ -9,6 +9,7 @@ from .serialization import (
     serialize_filtered_transactions, serialize_filtered_users
 )
 from .batch_processor import BatchProcessor, create_filtered_data_batch, batch_processor
+from .batch_processor import create_filtered_data_batch_protocol2
 from .file_utils import MessageLogger, message_logger
 
 __all__ = [
@@ -22,6 +23,7 @@ __all__ = [
     
     # Batch processing
     'BatchProcessor', 'create_filtered_data_batch', 'batch_processor',
+    'create_filtered_data_batch_protocol2',
     
     # File utilities
     'MessageLogger', 'message_logger'

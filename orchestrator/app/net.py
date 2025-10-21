@@ -13,7 +13,6 @@ from typing import Optional
 
 from app.results_consumer import ResultsConsumer
 from common.network import MessageHandler, ResponseHandler, ServerManager
-from common.processing import create_filtered_data_batch, message_logger
 
 from middleware.middleware_client import MessageMiddlewareExchange
 from protocol.constants import Opcodes
@@ -315,27 +314,6 @@ class Orchestrator:
             return False
         except Exception as e:
             return ResponseHandler.handle_processing_error(msg, client_sock, e)
-
-    def _process_filtered_batch(self, msg, status_text: str):
-        """Filtra, empaqueta y publica el DataBatch al exchange del Filter Router."""
-        try:
-            client_id = getattr(msg, "client_id", None)
-            if not client_id:
-                raise RuntimeError("missing client_id for filtered batch")
-
-            filtered_batch = create_filtered_data_batch(msg, client_id)
-            batch_bytes = filtered_batch.to_bytes()
-
-            bn = int(getattr(filtered_batch, "batch_number", 0) or 0)
-            self._send_to_filter_router_exchange(batch_bytes, bn)
-
-        except Exception as filter_error:
-            logging.error(
-                "action: batch_filter | result: fail | batch_number: %d | opcode: %d | error: %s",
-                getattr(msg, "batch_number", 0),
-                msg.opcode,
-                str(filter_error),
-            )
 
     def _process_eof_message(self, msg, client_sock) -> bool:
         """Reenvía EOFs al exchange del Filter Router (broadcast a todas las réplicas)."""

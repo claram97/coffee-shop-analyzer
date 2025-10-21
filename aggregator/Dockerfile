@@ -4,8 +4,8 @@ FROM python:3.9.7-slim
 # COPY aggregator/requirements.txt /tmp/requirements.txt
 # RUN pip install -r /tmp/requirements.txt && rm /tmp/requirements.txt
 
-# Install required dependencies
-RUN pip install pika
+# Install required dependencies (including protobuf runtime required by generated pb2)
+RUN pip install --no-cache-dir protobuf==6.32.1 pika
 
 # Copy all code to root for easier imports
 COPY aggregator /aggregator
@@ -14,7 +14,7 @@ COPY protocol /protocol
 COPY app_config /app_config
 
 # Set Python path to include root directory
-ENV PYTHONPATH=/
+ENV PYTHONPATH=/:/protocol2
 
 # Set working directory
 WORKDIR /aggregator

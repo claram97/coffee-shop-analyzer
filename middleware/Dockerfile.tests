@@ -2,7 +2,7 @@ FROM python:3.11-slim
 
 ENV PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1 \
-    PYTHONPATH=/app/middleware
+    PYTHONPATH=/app/middleware:/protocol2
 
 RUN apt-get update \
     && apt-get install -y --no-install-recommends build-essential \
@@ -12,6 +12,6 @@ WORKDIR /app
 
 COPY middleware /app/middleware
 
-RUN pip install --no-cache-dir pika==1.3.2
+RUN pip install --no-cache-dir protobuf==6.32.1 pika==1.3.2
 
 CMD ["python", "/app/middleware/run_tests.py"]

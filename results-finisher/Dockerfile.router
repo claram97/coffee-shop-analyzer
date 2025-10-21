@@ -6,12 +6,17 @@ WORKDIR /app
 # Add the working directory to the PYTHONPATH so imports work correctly
 ENV PYTHONPATH=/app
 
+# Ensure protocol2 generated modules are importable
+ENV PYTHONPATH=${PYTHONPATH}:/protocol2
+
 # Copy requirements first for better Docker layer caching
 COPY results-finisher/requirements.txt .
-RUN pip install --no-cache-dir -r requirements.txt
+RUN pip install --no-cache-dir protobuf==6.32.1 && pip install --no-cache-dir -r requirements.txt
 
 # Copy the protocol folder from repository root
 COPY protocol ./protocol
+
+COPY protocol2 /protocol2
 
 # Copy middleware implementation
 COPY middleware ./middleware
