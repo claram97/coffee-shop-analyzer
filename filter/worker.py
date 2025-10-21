@@ -14,7 +14,7 @@ from middleware.middleware_client import (
 from protocol2.databatch_pb2 import DataBatch, Query
 from protocol2.envelope_pb2 import Envelope, MessageType
 from protocol2.eof_message_pb2 import EOFMessage
-from protocol2.table_data import Row, TableData, TableName, TableSchema, TableStatus
+from protocol2.table_data_pb2 import Row, TableData, TableName, TableSchema, TableStatus
 from protocol2.table_data_utils import iterate_rows_as_dicts
 
 LOGGER_NAME = "filter_worker"
@@ -93,7 +93,11 @@ def year_filter(td, min_year: int = 2024, max_year: int = 2025) -> List[Any]:
 
 
 FilterFn = Callable[[List[Any]], List[Any]]
-FilterRegistry = Dict[Tuple[TableName, int, str], FilterFn]
+# TableName is a protobuf EnumTypeWrapper (not a plain Python type). Using it
+# directly inside typing.Tuple triggers a TypeError at import time because the
+# typing machinery expects real types. Use `int` for the enum slot (the enum
+# values are integers) so annotations are safe but still informative.
+FilterRegistry = Dict[Tuple[int, int, str], FilterFn]
 
 QUERY_TO_INT = {
     Query.Q1: 1,
