@@ -4,11 +4,12 @@ Results consumer that handles query results from the results-finisher component.
 
 import logging
 import threading
-import time
 from middleware.middleware_client import MessageMiddlewareQueue, MessageMiddlewareDisconnectedError
 from protocol import DataBatch, Opcodes, BatchStatus
-from protocol.messages import QueryResult1, QueryResult2, QueryResult3, QueryResult4, QueryResultError
-from protocol.messages import Finished
+# protocol2 helpers (protobuf)
+from protocol2.envelope_pb2 import Envelope, MessageType
+from protocol2.table_data_utils import iterate_rows_as_dicts
+from protocol2.table_data_pb2 import TableStatus
 
 class ResultsConsumer:
     """Consumes result messages from the results-finisher component and forwards them to clients."""
@@ -80,6 +81,81 @@ class ResultsConsumer:
                 "action: client_unregistered | result: success | client_id: %s",
                 client_id,
             )
+
+    def _new_process_result(self, env: Envelope):
+        """Process an incoming Envelope and, if it contains a DataBatch, forward its table payload to the client.
+
+        Args:
+            env: A parsed protobuf `Envelope` message (protocol2). This function
+                 *only* handles envelopes with type == MessageType.DATA_BATCH.
+        """
+        try:
+            # Only handle protobuf Envelope containing a DataBatch
+            if env.type != MessageType.DATA_BATCH:
+                return
+
+            data_batch = env.data_batch
+
+            if not data_batch.query_ids:
+                logging.warning("action: process_result | result: missing_query_id | error: No query_id in batch")
+                return
+
+            query_id = str(data_batch.query_ids[0])
+
+            client_id = getattr(data_batch, "client_id", None)
+            if not client_id:
+                logging.warning(
+                    "action: process_result | result: missing_client_id | query_id: %s",
+                    query_id,
+                )
+                return
+
+            # payload is a TableData protobuf
+            table_msg = data_batch.payload
+
+            # batch status comes from the TableData.status enum
+            batch_status = getattr(table_msg, "status", None)
+            status_text = "UNKNOWN"
+            if batch_status == TableStatus.CONTINUE:
+                status_text = "CONTINUE"
+            elif batch_status == TableStatus.EOF:
+                status_text = "EOF"
+            elif batch_status == TableStatus.CANCEL:
+                status_text = "CANCEL"
+
+            # row count in the table payload
+            row_count = len(table_msg.rows) if hasattr(table_msg, "rows") else 0
+
+            # Log summary
+            logging.info(
+                "action: result_received | result: success | query_id: %s | "
+                "table: %s | batch_status: %s | rows: %d",
+                query_id,
+                getattr(table_msg, "name", "unknown"),
+                status_text,
+                row_count,
+            )
+
+            # Log rows (convert to dicts using helper)
+            if row_count > 0 and hasattr(table_msg, "rows"):
+                try:
+                    for i, row_dict in enumerate(iterate_rows_as_dicts(table_msg)):
+                        logging.info(
+                            "action: result_row | query_id: %s | row: %d/%d | data: %s",
+                            query_id,
+                            i + 1,
+                            row_count,
+                            row_dict,
+                        )
+                except Exception as e:
+                    logging.warning(f"action: log_row_data | result: fail | error: {str(e)}")
+
+            # Forward the inner table message bytes to the client (same behavior as before)
+            self._forward_result_to_client(query_id, table_msg.SerializeToString(), client_id)
+
+        except Exception as e:
+            logging.error(f"action: process_result | result: fail | error: {str(e)}")
+    
                 
     def _process_result(self, body):
         """Process a result message from the queue.

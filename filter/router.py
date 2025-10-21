@@ -18,7 +18,7 @@ from middleware.middleware_client import (
 from protocol2.databatch_pb2 import DataBatch, Query
 from protocol2.envelope_pb2 import Envelope, MessageType
 from protocol2.eof_message_pb2 import EOFMessage
-from protocol2.table_data import Row, TableData, TableName, TableSchema, TableStatus
+from protocol2.table_data_pb2 import Row, TableData, TableName, TableSchema, TableStatus
 from protocol2.table_data_utils import iterate_rows_as_dicts
 
 TABLE_NAME_TO_STR = {

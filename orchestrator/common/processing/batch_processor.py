@@ -9,6 +9,13 @@ from typing import Callable, Dict, List
 from protocol.constants import Opcodes
 from protocol.databatch import DataBatch
 
+# protocol2 (protobuf) support for alternate DataBatch creation
+from protocol2.table_data_utils import build_table_data
+from protocol2.databatch_pb2 import DataBatch as PBDataBatch
+from protocol2.table_data_pb2 import TableName as PBTableName, TableStatus as PBTableStatus
+from protocol2.databatch_pb2 import Query as PBQuery
+from protocol2.envelope_pb2 import Envelope, MessageType
+
 from .filters import (
     filter_menu_items_columns,
     filter_stores_columns,
@@ -293,6 +300,121 @@ class BatchProcessor:
 
         return wrapper
 
+    def create_filtered_data_batch_protocol2(self, original_msg, client_id: str) -> Envelope:
+        """
+        Creates a protocol2 `DataBatch` (protobuf) from an original data message.
+
+        This parallels `create_filtered_data_batch` but builds a `protocol2` DataBatch
+        where the payload is a `TableData` protobuf. It does NOT serialize or wrap
+        the inner table as bytes; instead it uses `protocol2` structures directly.
+
+        Returns:
+            A `protocol2.databatch_pb2.DataBatch` instance.
+        """
+        logging.info("action: create_filtered_data_batch_protocol2_start | opcode: %d", original_msg.opcode)
+
+        # 1) query ids (convert from numeric ids used in mappings -> protobuf enum values)
+        query_ids = self.get_query_ids_for_opcode(original_msg.opcode)
+        # protobuf Query enum: Q1=0, Q2=1, Q3=2, Q4=3 -> map numeric 1..4 to 0..3
+        pb_query_ids = []
+        for q in query_ids:
+            try:
+                qi = int(q)
+                if qi >= 1:
+                    pb_query_ids.append(qi - 1)
+            except Exception:
+                # ignore non-int entries
+                pass
+
+        # 2) filter rows (reuse existing filter functions)
+        filter_func = self.get_filter_function_for_opcode(original_msg.opcode)
+        filtered_rows = filter_func(original_msg.rows)
+
+        logging.info(
+            "action: create_filtered_data_batch_protocol2 | opcode: %d | "
+            "original_rows: %d | filtered_rows: %d | batch_number: %d",
+            original_msg.opcode,
+            original_msg.amount,
+            len(filtered_rows),
+            original_msg.batch_number,
+        )
+
+        # 3) derive columns and rows for TableData
+        columns: list[str] = []
+        rows: list[list[str]] = []
+        if filtered_rows:
+            # assume filtered_rows is list[dict]
+            first = filtered_rows[0]
+            if isinstance(first, dict):
+                columns = list(first.keys())
+                for r in filtered_rows:
+                    rows.append([str(r.get(c, "")) for c in columns])
+            else:
+                # fallback: try to extract attrs
+                columns = [k for k in dir(first) if not k.startswith("_") and not callable(getattr(first, k))]
+                for r in filtered_rows:
+                    rows.append([str(getattr(r, c, "")) for c in columns])
+
+        logging.info(
+            "action: create_filtered_data_batch_protocol2_columns | opcode: %d | "
+            "columns: %s",
+            original_msg.opcode,
+            columns,
+        )
+
+        # 4) build TableData protobuf using helper
+        # Map opcode -> PBTableName
+        opcode_to_table = {
+            Opcodes.NEW_MENU_ITEMS: PBTableName.MENU_ITEMS,
+            Opcodes.NEW_STORES: PBTableName.STORES,
+            Opcodes.NEW_TRANSACTION_ITEMS: PBTableName.TRANSACTION_ITEMS,
+            Opcodes.NEW_TRANSACTION: PBTableName.TRANSACTIONS,
+            Opcodes.NEW_USERS: PBTableName.USERS,
+        }
+        table_name_enum = opcode_to_table.get(original_msg.opcode, PBTableName.MENU_ITEMS)
+
+        # Map batch_status to protobuf TableStatus (assumes same numeric layout)
+        try:
+            bs_val = int(getattr(original_msg, "batch_status", 0))
+        except Exception:
+            bs_val = 0
+        if bs_val == 1:
+            pb_status = PBTableStatus.EOF
+        elif bs_val == 2:
+            pb_status = PBTableStatus.CANCEL
+        else:
+            pb_status = PBTableStatus.CONTINUE
+
+        table_data = build_table_data(table_name_enum, columns, rows, batch_number=getattr(original_msg, "batch_number", 0), status=pb_status)
+
+        # 5) construct protobuf DataBatch
+        pb_batch = PBDataBatch()
+        if pb_query_ids:
+            pb_batch.query_ids.extend(pb_query_ids)
+        pb_batch.filter_steps = 0
+        pb_batch.client_id = client_id
+        pb_batch.payload.CopyFrom(table_data)
+
+        logging.info(
+            "action: create_filtered_data_batch_protocol2_ready | opcode: %d | "
+            "batch_number: %d",
+            original_msg.opcode,
+            original_msg.batch_number,
+        )
+
+        # Wrap in an Envelope (protocol2) ready to be serialized/sent
+        env = Envelope()
+        env.type = MessageType.DATA_BATCH
+        env.data_batch.CopyFrom(pb_batch)
+
+        logging.info(
+            "action: create_filtered_data_batch_protocol2_envelope_ready | opcode: %d | "
+            "batch_number: %d",
+            original_msg.opcode,
+            original_msg.batch_number,
+        )
+        return env
+
 
 # A global singleton instance of the processor for easy access throughout the application.
 batch_processor = BatchProcessor()
@@ -312,3 +434,11 @@ def create_filtered_data_batch(original_msg, client_id: str) -> DataBatch:
         A fully processed `DataBatch` object.
     """
     return batch_processor.create_filtered_data_batch(original_msg, client_id)
+
+
+def create_filtered_data_batch_protocol2(original_msg, client_id: str) -> Envelope:
+    """
+    Convenience function that builds a `protocol2` protobuf `DataBatch`
+    using the global `batch_processor` instance.
+    """
+    return batch_processor.create_filtered_data_batch_protocol2(original_msg, client_id)

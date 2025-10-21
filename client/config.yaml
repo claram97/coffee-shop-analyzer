@@ -6,6 +6,8 @@ loop:
   period: "5s"
 log:
   level: "info"
+output:
+  baseDir: "/client_runs"
 batch:
   maxAmount: 50000 # number of lines
 data:
