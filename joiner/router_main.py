@@ -19,7 +19,7 @@ from middleware.middleware_client import (
     MessageMiddlewareExchange,
     MessageMiddlewareQueue,
 )
-from protocol import Opcodes
+from protocol2.table_data_pb2 import TableName
 
 
 def _rabbit_exchange_factory(host: str):
@@ -170,16 +170,16 @@ def main():
 
     in_queues: list[str] = []
     tables_for_input: list[Tuple[int, str]] = [
-        (Opcodes.NEW_TRANSACTION_ITEMS, "transaction_items"),
-        (Opcodes.NEW_TRANSACTION, "transactions"),
-        (Opcodes.NEW_USERS, "users"),
-        (Opcodes.NEW_MENU_ITEMS, "menu_items"),
-        (Opcodes.NEW_STORES, "stores"),
+        (TableName.TRANSACTION_ITEMS, "transaction_items"),
+        (TableName.TRANSACTIONS, "transactions"),
+        (TableName.USERS, "users"),
+        (TableName.MENU_ITEMS, "menu_items"),
+        (TableName.STORES, "stores"),
     ]
-    for _tid, tname in tables_for_input:
+    for _tname, tnamestr in tables_for_input:
         parts = cfg.workers.aggregators
         for pid in range(parts):
-            q = cfg.aggregator_to_joiner_router_queue(tname, pid, jr_index)
+            q = cfg.aggregator_to_joiner_router_queue(tnamestr, pid, jr_index)
             in_queues.append(q)
 
     log.info("Entradas (N=%d): %s", len(in_queues), ", ".join(in_queues))

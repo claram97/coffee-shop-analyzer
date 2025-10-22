@@ -13,18 +13,20 @@ from middleware.middleware_client import (
     MessageMiddlewareExchange,
     MessageMiddlewareQueue,
 )
-from protocol.constants import Opcodes
-from protocol.databatch import DataBatch
-from protocol.messages import EOFMessage
+from protocol2.databatch_pb2 import DataBatch, Query, ShardInfo
+from protocol2.envelope_pb2 import Envelope, MessageType
+from protocol2.eof_message_pb2 import EOFMessage
+from protocol2.table_data_pb2 import Row, TableData, TableName, TableSchema, TableStatus
+from protocol2.table_data_utils import iterate_rows_as_dicts
 
-NAME_TO_ID = {
-    "transactions": Opcodes.NEW_TRANSACTION,
-    "users": Opcodes.NEW_USERS,
-    "transaction_items": Opcodes.NEW_TRANSACTION_ITEMS,
-    "menu_items": Opcodes.NEW_MENU_ITEMS,
-    "stores": Opcodes.NEW_STORES,
+STR_TO_NAME = {
+    "transactions": TableName.TRANSACTIONS,
+    "users": TableName.USERS,
+    "transaction_items": TableName.TRANSACTION_ITEMS,
+    "menu_items": TableName.MENU_ITEMS,
+    "stores": TableName.STORES,
 }
-ID_TO_NAME = {v: k for (k, v) in NAME_TO_ID.items()}
+NAME_TO_STR = {v: k for (k, v) in STR_TO_NAME.items()}
 LIGHT_TABLES = {"menu_items", "stores"}
 
 log = logging.getLogger("joiner-router")
@@ -56,30 +58,32 @@ def _norm_user_id(v: Any) -> Optional[str]:
     return s.split(".", maxsplit=1)[0] if s.endswith(".0") else s
 
 
-def _shard_key_for_row(table_id: int, row, queries: List[int]) -> Optional[str]:
+def _shard_key_for_row(
+    table_name: TableName, row: dict[str, str], queries: List[Query]
+) -> Optional[str]:
     q = set(queries)
 
-    if table_id == Opcodes.NEW_USERS:
-        uid = getattr(row, "user_id", None)
+    if table_name == TableName.USERS:
+        uid = row["user_id"]
         return _norm_user_id(uid)
 
-    if 4 in q:
-        uid = getattr(row, "user_id", None)
+    if Query.Q4 in q:
+        uid = row["user_id"]
         return _norm_user_id(uid)
 
-    if 2 in q and table_id == Opcodes.NEW_TRANSACTION_ITEMS:
-        key = getattr(row, "item_id", None)
+    if Query.Q2 in q and table_name == TableName.TRANSACTION_ITEMS:
+        key = row["item_id"]
         return str(key) if key is not None else None
 
-    if 3 in q and table_id == Opcodes.NEW_TRANSACTION:
-        key = getattr(row, "store_id", None)
+    if Query.Q3 in q and table_name == TableName.TRANSACTIONS:
+        key = row["store_id"]
         return str(key) if key is not None else None
 
     return None
 
 
-def is_broadcast_table(table_id: int) -> bool:
-    return table_id in (Opcodes.NEW_MENU_ITEMS, Opcodes.NEW_STORES)
+def is_broadcast_table(table_name: TableName) -> bool:
+    return table_name in (TableName.MENU_ITEMS, TableName.STORES)
 
 
 class ExchangePublisherPool:
@@ -134,15 +138,15 @@ class JoinerRouter:
         self._in = in_mw
         self._pool = publisher_pool
         self._cfg = route_cfg
-        self._pending_eofs: Dict[tuple[int, str], Set[int]] = {}
-        self._part_counter: Dict[tuple[int, str], int] = {}
+        self._pending_eofs: Dict[tuple[TableName, str], Set[int]] = {}
+        self._part_counter: Dict[tuple[TableName, str], int] = {}
         self._fr_replicas = fr_replicas
         self._stop_event = stop_event
         self._is_shutting_down = False
         log.info(
             "JoinerRouter init: tables=%s",
             {
-                ID_TO_NAME[k]: {
+                NAME_TO_STR[k]: {
                     "ex": v.exchange_name,
                     "agg": v.agg_shards,
                     "join": v.joiner_shards,
@@ -161,125 +165,84 @@ class JoinerRouter:
         log.info("JoinerRouter consuming…")
         self._in.start_consuming(self._on_raw)
 
-    def _try_parse_eof(self, body: bytes) -> Optional[EOFMessage]:
-        if not body or len(body) < 1 or body[0] != Opcodes.EOF:
-            return None
-        try:
-            return EOFMessage.deserialize_from_bytes(body)
-        except Exception as e:
-            log.error("EOF parse error: %s", e)
-            return None
-
-    def _try_parse_databatch(self, body: bytes) -> Optional[DataBatch]:
-        if not body or len(body) < 1 or body[0] != Opcodes.DATA_BATCH:
-            return None
-        try:
-            return DataBatch.deserialize_from_bytes(body)
-        except Exception as e:
-            log.error("DataBatch parse error: %s", e)
-            return None
-
-    @staticmethod
-    def _eof_table_id(eof: EOFMessage) -> Optional[int]:
-        raw = getattr(eof, "table_type", None)
-        if raw in (None, "") and hasattr(eof, "get_table_type"):
-            try:
-                raw = eof.get_table_type()
-            except Exception:
-                raw = None
-
-        if raw is None:
-            return None
-
-        s = str(raw).strip().lower()
-
-        if s in NAME_TO_ID:
-            return NAME_TO_ID[s]
-
-        try:
-            num = int(s)
-            return num if num in ID_TO_NAME else None
-        except ValueError:
-            return None
-
     def _on_raw(self, raw: bytes):
         if self._is_shutting_down or self._stop_event.is_set():
             log.warning("Router is shutting down, skipping new message.")
             return
-        eof = self._try_parse_eof(raw)
-        if eof is not None:
-            self._handle_partition_eof_like(eof, raw)
+
+        envelope = Envelope.ParseFromString(raw)
+
+        if envelope.type == MessageType.EOF_MESSAGE:
+            return self._handle_partition_eof_like(envelope.eof, raw)
+
+        if envelope.type == MessageType.DATA_BATCH:
+            db = envelope.data_batch
+        else:
+            log.warning("Skipping message: unknown type")
             return
 
-        db = self._try_parse_databatch(raw)
-        if db is None:
-            log.warning("skip message: not DataBatch")
-            return
+        table = db.payload.name
+        queries = db.query_ids
 
-        table_id = int(db.batch_msg.opcode)
-        tname = ID_TO_NAME.get(table_id, f"#{table_id}")
-        queries: List[int] = list(getattr(db, "query_ids", []) or [])
-
-        cfg = self._cfg.get(table_id)
+        cfg = self._cfg.get(table)
 
         if 1 in queries:
             self._publish(cfg, randint(0, cfg.joiner_shards - 1), raw)
 
         if cfg is None:
-            log.warning("no route cfg for table=%s (%s)", tname, table_id)
+            log.warning("no route cfg for table=%s", table)
             return
 
-        inner = getattr(db, "batch_msg", None)
-        log.debug("recv DataBatch table=%s queries=%s", tname, queries)
+        log.debug("recv DataBatch table=%s queries=%s", table, queries)
 
-        if is_broadcast_table(table_id):
-            log.info("broadcast table=%s shards=%d", tname, cfg.joiner_shards)
+        if is_broadcast_table(table):
+            log.info("broadcast table=%s shards=%d", table, cfg.joiner_shards)
             self._broadcast(cfg, raw)
             return
 
-        rows = (inner.rows or []) if (inner and hasattr(inner, "rows")) else []
-        if not rows:
-            log.debug("empty rows → shard=0 (metadata-only) table=%s", tname)
-            self._publish(cfg, shard=0, raw=raw)
+        if len(db.payload.rows) == 0:
+            log.debug("empty rows → shard=0 (metadata-only) table=%s", table)
+            self._publish(cfg, shard=randint(0, cfg.agg_shards - 1), raw=raw)
             return
 
         buckets: Dict[int, List[Any]] = {}
         for shard in range(0, cfg.joiner_shards):
             buckets[shard] = []
 
-        for r in rows:
-            k = _shard_key_for_row(table_id, r, queries)
+        for r in iterate_rows_as_dicts(db.payload):
+            k = _shard_key_for_row(table, r, queries)
             if k is None or not k.strip():
                 continue
             shard = _hash_to_shard(k, cfg.joiner_shards)
             buckets[shard].append(r)
 
-        if log.isEnabledFor(logging.INFO):
+        if log.isEnabledFor(logging.DEBUG):
             sizes = {sh: len(rs) for sh, rs in buckets.items()}
-            log.debug("shard plan table=%s -> %s", tname, sizes)
+            log.debug("shard plan table=%s -> %s", table, sizes)
 
         for shard, shard_rows in buckets.items():
             db_sh = copy.copy(db)
             db_sh.query_ids = db.query_ids
-            db_sh.shards_info = getattr(db, "shards_info", []) + [
-                (cfg.joiner_shards, shard)
+            db_sh.shards_info = db.shards_info + [
+                ShardInfo(total_shards=cfg.joiner_shards, shard_number=shard)
             ]
-            if getattr(db_sh, "batch_msg", None) and hasattr(db_sh.batch_msg, "rows"):
-                db_sh.batch_msg.rows = shard_rows
-            db_sh.batch_bytes = db_sh.batch_msg.to_bytes()
-            raw_sh = db_sh.to_bytes()
+            db_sh.payload.schema = db.payload.schema
+            db_sh.payload.rows = shard_rows
+            raw_sh = Envelope(
+                type=MessageType.DATA_BATCH, data_batch=db_sh
+            ).SerializeToString()
             self._publish(cfg, shard, raw_sh)
 
-    def _handle_partition_eof_like(self, eof: EOFMessage, raw_eof: bytes) -> None:
-        table_id = self._eof_table_id(eof)
-        if table_id is None:
+    def _handle_partition_eof_like(self, eof: EOFMessage, raw_env: bytes) -> None:
+        table = eof.table
+        if table is None:
             log.warning("EOF without valid table_type; ignoring")
             return
-        cid = getattr(eof, "client_id", "")
-        key = (table_id, cid)
-        cfg = self._cfg.get(table_id)
+        cid = eof.client_id
+        key = (table, cid)
+        cfg = self._cfg.get(table)
         if cfg is None:
-            log.warning("EOF for unknown table_id=%s; ignoring", table_id)
+            log.warning("EOF for unknown table_id=%s; ignoring", table)
             return
 
         recvd = self._pending_eofs.setdefault(key, set())
@@ -300,7 +263,7 @@ class JoinerRouter:
                 key,
                 cfg.joiner_shards,
             )
-            self._broadcast(cfg, raw_eof, shards=cfg.joiner_shards)
+            self._broadcast(cfg, raw_env, shards=cfg.joiner_shards)
             self._pending_eofs.pop(key)
             self._part_counter.pop(key)
 
@@ -348,28 +311,28 @@ def build_route_cfg_from_config(cfg: "Config") -> Dict[int, TableRouteCfg]:
     def _rk_pattern(table: str) -> str:
         return rk_fmt.replace("{table}", table)
 
-    route: Dict[int, TableRouteCfg] = {}
+    route: Dict[TableName, TableRouteCfg] = {}
 
-    for tname, tid in NAME_TO_ID.items():
+    for tnamestr, tname in STR_TO_NAME.items():
         agg_parts = cfg.workers.aggregators
-        if tname in LIGHT_TABLES:
-            j_parts = cfg.joiner_partitions(tname)
+        if tnamestr in LIGHT_TABLES:
+            j_parts = cfg.joiner_partitions(tnamestr)
             if j_parts <= 1:
                 j_parts = max(1, int(cfg.workers.joiners))
         else:
-            j_parts = cfg.joiner_partitions(tname)
+            j_parts = cfg.joiner_partitions(tnamestr)
 
-        route[tid] = TableRouteCfg(
-            exchange_name=_ex(tname),
+        route[tname] = TableRouteCfg(
+            exchange_name=_ex(tnamestr),
             agg_shards=agg_parts,
             joiner_shards=j_parts,
-            key_pattern=_rk_pattern(tname),
+            key_pattern=_rk_pattern(tnamestr),
         )
 
     log.info(
         "Route cfg: %s",
         {
-            ID_TO_NAME[k]: {
+            NAME_TO_STR[k]: {
                 "ex": v.exchange_name,
                 "agg": v.agg_shards,
                 "join": v.joiner_shards,
