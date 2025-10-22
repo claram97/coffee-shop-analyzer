@@ -113,6 +113,7 @@ class FilterRouter:
         self._pending_eof: Dict[tuple[TableName, str], EOFMessage] = {}
 
     def process_message(self, msg: Envelope) -> None:
+        self._log.info("Processing message: %r, message type: %r", msg, msg.type)
         if msg.type == MessageType.DATA_BATCH:
             self._handle_data(msg.data_batch)
         elif msg.type == MessageType.EOF_MESSAGE:
@@ -123,6 +124,7 @@ class FilterRouter:
             self._log.warning("Unknown message type: %r", type(msg))
 
     def _handle_data(self, batch: DataBatch) -> None:
+        self._log.info("Handling DataBatch message: %r", batch)
         table = batch.payload.name
         queries = batch.query_ids
         mask = batch.filter_steps
@@ -152,12 +154,21 @@ class FilterRouter:
         if next_step is not None and self._pol.steps_remaining(
             table, queries, steps_done=next_step
         ):
-            batch.reserved_u16 = set_bit(mask, next_step)
+            # DataBatch protobuf (protocol2) does not have `reserved_u16`.
+            # Use the existing `filter_steps` field to store the updated mask.
+            new_mask = set_bit(mask, next_step)
+            try:
+                batch.filter_steps = new_mask
+            except Exception:
+                # If assignment to filter_steps fails for any reason, fall back
+                # to setting an attribute on the Python object (legacy-like).
+                setattr(batch, "filter_steps", new_mask)
+
             self._log.debug(
                 "→ filters step=%d table=%s new_mask=%s",
                 next_step,
                 table,
-                bin(batch.reserved_u16),
+                bin(new_mask),
             )
             try:
                 self._p.send_to_filters_pool(batch)
@@ -204,10 +215,12 @@ class FilterRouter:
         self._maybe_flush_pending_eof(key)
 
     def _send_to_some_aggregator(self, batch: DataBatch) -> None:
+        self._log.info("_send_to_some_aggregator table=%s bn=%s", batch.payload.name, batch.payload.batch_number)
         num_parts = max(1, int(self._cfg.aggregators))
         self._p.send_to_aggregator_partition(randint(0, num_parts - 1), batch)
 
     def _handle_table_eof(self, eof: EOFMessage) -> None:
+        self._log.info("Handling TABLE_EOF message: %r", eof)
         key = (eof.table, eof.client_id)
         self._log.info("TABLE_EOF received: key=%s", key)
         self._pending_eof[key] = eof
@@ -326,6 +339,7 @@ class ExchangeBusProducer:
         Envía `payload` al exchange/rk indicado por `key`, con reintentos y recreación del publisher.
         Bloquea por key para serializar accesos concurrentes al mismo canal.
         """
+        self._log.info("send_with_retry key=%s payload_size=%d", key, len(payload))
         lock = self._pub_locks.setdefault(key, threading.Lock())
         with lock:
             attempt = 0
@@ -369,7 +383,7 @@ class ExchangeBusProducer:
 
     def send_to_filters_pool(self, batch: DataBatch) -> None:
         try:
-            self._log.debug("publish → filters_pool")
+            self._log.info("publish → filters_pool")
             envelope = Envelope(type=MessageType.DATA_BATCH, data_batch=batch)
             raw = envelope.SerializeToString()
             self._filters_pub.send(raw)
@@ -380,7 +394,7 @@ class ExchangeBusProducer:
         table = batch.payload.name
         key = self._key_for(table, int(partition_id))
         try:
-            self._log.debug(
+            self._log.info(
                 "publish → aggregator table=%s part=%d", table, int(partition_id)
             )
             envelope = Envelope(type=MessageType.DATA_BATCH, data_batch=batch)
