@@ -85,6 +85,19 @@ class JoinerWorker:
         except Exception as e:
             self._log.debug("log_db failed: %s", e)
 
+    def _safe_batch_number(self, db_or_env) -> int | None:
+        """Return an integer batch number handling both legacy and protobuf shapes."""
+        try:
+            # protobuf DataBatch has payload.batch_number
+            if getattr(db_or_env, "payload", None) and getattr(db_or_env.payload, "batch_number", None) is not None:
+                return int(db_or_env.payload.batch_number)
+            # legacy DataBatch has top-level batch_number
+            if getattr(db_or_env, "batch_number", None) is not None:
+                return int(db_or_env.batch_number)
+        except Exception:
+            return None
+        return None
+
     def run(self):
         self._log.info("JoinerWorker shard=%d: iniciando consumidores", self._shard)
         self._start_queue(TableName.MENU_ITEMS, self._on_raw_menu)

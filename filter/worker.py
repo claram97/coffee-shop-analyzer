@@ -190,6 +190,7 @@ class FilterWorker:
         return pub
 
     def _send_to_router(self, raw: bytes, batch_number: int | None) -> None:
+        logger.info("Enviando batch al router | batch_number=%s", batch_number)
         pid = 0 if batch_number is None else int(batch_number) % self._num_routers
         rk = self._rk_fmt.format(pid=pid)
         pub = self._publisher_for_rk(rk)
@@ -200,17 +201,56 @@ class FilterWorker:
         self._in.start_consuming(self._on_raw)
 
     def _on_raw(self, raw: bytes) -> None:
+        logger.info("Mensaje recibido, tamaño=%d bytes", len(raw))
+        # Small hex preview to help identify message payload in logs (first 48 bytes)
+        try:
+            preview = raw[:48].hex()
+            logger.debug("raw preview: %s", preview)
+        except Exception:
+            logger.debug("raw preview unavailable")
         if self._stop_event.is_set():
             logger.warning("Shutdown in progress, skipping message.")
             return
         t0 = time.perf_counter()
         env = Envelope()
-        env.ParseFromString(raw)
+        try:
+            env.ParseFromString(raw)
+        except Exception as e:
+            logger.exception("Failed to parse Envelope from raw bytes: %s", e)
+            # If parsing fails, requeue or send upstream unchanged so other components
+            # (or legacy consumers) can handle it. Here we NACK/reattempt by re-sending
+            # to router to avoid dropping the message silently.
+            try:
+                self._send_to_router(raw, None)
+            except Exception:
+                logger.warning("Failed to re-send raw message after parse error")
+            return
         if env.type != MessageType.DATA_BATCH:
             logger.warning("Expected databatch, got %s", env.type)
             return
         db = env.data_batch
-        bn = db.batch_number
+        # Log envelope / DataBatch summary
+        try:
+            rows_count = len(db.payload.rows) if db and db.payload and db.payload.rows is not None else 0
+        except Exception:
+            rows_count = -1
+        logger.info("Parsed Envelope type=%s client_id=%s batch_rows=%s", env.type, getattr(db, "client_id", None), rows_count)
+        # protocol2 DataBatch puts the batch_number inside payload.batch_number.
+        # Provide a safe accessor that handles both legacy and protobuf shapes.
+        def _safe_batch_number(database) -> int | None:
+            logger.info("Obteniendo batch_number seguro del DataBatch")
+            try:
+                # protobuf path: payload.batch_number
+                if getattr(database, "payload", None) and getattr(database.payload, "batch_number", None) is not None:
+                    return int(database.payload.batch_number)
+                # legacy path: top-level batch_number
+                if getattr(database, "batch_number", None) is not None:
+                    return int(database.batch_number)
+            except Exception:
+                return None
+            return None
+
+        bn = _safe_batch_number(db)
         if not db.payload:
             logger.warning("Batch sin batch_msg: reenvío sin cambios")
             self._send_to_router(raw, bn)
@@ -220,7 +260,7 @@ class FilterWorker:
         step_mask = db.filter_steps
         step = current_step_from_mask(step_mask)
         if step is None:
-            logger.debug(
+            logger.info(
                 "Sin step activo en máscara: reenvío sin cambios | table_id=%s mask=%s",
                 inner.name,
                 step_mask,
@@ -253,9 +293,48 @@ class FilterWorker:
 
         try:
             new_rows = fn(inner) or []
-            inner.rows = new_rows
-            env.data_batch = db
+            # protobuf repeated composite fields (like `rows`) don't allow
+            # direct assignment of a Python list. Convert filter output into
+            # Row messages and replace the repeated field contents.
+            rows_objs: list[Row] = []
+            cols = []
+            try:
+                cols = list(inner.schema.columns)
+            except Exception:
+                cols = []
+
+            for r in new_rows:
+                if isinstance(r, Row):
+                    rows_objs.append(r)
+                elif isinstance(r, (list, tuple)):
+                    # list of values in the schema order
+                    rows_objs.append(Row(values=list(r)))
+                elif isinstance(r, dict):
+                    # build values according to schema column order
+                    vals = [r.get(c) for c in cols] if cols else list(r.values())
+                    rows_objs.append(Row(values=vals))
+                else:
+                    # fallback: coerce to string in a single-column row
+                    rows_objs.append(Row(values=[str(r)]))
+
+            # replace repeated field contents
+            inner.rows.clear()
+            if rows_objs:
+                inner.rows.extend(rows_objs)
+            # Assign the DataBatch into the Envelope using CopyFrom to avoid
+            # "Assignment not allowed to message field" errors on protobuf
+            # message fields.
+            env.data_batch.CopyFrom(db)
             out_raw = env.SerializeToString()
+            logger.info(
+                "Filtro aplicado con éxito: filas antes=%d, después=%d | table_id=%s step=%s queries=%s filter=%s",
+                len(inner.rows) + (len(new_rows) - len(rows_objs)),
+                len(new_rows),
+                inner.name,
+                step,
+                queries_key,
+                getattr(fn, "__name__", "unknown"),
+            )
             self._send_to_router(out_raw, bn)
 
         except Exception:
