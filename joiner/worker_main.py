@@ -17,7 +17,7 @@ from middleware.middleware_client import (
     MessageMiddlewareExchange,
     MessageMiddlewareQueue,
 )
-from protocol import Opcodes
+from protocol2.table_data_pb2 import TableName
 
 
 def force_bind(host: str, exchange: str, queue: str, routing_key: str):
@@ -81,11 +81,11 @@ def build_inputs_for_shard(
             queue_name=qn,
         )
 
-    inputs[Opcodes.NEW_TRANSACTION_ITEMS] = make("transaction_items")
-    inputs[Opcodes.NEW_TRANSACTION] = make("transactions")
-    inputs[Opcodes.NEW_USERS] = make("users")
-    inputs[Opcodes.NEW_MENU_ITEMS] = make("menu_items")
-    inputs[Opcodes.NEW_STORES] = make("stores")
+    inputs[TableName.TRANSACTION_ITEMS] = make("transaction_items")
+    inputs[TableName.TRANSACTIONS] = make("transactions")
+    inputs[TableName.USERS] = make("users")
+    inputs[TableName.MENU_ITEMS] = make("menu_items")
+    inputs[TableName.STORES] = make("stores")
 
     return inputs
 
@@ -170,7 +170,6 @@ def main(argv=None):
     worker = JoinerWorker(
         in_mw=in_mw,
         out_results_mw=out_results,
-        data_dir=os.environ.get("JOINER_DATA_DIR", "/data/joiner"),
         logger=logging.getLogger(f"joiner-worker-{shard}"),
         shard_index=shard,
         router_replicas=cfg.routers.joiner,
