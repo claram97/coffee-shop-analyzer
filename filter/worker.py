@@ -204,7 +204,8 @@ class FilterWorker:
             logger.warning("Shutdown in progress, skipping message.")
             return
         t0 = time.perf_counter()
-        env = Envelope.ParseFromString(raw)
+        env = Envelope()
+        env.ParseFromString(raw)
         if env.type != MessageType.DATA_BATCH:
             logger.warning("Expected databatch, got %s", env.type)
             return

@@ -161,7 +161,8 @@ class JoinerWorker:
             self._log.error("requeue failed table_id=%s: %s", table_name, e)
 
     def _on_raw_menu(self, raw: bytes):
-        envelope = Envelope.ParseFromString(raw)
+        envelope = Envelope()
+        envelope.ParseFromString(raw)
         if envelope.type == MessageType.EOF_MESSAGE:
             eof: EOFMessage = envelope.eof
             self._on_table_eof(
@@ -188,7 +189,8 @@ class JoinerWorker:
         self._log.info("Cache menu_items idx_size=%d", len(idx))
 
     def _on_raw_stores(self, raw: bytes):
-        envelope = Envelope.ParseFromString(raw)
+        envelope = Envelope()
+        envelope.ParseFromString(raw)
         if envelope.type == MessageType.EOF_MESSAGE:
             eof: EOFMessage = envelope.eof
             self._on_table_eof(
@@ -215,7 +217,8 @@ class JoinerWorker:
         self._log.info("Cache stores idx_size=%d", len(idx))
 
     def _on_raw_ti(self, raw: bytes):
-        envelope = Envelope.ParseFromString(raw)
+        envelope = Envelope()
+        envelope.ParseFromString(raw)
         if envelope.type == MessageType.EOF_MESSAGE:
             eof: EOFMessage = envelope.eof
             self._on_table_eof(
@@ -284,7 +287,8 @@ class JoinerWorker:
         self._safe_send(raw)
 
     def _on_raw_tx(self, raw: bytes):
-        envelope = Envelope.ParseFromString(raw)
+        envelope = Envelope()
+        envelope.ParseFromString(raw)
         if envelope.type == MessageType.EOF_MESSAGE:
             eof: EOFMessage = envelope.eof
             self._on_table_eof(
@@ -366,7 +370,8 @@ class JoinerWorker:
         return
 
     def _on_raw_users(self, raw: bytes):
-        envelope = Envelope.ParseFromString(raw)
+        envelope = Envelope()
+        envelope.ParseFromString(raw)
         if envelope.type == MessageType.EOF_MESSAGE:
             eof: EOFMessage = envelope.eof
             self._on_table_eof(

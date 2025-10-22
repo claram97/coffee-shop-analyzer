@@ -170,7 +170,8 @@ class JoinerRouter:
             log.warning("Router is shutting down, skipping new message.")
             return
 
-        envelope = Envelope.ParseFromString(raw)
+        envelope = Envelope()
+        envelope.ParseFromString(raw)
 
         if envelope.type == MessageType.EOF_MESSAGE:
             return self._handle_partition_eof_like(envelope.eof, raw)
