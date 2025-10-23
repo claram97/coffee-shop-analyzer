@@ -189,9 +189,10 @@ class JoinerWorker:
             self._log.warning("Unknown message type: %s. Skipping.", envelope.type)
             return
         cid = db.client_id
+        bn = self._safe_batch_number(db)
         self._log.debug(
             "IN: menu_items batch_number=%s shard=%s shards_info=%s queries=%s cid=%s",
-            db.batch_number,
+            bn,
             self._shard,
             db.shards_info,
             db.query_ids,
@@ -217,9 +218,10 @@ class JoinerWorker:
             self._log.warning("Unknown message type: %s. Skipping.", envelope.type)
             return
         cid = db.client_id
+        bn = self._safe_batch_number(db)
         self._log.debug(
             "IN: stores batch_number=%s shard=%s shards_info=%s queries=%s cid=%s",
-            db.batch_number,
+            bn,
             self._shard,
             db.shards_info,
             db.query_ids,
@@ -246,9 +248,10 @@ class JoinerWorker:
             return
         cid = db.client_id
 
+        bn = self._safe_batch_number(db)
         self._log.debug(
             "IN: transaction_items batch_number=%s shard=%s shards_info=%s queries=%s cid=%s",
-            db.batch_number,
+            bn,
             self._shard,
             db.shards_info,
             db.query_ids,
@@ -316,9 +319,10 @@ class JoinerWorker:
             return
         cid = db.client_id
 
+        bn = self._safe_batch_number(db)
         self._log.debug(
             "IN: transactions batch_number=%s shard=%s shards_info=%s queries=%s cid=%s",
-            db.batch_number,
+            bn,
             self._shard,
             db.shards_info,
             db.query_ids,
@@ -399,9 +403,10 @@ class JoinerWorker:
             return
         cid = db.client_id
 
+        bn = self._safe_batch_number(db)
         self._log.debug(
             "IN: users batch_number=%s shard=%s shards_info=%s queries=%s cid=%s",
-            db.batch_number,
+            bn,
             self._shard,
             db.shards_info,
             db.query_ids,

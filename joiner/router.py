@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import copy
 import hashlib
 import logging
 import threading
@@ -16,8 +15,7 @@ from middleware.middleware_client import (
 from protocol2.databatch_pb2 import DataBatch, Query, ShardInfo
 from protocol2.envelope_pb2 import Envelope, MessageType
 from protocol2.eof_message_pb2 import EOFMessage
-from protocol2.table_data_pb2 import Row, TableData, TableName, TableSchema, TableStatus
-from protocol2.table_data_utils import iterate_rows_as_dicts
+from protocol2.table_data_pb2 import Row, TableName
 
 STR_TO_NAME = {
     "transactions": TableName.TRANSACTIONS,
@@ -206,29 +204,38 @@ class JoinerRouter:
             self._publish(cfg, shard=randint(0, cfg.agg_shards - 1), raw=raw)
             return
 
-        buckets: Dict[int, List[Any]] = {}
+        buckets: Dict[int, List[Row]] = {}
         for shard in range(0, cfg.joiner_shards):
             buckets[shard] = []
 
-        for r in iterate_rows_as_dicts(db.payload):
-            k = _shard_key_for_row(table, r, queries)
+        columns = list(db.payload.schema.columns)
+        for row in db.payload.rows:
+            row_dict = {
+                col: row.values[i] if i < len(row.values) else None
+                for i, col in enumerate(columns)
+            }
+            k = _shard_key_for_row(table, row_dict, queries)
             if k is None or not k.strip():
                 continue
             shard = _hash_to_shard(k, cfg.joiner_shards)
-            buckets[shard].append(r)
+            buckets[shard].append(row)
 
         if log.isEnabledFor(logging.DEBUG):
             sizes = {sh: len(rs) for sh, rs in buckets.items()}
             log.debug("shard plan table=%s -> %s", table, sizes)
 
         for shard, shard_rows in buckets.items():
-            db_sh = copy.copy(db)
-            db_sh.query_ids = db.query_ids
-            db_sh.shards_info = db.shards_info + [
-                ShardInfo(total_shards=cfg.joiner_shards, shard_number=shard)
-            ]
-            db_sh.payload.schema = db.payload.schema
-            db_sh.payload.rows = shard_rows
+            if not shard_rows:
+                continue
+            db_sh = DataBatch()
+            db_sh.CopyFrom(db)
+            shard_info = db_sh.shards_info.add()
+            shard_info.total_shards = cfg.joiner_shards
+            shard_info.shard_number = shard
+            db_sh.payload.ClearField("rows")
+            for row in shard_rows:
+                new_row = db_sh.payload.rows.add()
+                new_row.CopyFrom(row)
             raw_sh = Envelope(
                 type=MessageType.DATA_BATCH, data_batch=db_sh
             ).SerializeToString()
@@ -265,8 +272,9 @@ class JoinerRouter:
                 cfg.joiner_shards,
             )
             self._broadcast(cfg, raw_env, shards=cfg.joiner_shards)
-            self._pending_eofs.pop(key)
-            self._part_counter.pop(key)
+            # Use safe pops in case concurrent callbacks already cleared these.
+            self._pending_eofs.pop(key, None)
+            self._part_counter.pop(key, None)
 
     def _rk(self, cfg: TableRouteCfg, shard: int) -> str:
         return cfg.key_pattern.format(shard=int(shard))
