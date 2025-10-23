@@ -11,6 +11,7 @@ RUN pip install --no-cache-dir protobuf==6.32.1 pika
 COPY aggregator /aggregator
 COPY middleware /middleware
 COPY protocol /protocol
+COPY protocol2 /protocol2
 COPY app_config /app_config
 
 # Set Python path to include root directory

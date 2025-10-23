@@ -8,7 +8,6 @@ import logging
 from typing import Dict, List
 
 from constants import VALID_YEARS
-from protocol.entities import RawUser
 
 
 def create_query2_aggregation() -> Dict:
@@ -39,13 +38,13 @@ def log_query4_transactions(transaction_counts: Dict, filtered_count: int, total
     logging.debug(f'Total customer-store combinations: {len(transaction_counts)}')
 
 
-def log_query4_users(users: List[RawUser]) -> None:
+def log_query4_users(users: List[dict]) -> None:
     """Log user data for Query 4 - TABLE 2."""
     logging.debug('Query 4 - TABLE 2: Users data:')
     logging.debug('User_ID | Birthdate')
     logging.debug('-' * 25)
 
     for user in users:
-        logging.debug(f'{user.user_id:7s} | {user.birthdate}')
+        logging.debug(f'{user["user_id"]:7s} | {user["birthdate"]}')
 
     logging.debug(f'Total users: {len(users)}')

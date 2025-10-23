@@ -12,15 +12,12 @@ from utils.datetimeUtils import calculate_semester, extract_year, parse_datetime
 from utils.debug import log_query2_results, log_query3_results
 from utils.filterUtils import filter_transaction_by_datetime, is_valid_year
 
-from protocol.databatch import DataBatch
-from protocol.entities import RawTransaction, RawTransactionItem, RawUser
-
 # ============================================================================
 # QUERY PROCESSORS
 # ============================================================================
 
 
-def aggregate_query2_data(transaction_items: List[RawTransactionItem]) -> Dict:
+def aggregate_query2_data(transaction_items: List[dict]) -> Dict:
     """
     Aggregate transaction items by (year, month, item_id).
 
@@ -29,11 +26,11 @@ def aggregate_query2_data(transaction_items: List[RawTransactionItem]) -> Dict:
     aggregated_data = create_query2_aggregation()
 
     for item in transaction_items:
-        created_at = parse_datetime(item.created_at)
+        created_at = parse_datetime(item['created_at'])
         # For Q2, we use item_name instead of item_id when joining menu items
         # This handles both RawTransactionItem and RawTransactionItemMenuItem types
-        item_id = getattr(item, "item_id", None)
-        item_name = getattr(item, "item_name", None)
+        item_id = item.get("item_id")
+        item_name = item.get("item_name")
 
         # If we have RawTransactionItemMenuItem, use item_name as key
         # Otherwise fall back to item_id for regular RawTransactionItem
@@ -49,7 +46,7 @@ def aggregate_query2_data(transaction_items: List[RawTransactionItem]) -> Dict:
 
         # Handle quantity - ensure it's a proper numeric value
         try:
-            quantity = getattr(item, "quantity", "0")
+            quantity = item.get("quantity", "0")
             if quantity and quantity.strip():
                 quantity_float = float(quantity)
                 logging.debug(
@@ -63,7 +60,7 @@ def aggregate_query2_data(transaction_items: List[RawTransactionItem]) -> Dict:
 
         # Handle subtotal/revenue - ensure it's a proper numeric value
         try:
-            subtotal = getattr(item, "subtotal", "0")
+            subtotal = item.get("subtotal", "0")
             if subtotal and subtotal.strip():
                 subtotal_float = float(subtotal)
                 logging.debug(
@@ -78,7 +75,7 @@ def aggregate_query2_data(transaction_items: List[RawTransactionItem]) -> Dict:
     return aggregated_data
 
 
-def process_query_2(transaction_items: List[RawTransactionItem]) -> Dict:
+def process_query_2(transaction_items: List[dict]) -> Dict:
     """
     Process Query 2: Aggregate transaction items by year, month, and item_id.
 
@@ -94,7 +91,7 @@ def process_query_2(transaction_items: List[RawTransactionItem]) -> Dict:
     return aggregated_data
 
 
-def aggregate_query3_data(transactions: List[RawTransaction]) -> Tuple[Dict, int, int]:
+def aggregate_query3_data(transactions: List[dict]) -> Tuple[Dict, int, int]:
     """
     Aggregate transactions by (store_id, year, semester) with filtering.
 
@@ -114,49 +111,49 @@ def aggregate_query3_data(transactions: List[RawTransaction]) -> Tuple[Dict, int
 
         filtered_count += 1
 
-        created_at = parse_datetime(transaction.created_at)
+        created_at = parse_datetime(transaction['created_at'])
         year = created_at.year
         month = created_at.month
         semester = calculate_semester(month)
 
-        key = (transaction.store_id, year, semester)
+        key = (transaction['store_id'], year, semester)
 
         aggregated_data[key]["transaction_count"] += 1
 
         # Handle empty or invalid original_amount
         try:
             original_amount = (
-                float(transaction.original_amount)
-                if transaction.original_amount
+                float(transaction['original_amount'])
+                if transaction['original_amount']
                 else 0.0
             )
         except (ValueError, TypeError):
             logging.error(
-                f"Invalid original_amount '{transaction.original_amount}' for transaction, using 0.0"
+                f"Invalid original_amount '{transaction['original_amount']}' for transaction, using 0.0"
             )
             original_amount = 0.0
 
         # Handle empty or invalid discount_applied
         try:
             discount_applied = (
-                float(transaction.discount_applied)
-                if transaction.discount_applied
+                float(transaction['discount_applied'])
+                if transaction['discount_applied']
                 else 0.0
             )
         except (ValueError, TypeError):
             logging.error(
-                f"Invalid discount_applied '{transaction.discount_applied}' for transaction, using 0.0"
+                f"Invalid discount_applied '{transaction['discount_applied']}' for transaction, using 0.0"
             )
             discount_applied = 0.0
 
         # Handle empty or invalid final_amount
         try:
             final_amount = (
-                float(transaction.final_amount) if transaction.final_amount else 0.0
+                float(transaction['final_amount']) if transaction['final_amount'] else 0.0
             )
         except (ValueError, TypeError):
             logging.error(
-                f"Invalid final_amount '{transaction.final_amount}' for transaction, using 0.0"
+                f"Invalid final_amount '{transaction['final_amount']}' for transaction, using 0.0"
             )
             final_amount = 0.0
 
@@ -167,7 +164,7 @@ def aggregate_query3_data(transactions: List[RawTransaction]) -> Tuple[Dict, int
     return aggregated_data, filtered_count, total_count
 
 
-def process_query_3(transactions: List[RawTransaction]) -> Dict:
+def process_query_3(transactions: List[dict]) -> Dict:
     """
     Process Query 3: Aggregate transactions by store, year, and semester.
 
@@ -190,7 +187,7 @@ def process_query_3(transactions: List[RawTransaction]) -> Dict:
 
 
 def aggregate_query4_transactions(
-    transactions: List[RawTransaction],
+    transactions: List[dict],
 ) -> Tuple[Dict, int, int]:
     """
     Aggregate transactions by (store_id, user_id) for valid years.
@@ -202,21 +199,21 @@ def aggregate_query4_transactions(
     total_count = len(transactions)
 
     for transaction in transactions:
-        if not getattr(transaction, "user_id", "").strip():
+        if not transaction.get("user_id", "").strip():
             continue
-        year = extract_year(transaction.created_at)
+        year = extract_year(transaction['created_at'])
 
         if not is_valid_year(year):
             continue
 
         filtered_count += 1
-        key = (transaction.store_id, transaction.user_id)
+        key = (transaction['store_id'], transaction['user_id'])
         transaction_counts[key] += 1
 
     return transaction_counts, filtered_count, total_count
 
 
-def process_query_4_transactions(transactions: List[RawTransaction]) -> Dict:
+def process_query_4_transactions(transactions: List[dict]) -> Dict:
     """
     Process Query 4 - TABLE 1: Count transactions by store and user.
 
@@ -242,7 +239,7 @@ def process_query_4_transactions(transactions: List[RawTransaction]) -> Dict:
 # ============================================================================
 
 
-def serialize_query2_results(query_result: Dict) -> List[RawTransactionItem]:
+def serialize_query2_results(query_result: Dict) -> List[dict]:
     """
     Serialize Query 2 aggregated results into RawTransactionItem entities.
 
@@ -290,28 +287,20 @@ def serialize_query2_results(query_result: Dict) -> List[RawTransactionItem]:
             f"Q2 serializing: item_id={item_id}, quantity={quantity_str}, revenue={revenue_str}"
         )
 
-        transaction_item = RawTransactionItem(
-            transaction_id="",
-            item_id=str(item_id),
-            quantity=quantity_str,  # Explicit quantity inclusion
-            unit_price="",
-            subtotal=revenue_str,
-            created_at=f"{year}-{month:02d}-01 00:00:00",
-        )
-
-        # Verify the item was properly created
-        if not hasattr(transaction_item, "quantity") or not transaction_item.quantity:
-            logging.warning(
-                f"Q2 serialization issue: quantity missing for item_id={item_id}"
-            )
-            # Force set the quantity if needed
-            transaction_item.quantity = quantity_str
+        transaction_item = {
+            'transaction_item_id': '',
+            'transaction_id': '',
+            'item_id': str(item_id),
+            'quantity': quantity_str,
+            'subtotal': revenue_str,
+            'created_at': f"{year}-{month:02d}-01 00:00:00",
+        }
 
         result.append(transaction_item)
     return result
 
 
-def serialize_query3_results(query_result: Dict) -> List[RawTransaction]:
+def serialize_query3_results(query_result: Dict) -> List[dict]:
     """
     Serialize Query 3 aggregated results into RawTransaction entities.
 
@@ -353,22 +342,22 @@ def serialize_query3_results(query_result: Dict) -> List[RawTransaction]:
     result = []
     for key, value in query_result.items():
         store_id, year, semester = key
-        transaction = RawTransaction(
-            transaction_id=str(value["transaction_count"]),
-            store_id=str(store_id),
-            payment_method_id="",
-            voucher_id="",
-            user_id="",
-            original_amount=str(value["total_original_amount"]),
-            discount_applied=str(value["total_discount_applied"]),
-            final_amount=str(value["total_final_amount"]),
-            created_at=f"{year}-{semester}",
-        )
+        transaction = {
+            'transaction_id': str(value["transaction_count"]),
+            'store_id': str(store_id),
+            'payment_method_id': '',
+            'voucher_id': '',
+            'user_id': '',
+            'original_amount': str(value["total_original_amount"]),
+            'discount_applied': str(value["total_discount_applied"]),
+            'final_amount': str(value["total_final_amount"]),
+            'created_at': f"{year}-{semester}",
+        }
         result.append(transaction)
     return result
 
 
-def serialize_query4_transaction_results(query_result: Dict) -> List[RawTransaction]:
+def serialize_query4_transaction_results(query_result: Dict) -> List[dict]:
     """
     Serialize Query 4 transaction aggregated results into RawTransaction entities.
 
@@ -415,22 +404,22 @@ def serialize_query4_transaction_results(query_result: Dict) -> List[RawTransact
     result = []
     for key, count in query_result.items():
         store_id, user_id = key
-        transaction = RawTransaction(
-            transaction_id=str(count),
-            store_id=str(store_id),
-            payment_method_id="",
-            voucher_id="",
-            user_id=str(user_id),
-            original_amount="",
-            discount_applied="",
-            final_amount="",
-            created_at="",
-        )
+        transaction = {
+            'transaction_id': str(count),
+            'store_id': str(store_id),
+            'payment_method_id': '',
+            'voucher_id': '',
+            'user_id': str(user_id),
+            'original_amount': '',
+            'discount_applied': '',
+            'final_amount': '',
+            'created_at': '',
+        }
         result.append(transaction)
     return result
 
 
-def update_databatch_with_results(databatch: DataBatch, result_rows: List) -> DataBatch:
+def update_databatch_with_results(databatch, result_rows: List) -> None:
     """
     Update a DataBatch with new aggregated results.
 

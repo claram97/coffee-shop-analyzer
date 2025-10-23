@@ -24,9 +24,11 @@ from middleware.middleware_client import (
     MessageMiddlewareExchange,
     MessageMiddlewareQueue,
 )
-from protocol.constants import BatchStatus, Opcodes
-from protocol.databatch import DataBatch
-from protocol.messages import EOFMessage
+from protocol2.envelope_pb2 import Envelope, MessageType
+from protocol2.databatch_pb2 import DataBatch, Query
+from protocol2.eof_message_pb2 import EOFMessage
+from protocol2.table_data_pb2 import TableData, TableName, TableStatus
+from protocol2.table_data_utils import build_table_data, iterate_rows_as_dicts
 
 # Para transactions y query 1: re-enviar
 # Para transaction_items y query 2: procesamiento en esta instancia
@@ -34,11 +36,11 @@ from protocol.messages import EOFMessage
 # Para transactions y query 4: procesamiento en esta instancia
 
 TID_TO_NAME = {
-    Opcodes.NEW_MENU_ITEMS: "menu_items",
-    Opcodes.NEW_STORES: "stores",
-    Opcodes.NEW_TRANSACTION: "transactions",
-    Opcodes.NEW_TRANSACTION_ITEMS: "transaction_items",
-    Opcodes.NEW_USERS: "users",
+    TableName.MENU_ITEMS: "menu_items",
+    TableName.STORES: "stores",
+    TableName.TRANSACTION_ITEMS: "transaction_items",
+    TableName.TRANSACTIONS: "transactions",
+    TableName.USERS: "users",
 }
 
 
@@ -111,6 +113,7 @@ class Aggregator:
                 )
 
     def _send_to_joiner_by_table(self, table: str, raw_bytes: bytes):
+        logging.info("Sending to joiner by table=%s", table)
         replica = random.randint(0, self._jr_replicas - 1)
         q = self._out_queues.get((table, replica))
         if not q:
@@ -118,30 +121,29 @@ class Aggregator:
             return
         q.send(raw_bytes)
 
-    def _forward_databatch_by_opcode(self, raw: bytes, opcode: int):
-        """Reenvía DataBatch a la cola correcta usando el opcode provisto."""
+    def _forward_databatch_by_table(self, raw: bytes, table_name: str):
+        logging.info("Forwarding DataBatch message")
+        """Reenvía DataBatch a la cola correcta usando el table_name provisto."""
         try:
-            table = TID_TO_NAME.get(opcode)
+            table = table_name
             logging.debug(
-                "Forwarding DataBatch with opcode=%s to table=%s", opcode, table
+                "Forwarding DataBatch to table=%s", table
             )
             if not table:
-                logging.error("Unknown opcode=%s", opcode)
+                logging.error("Unknown table_name=%s", table_name)
                 return
 
             self._send_to_joiner_by_table(table, raw)
         except Exception:
             logging.exception(
-                "Failed to forward databatch by opcode. Opcode: %s", opcode
+                "Failed to forward databatch by table. Table: %s", table_name
             )
             return
 
-    def _forward_eof(self, raw: bytes, opcode: int):
+    def _forward_eof(self, raw: bytes, table_name: str):
+        logging.info("Forwarding EOF message")
         """Detecta tabla desde EOFMessage y reenvía a la cola correcta."""
-        table = TID_TO_NAME.get(opcode)
-        if not table:
-            logging.error("Unknown opcode in EOF message: %s", opcode)
-            return
+        table = table_name
         logging.info("Forwarding EOF for table=%s", table)
         for replica in range(0, self._jr_replicas):
             q = self._out_queues.get((table, replica))
@@ -176,111 +178,203 @@ class Aggregator:
         logging.info("Aggregator server stopped")
 
     def _handle_menu_item(self, message: bytes) -> bool:
+        logging.info("Handling menu item message")
         try:
             if not message:
                 return False
-            if message[0] == Opcodes.EOF:
-                self._forward_eof(message, Opcodes.NEW_MENU_ITEMS)
+            envelope = Envelope()
+            envelope.ParseFromString(message)
+            if envelope.type == MessageType.EOF_MESSAGE:
+                eof_msg = envelope.eof
+                table_name = TID_TO_NAME[eof_msg.table]
+                self._forward_eof(message, table_name)
+            elif envelope.type == MessageType.DATA_BATCH:
+                data_batch = envelope.data_batch
+                table_name = TID_TO_NAME[data_batch.payload.name]
+                self._forward_databatch_by_table(message, table_name)
             else:
-                self._forward_databatch_by_opcode(message, Opcodes.NEW_MENU_ITEMS)
+                logging.warning("Unknown message type: %s", envelope.type)
             return True
         except Exception:
             logging.exception("Failed to handle menu item")
             return False
 
     def _handle_store(self, message: bytes) -> bool:
+        logging.info("Handling store message")
         try:
             if not message:
                 return False
-            if message[0] == Opcodes.EOF:
-                self._forward_eof(message, Opcodes.NEW_STORES)
+            envelope = Envelope()
+            envelope.ParseFromString(message)
+            if envelope.type == MessageType.EOF_MESSAGE:
+                eof_msg = envelope.eof
+                table_name = TID_TO_NAME[eof_msg.table]
+                self._forward_eof(message, table_name)
+            elif envelope.type == MessageType.DATA_BATCH:
+                data_batch = envelope.data_batch
+                table_name = TID_TO_NAME[data_batch.payload.name]
+                self._forward_databatch_by_table(message, table_name)
             else:
-                self._forward_databatch_by_opcode(message, Opcodes.NEW_STORES)
+                logging.warning("Unknown message type: %s", envelope.type)
             return True
         except Exception:
             logging.exception("Failed to handle store")
             return False
 
     def _handle_transaction(self, message: bytes):
+        logging.info("Handling transaction message")
         try:
             if not message:
                 return False
-            if message[0] == Opcodes.EOF:
-                self._forward_eof(message, Opcodes.NEW_TRANSACTION)
+    
+            envelope = Envelope()
+            envelope.ParseFromString(message)
+
+            if envelope.type == MessageType.EOF_MESSAGE:
+                eof_msg = envelope.eof
+                table_name = TID_TO_NAME[eof_msg.table]
+                self._forward_eof(message, table_name)
                 return True
 
-            db = DataBatch.deserialize_from_bytes(message)
-            rows = db.batch_msg.rows or []
-            query_id = db.query_ids[0] if db.query_ids else None
+            elif envelope.type == MessageType.DATA_BATCH:
+                data_batch = envelope.data_batch
+                table_data = data_batch.payload
+                rows = list(iterate_rows_as_dicts(table_data))
+                query_id = data_batch.query_ids[0] if data_batch.query_ids else None
 
-            if query_id == 1 or query_id is None:
-                self._forward_databatch_by_opcode(message, Opcodes.NEW_TRANSACTION)
-            elif query_id == 3:
-                processed = process_query_3(rows)
-                out = serialize_query3_results(processed)
-                db.batch_msg.rows = out
-                db.batch_bytes = db.batch_msg.to_bytes()
-                db.batch_msg.amount = len(out)
-                databatch = db.to_bytes()
-                self._forward_databatch_by_opcode(databatch, Opcodes.NEW_TRANSACTION)
-            elif query_id == 4:
-                processed = process_query_4_transactions(rows)
-                out = serialize_query4_transaction_results(processed)
-                db.batch_msg.rows = out
-                db.batch_bytes = db.batch_msg.to_bytes()
-                db.batch_msg.amount = len(out)
-                databatch = db.to_bytes()
-                self._forward_databatch_by_opcode(databatch, Opcodes.NEW_TRANSACTION)
+                if query_id == 0 or query_id is None:
+                    self._forward_databatch_by_table(message, "transactions")
+                elif query_id == 2:
+                    processed = process_query_3(rows)
+                    out = serialize_query3_results(processed)
+                    # TODO: Convert out to new protobuf format
+                    # For now, assume out is list of dicts
+                    columns = ['transaction_id', 'store_id', 'payment_method_id', 'user_id', 'original_amount', 'discount_applied', 'final_amount', 'created_at']
+                    row_values = [[str(row.get(col, '')) for col in columns] for row in out]
+                    new_table_data = build_table_data(
+                        table_name=TableName.TRANSACTIONS,
+                        columns=columns,
+                        rows=row_values,
+                        batch_number=table_data.batch_number,
+                        status=TableStatus.CONTINUE
+                    )
+                    new_data_batch = DataBatch(
+                        query_ids=data_batch.query_ids,
+                        filter_steps=data_batch.filter_steps,
+                        shards_info=data_batch.shards_info,
+                        client_id=data_batch.client_id,
+                        payload=new_table_data
+                    )
+                    new_envelope = Envelope(type=MessageType.DATA_BATCH, data_batch=new_data_batch)
+                    new_message = new_envelope.SerializeToString()
+                    self._forward_databatch_by_table(new_message, "transactions")
+                elif query_id == 3:
+                    processed = process_query_4_transactions(rows)
+                    out = serialize_query4_transaction_results(processed)
+                    columns = ['transaction_id', 'store_id', 'payment_method_id', 'voucher_id', 'user_id', 'original_amount', 'discount_applied', 'final_amount', 'created_at']
+                    row_values = [[str(row.get(col, '')) for col in columns] for row in out]
+                    new_table_data = build_table_data(
+                        table_name=TableName.TRANSACTIONS,
+                        columns=columns,
+                        rows=row_values,
+                        batch_number=table_data.batch_number,
+                        status=TableStatus.CONTINUE
+                    )
+                    new_data_batch = DataBatch(
+                        query_ids=data_batch.query_ids,
+                        filter_steps=data_batch.filter_steps,
+                        shards_info=data_batch.shards_info,
+                        client_id=data_batch.client_id,
+                        payload=new_table_data
+                    )
+                    new_envelope = Envelope(type=MessageType.DATA_BATCH, data_batch=new_data_batch)
+                    new_message = new_envelope.SerializeToString()
+                    self._forward_databatch_by_table(new_message, "transactions")
+                else:
+                    logging.error("Unexpected query_id=%s for transaction table", query_id)
+                    return False
             else:
-                logging.error("Unexpected query_id=%s for transaction table", query_id)
-                return False
+                logging.warning("Unknown message type: %s", envelope.type)
             return True
         except Exception:
             logging.exception("Failed to handle transaction")
             return False
 
     def _handle_transaction_item(self, message: bytes):
+        logging.info("Handling transaction item message")
         try:
             if not message:
                 return False
-            if message[0] == Opcodes.EOF:
-                self._forward_eof(message, Opcodes.NEW_TRANSACTION_ITEMS)
+
+            envelope = Envelope()
+            envelope.ParseFromString(message)
+
+            if envelope.type == MessageType.EOF_MESSAGE:
+                eof_msg = envelope.eof
+                table_name = TID_TO_NAME[eof_msg.table]
+                self._forward_eof(message, table_name)
                 return True
 
-            db = DataBatch.deserialize_from_bytes(message)
-            rows = db.batch_msg.rows or []
-            query_id = db.query_ids[0] if db.query_ids else None
+            elif envelope.type == MessageType.DATA_BATCH:
+                data_batch = envelope.data_batch
+                table_data = data_batch.payload
+                rows = list(iterate_rows_as_dicts(table_data))
+                query_id = data_batch.query_ids[0] if data_batch.query_ids else None
 
-            if int(query_id) == QueryId.SECOND_QUERY:
-                logging.debug("Processing transaction item with query 2")
-                processed = process_query_2(rows)
-                out = serialize_query2_results(processed)
-                db.batch_msg.rows = out
-                db.batch_bytes = db.batch_msg.to_bytes()
-                db.batch_msg.amount = len(out)
-                databatch = db.to_bytes()
-                self._forward_databatch_by_opcode(
-                    databatch, Opcodes.NEW_TRANSACTION_ITEMS
-                )
+                if int(query_id) == 1:
+                    logging.debug("Processing transaction item with query 2")
+                    processed = process_query_2(rows)
+                    out = serialize_query2_results(processed)
+                    # TODO: Convert out to protobuf
+                    columns = ['transaction_item_id', 'transaction_id', 'item_id', 'quantity', 'subtotal', 'created_at']
+                    row_values = [[str(row.get(col, '')) for col in columns] for row in out]
+                    new_table_data = build_table_data(
+                        table_name=TableName.TRANSACTION_ITEMS,
+                        columns=columns,
+                        rows=row_values,
+                        batch_number=table_data.batch_number,
+                        status=TableStatus.CONTINUE
+                    )
+                    new_data_batch = DataBatch(
+                        query_ids=data_batch.query_ids,
+                        filter_steps=data_batch.filter_steps,
+                        shards_info=data_batch.shards_info,
+                        client_id=data_batch.client_id,
+                        payload=new_table_data
+                    )
+                    new_envelope = Envelope(type=MessageType.DATA_BATCH, data_batch=new_data_batch)
+                    new_message = new_envelope.SerializeToString()
+                    self._forward_databatch_by_table(new_message, "transaction_items")
+                else:
+                    logging.error(
+                        "Transaction item with query distinct from 1: %s", query_id
+                    )
+                    return False
             else:
-                logging.error(
-                    "Transaction item with query distinct from 2: %s", query_id
-                )
-                return False
+                logging.warning("Unknown message type: %s", envelope.type)
             return True
         except Exception:
             logging.exception("Failed to handle transaction item")
             return False
 
-    def _handle_user(self, message: bytes):
+    def _handle_user(self, message: bytes) -> bool:
+        logging.info("Handling user message")
         try:
             if not message:
                 logging.error("Empty message received in user handler")
                 return False
-            if message[0] == Opcodes.EOF:
-                self._forward_eof(message, Opcodes.NEW_USERS)
+            envelope = Envelope()
+            envelope.ParseFromString(message)
+            if envelope.type == MessageType.EOF_MESSAGE:
+                eof_msg = envelope.eof
+                table_name = TID_TO_NAME[eof_msg.table]
+                self._forward_eof(message, table_name)
+            elif envelope.type == MessageType.DATA_BATCH:
+                data_batch = envelope.data_batch
+                table_name = TID_TO_NAME[data_batch.payload.name]
+                self._forward_databatch_by_table(message, table_name)
             else:
-                self._forward_databatch_by_opcode(message, Opcodes.NEW_USERS)
+                logging.warning("Unknown message type: %s", envelope.type)
             return True
         except Exception:
             logging.exception("Failed to handle user")
