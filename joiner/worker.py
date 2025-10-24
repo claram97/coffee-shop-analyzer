@@ -38,6 +38,7 @@ def norm(v) -> str:
 def index_by_attr(table_data: TableData, attr: str) -> Dict[str, dict[str, str]]:
     idx: Dict[str, dict[str, str]] = {}
     for r in iterate_rows_as_dicts(table_data):
+        logging.info("table: %s, row: %s", table_data.name, r)
         k = norm(r[attr])
         if k:
             idx[k] = r
@@ -206,7 +207,7 @@ class JoinerWorker:
             return
         cid = db.client_id
         bn = db.payload.batch_number
-        self._log.debug(
+        self._log.info(
             "IN: stores batch_number=%s shard=%s shards_info=%s queries=%s cid=%s",
             bn,
             self._shard,
@@ -277,7 +278,9 @@ class JoinerWorker:
                     joined_item_values.append(r[col])
             out_rows.append(Row(values=joined_item_values))
 
-        self._log.info("JOIN Q2: in=%d matched=%d", len(db.payload.rows), len(out_rows))
+        self._log.debug(
+            "JOIN Q2: in=%d matched=%d", len(db.payload.rows), len(out_rows)
+        )
         joined_table = TableData(
             name=TableName.TRANSACTION_ITEMS_MENU_ITEMS,
             schema=out_schema,
@@ -327,14 +330,14 @@ class JoinerWorker:
             self._safe_send(raw)
             return
 
-        stores_idx: Optional[Dict[str, Row]] = self._cache_menu.get((cid))
+        stores_idx: Optional[Dict[str, Row]] = self._cache_stores.get((cid))
         if not stores_idx:
             self._log.warning("Stores cache no disponible aún; drop batch TX")
             return
 
         out_cols = [
             "transaction_id",
-            "name",
+            "store_name",
             "final_amount",
             "created_at",
             "user_id",
@@ -350,13 +353,13 @@ class JoinerWorker:
                 continue
             joined_item_values = []
             for col in out_cols:
-                if col == "name":
+                if col == "store_name":
                     joined_item_values.append(st[col])
                 else:
                     joined_item_values.append(r.get(col, ""))
             out_rows.append(Row(values=joined_item_values))
 
-        self._log.info(
+        self._log.debug(
             "JOIN %s: in=%d matched=%d",
             db.query_ids[0],
             len(db.payload.rows),
