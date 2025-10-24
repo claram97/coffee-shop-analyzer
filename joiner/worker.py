@@ -85,19 +85,6 @@ class JoinerWorker:
         except Exception as e:
             self._log.debug("log_db failed: %s", e)
 
-    def _safe_batch_number(self, db_or_env) -> int | None:
-        """Return an integer batch number handling both legacy and protobuf shapes."""
-        try:
-            # protobuf DataBatch has payload.batch_number
-            if getattr(db_or_env, "payload", None) and getattr(db_or_env.payload, "batch_number", None) is not None:
-                return int(db_or_env.payload.batch_number)
-            # legacy DataBatch has top-level batch_number
-            if getattr(db_or_env, "batch_number", None) is not None:
-                return int(db_or_env.batch_number)
-        except Exception:
-            return None
-        return None
-
     def run(self):
         self._log.info("JoinerWorker shard=%d: iniciando consumidores", self._shard)
         self._start_queue(TableName.MENU_ITEMS, self._on_raw_menu)
@@ -189,8 +176,8 @@ class JoinerWorker:
             self._log.warning("Unknown message type: %s. Skipping.", envelope.type)
             return
         cid = db.client_id
-        bn = self._safe_batch_number(db)
-        self._log.debug(
+        bn = db.payload.batch_number
+        self._log.info(
             "IN: menu_items batch_number=%s shard=%s shards_info=%s queries=%s cid=%s",
             bn,
             self._shard,
@@ -198,7 +185,7 @@ class JoinerWorker:
             db.query_ids,
             cid,
         )
-        idx = index_by_attr(db.payload, "product_id")
+        idx = index_by_attr(db.payload, "item_id")
         self._cache_menu[(cid)] = idx
         self._log.info("Cache menu_items idx_size=%d", len(idx))
 
@@ -218,7 +205,7 @@ class JoinerWorker:
             self._log.warning("Unknown message type: %s. Skipping.", envelope.type)
             return
         cid = db.client_id
-        bn = self._safe_batch_number(db)
+        bn = db.payload.batch_number
         self._log.debug(
             "IN: stores batch_number=%s shard=%s shards_info=%s queries=%s cid=%s",
             bn,
@@ -248,7 +235,7 @@ class JoinerWorker:
             return
         cid = db.client_id
 
-        bn = self._safe_batch_number(db)
+        bn = db.payload.batch_number
         self._log.debug(
             "IN: transaction_items batch_number=%s shard=%s shards_info=%s queries=%s cid=%s",
             bn,
@@ -268,13 +255,13 @@ class JoinerWorker:
             self._safe_send(raw)
             return
 
-        menu_idx: Optional[Dict[str, Row]] = self._cache_menu.get((cid))
+        menu_idx: Optional[dict[str, dict[str, str]]] = self._cache_menu.get((cid))
         if not menu_idx:
             self._log.warning("Menu cache no disponible aún; drop batch TI")
             return
 
         out_cols = ["transaction_id", "item_name", "quantity", "subtotal", "created_at"]
-        out_schema = TableSchema(out_cols)
+        out_schema = TableSchema(columns=out_cols)
         out_rows: List[Row] = []
 
         for r in iterate_rows_as_dicts(db.payload):
@@ -285,7 +272,7 @@ class JoinerWorker:
             joined_item_values = []
             for col in out_cols:
                 joined_item_values.append(r[col])
-            out_rows.append(Row(joined_item_values))
+            out_rows.append(Row(values=joined_item_values))
 
         self._log.debug(
             "JOIN Q2: in=%d matched=%d", len(db.payload.rows), len(out_rows)
@@ -297,9 +284,9 @@ class JoinerWorker:
             batch_number=db.payload.batch_number,
             status=db.payload.status,
         )
-        db.payload = joined_table
+        db.payload.CopyFrom(joined_table)
         self._log.debug("Q2 preserving TI batch_status=%d", db.payload.status)
-        raw = Envelope(type=MessageType.BATCH_STATUS, data_batch=db).SerializeToString()
+        raw = Envelope(type=MessageType.DATA_BATCH, data_batch=db).SerializeToString()
         self._safe_send(raw)
 
     def _on_raw_tx(self, raw: bytes):
@@ -319,7 +306,7 @@ class JoinerWorker:
             return
         cid = db.client_id
 
-        bn = self._safe_batch_number(db)
+        bn = db.payload.batch_number
         self._log.debug(
             "IN: transactions batch_number=%s shard=%s shards_info=%s queries=%s cid=%s",
             bn,
@@ -352,7 +339,7 @@ class JoinerWorker:
             "created_at",
             "user_id",
         ]
-        out_schema = TableSchema(out_cols)
+        out_schema = TableSchema(columns=out_cols)
         out_rows: List[Row] = []
 
         for r in iterate_rows_as_dicts(db.payload):
@@ -363,7 +350,7 @@ class JoinerWorker:
             joined_item_values = []
             for col in out_cols:
                 joined_item_values.append(r[col])
-            out_rows.append(Row(joined_item_values))
+            out_rows.append(Row(values=joined_item_values))
 
         self._log.debug(
             "JOIN %s: in=%d matched=%d",
@@ -378,11 +365,11 @@ class JoinerWorker:
             batch_number=db.payload.batch_number,
             status=db.payload.status,
         )
-        db.payload = joined_table
+        db.payload.CopyFrom(joined_table)
         self._log.debug(
             "%s preserving TX batch_status=%d", db.query_ids[0], db.payload.status
         )
-        raw = Envelope(type=MessageType.BATCH_STATUS, data_batch=db).SerializeToString()
+        raw = Envelope(type=MessageType.DATA_BATCH, data_batch=db).SerializeToString()
         self._safe_send(raw)
         return
 
@@ -403,7 +390,7 @@ class JoinerWorker:
             return
         cid = db.client_id
 
-        bn = self._safe_batch_number(db)
+        bn = db.payload.batch_number
         self._log.debug(
             "IN: users batch_number=%s shard=%s shards_info=%s queries=%s cid=%s",
             bn,
