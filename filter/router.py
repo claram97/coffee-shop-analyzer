@@ -10,14 +10,13 @@ from dataclasses import dataclass
 from random import randint
 from typing import Any, Dict, List, Optional, Union
 
-from middleware.middleware_client import (
-    MessageMiddlewareExchange,
-    MessageMiddlewareQueue,
-)
+from middleware.middleware_client import (MessageMiddlewareExchange,
+                                          MessageMiddlewareQueue)
 from protocol2.databatch_pb2 import DataBatch, Query
 from protocol2.envelope_pb2 import Envelope, MessageType
 from protocol2.eof_message_pb2 import EOFMessage
-from protocol2.table_data_pb2 import Row, TableData, TableName, TableSchema, TableStatus
+from protocol2.table_data_pb2 import (Row, TableData, TableName, TableSchema,
+                                      TableStatus)
 from protocol2.table_data_utils import iterate_rows_as_dicts
 
 TABLE_NAME_TO_STR = {
@@ -112,7 +111,7 @@ class FilterRouter:
         self._pending_eof: Dict[tuple[TableName, str], EOFMessage] = {}
 
     def process_message(self, msg: Envelope) -> None:
-        self._log.info("Processing message: %r, message type: %r", msg, msg.type)
+        self._log.debug("Processing message: %r, message type: %r", msg, msg.type)
         if msg.type == MessageType.DATA_BATCH:
             self._handle_data(msg.data_batch)
         elif msg.type == MessageType.EOF_MESSAGE:
@@ -129,7 +128,7 @@ class FilterRouter:
         mask = batch.filter_steps
         bn = batch.payload.batch_number
         cid = batch.client_id
-        if not table:
+        if table is None:
             self._log.warning("Batch sin table_id válido. bn=%s", bn)
             return
 
@@ -211,7 +210,12 @@ class FilterRouter:
         self._maybe_flush_pending_eof(key)
 
     def _send_to_some_aggregator(self, batch: DataBatch) -> None:
-        self._log.info("_send_to_some_aggregator table=%s bn=%s", batch.payload.name, batch.payload.batch_number)
+        if batch.payload.name in [TableName.MENU_ITEMS, TableName.STORES]:
+            self._log.info(
+                "_send_to_some_aggregator table=%s bn=%s",
+                batch.payload.name,
+                batch.payload.batch_number,
+            )
         num_parts = max(1, int(self._cfg.aggregators))
         self._p.send_to_aggregator_partition(randint(0, num_parts - 1), batch)
 
@@ -390,7 +394,7 @@ class ExchangeBusProducer:
         table = batch.payload.name
         key = self._key_for(table, int(partition_id))
         try:
-            self._log.info(
+            self._log.debug(
                 "publish → aggregator table=%s part=%d", table, int(partition_id)
             )
             envelope = Envelope(type=MessageType.DATA_BATCH, data_batch=batch)
