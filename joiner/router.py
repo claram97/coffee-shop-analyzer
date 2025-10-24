@@ -16,6 +16,7 @@ from protocol2.databatch_pb2 import DataBatch, Query, ShardInfo
 from protocol2.envelope_pb2 import Envelope, MessageType
 from protocol2.eof_message_pb2 import EOFMessage
 from protocol2.table_data_pb2 import Row, TableName
+from protocol2.table_data_utils import iterate_rows_as_dicts
 
 STR_TO_NAME = {
     "transactions": TableName.TRANSACTIONS,
@@ -81,7 +82,7 @@ def _shard_key_for_row(
 
 
 def is_broadcast_table(table_name: TableName) -> bool:
-    return table_name in (TableName.MENU_ITEMS, TableName.STORES)
+    return table_name in [TableName.MENU_ITEMS, TableName.STORES]
 
 
 class ExchangePublisherPool:
@@ -185,7 +186,7 @@ class JoinerRouter:
 
         cfg = self._cfg.get(table)
 
-        if 1 in queries:
+        if Query.Q1 in queries:
             self._publish(cfg, randint(0, cfg.joiner_shards - 1), raw)
 
         if cfg is None:
@@ -208,13 +209,8 @@ class JoinerRouter:
         for shard in range(0, cfg.joiner_shards):
             buckets[shard] = []
 
-        columns = list(db.payload.schema.columns)
-        for row in db.payload.rows:
-            row_dict = {
-                col: row.values[i] if i < len(row.values) else None
-                for i, col in enumerate(columns)
-            }
-            k = _shard_key_for_row(table, row_dict, queries)
+        for row in iterate_rows_as_dicts(db.payload):
+            k = _shard_key_for_row(table, row, queries)
             if k is None or not k.strip():
                 continue
             shard = _hash_to_shard(k, cfg.joiner_shards)
