@@ -260,7 +260,7 @@ class JoinerWorker:
             self._log.warning("Menu cache no disponible aún; drop batch TI")
             return
 
-        out_cols = ["transaction_id", "item_name", "quantity", "subtotal", "created_at"]
+        out_cols = ["transaction_id", "name", "quantity", "subtotal", "created_at"]
         out_schema = TableSchema(columns=out_cols)
         out_rows: List[Row] = []
 
@@ -271,12 +271,13 @@ class JoinerWorker:
                 continue
             joined_item_values = []
             for col in out_cols:
-                joined_item_values.append(r[col])
+                if col == "name":
+                    joined_item_values.append(mi[col])
+                else:
+                    joined_item_values.append(r[col])
             out_rows.append(Row(values=joined_item_values))
 
-        self._log.debug(
-            "JOIN Q2: in=%d matched=%d", len(db.payload.rows), len(out_rows)
-        )
+        self._log.info("JOIN Q2: in=%d matched=%d", len(db.payload.rows), len(out_rows))
         joined_table = TableData(
             name=TableName.TRANSACTION_ITEMS_MENU_ITEMS,
             schema=out_schema,
@@ -333,8 +334,7 @@ class JoinerWorker:
 
         out_cols = [
             "transaction_id",
-            "store_name",
-            "city",
+            "name",
             "final_amount",
             "created_at",
             "user_id",
@@ -346,20 +346,24 @@ class JoinerWorker:
             sid = norm(r["store_id"])
             st = stores_idx.get(sid)
             if not st:
+                self._log.warning("no store index for store_id %s", sid)
                 continue
             joined_item_values = []
             for col in out_cols:
-                joined_item_values.append(r[col])
+                if col == "name":
+                    joined_item_values.append(st[col])
+                else:
+                    joined_item_values.append(r.get(col, ""))
             out_rows.append(Row(values=joined_item_values))
 
-        self._log.debug(
+        self._log.info(
             "JOIN %s: in=%d matched=%d",
             db.query_ids[0],
             len(db.payload.rows),
             len(out_rows),
         )
         joined_table = TableData(
-            name=TableName.TRANSACTIONS_STORES,
+            name=TableName.TRANSACTION_STORES,
             schema=out_schema,
             rows=out_rows,
             batch_number=db.payload.batch_number,
