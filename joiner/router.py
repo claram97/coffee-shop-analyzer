@@ -229,9 +229,10 @@ class JoinerRouter:
             shard_info.total_shards = cfg.joiner_shards
             shard_info.shard_number = shard
             db_sh.payload.ClearField("rows")
+            columns = db_sh.payload.schema.columns
             for row in shard_rows:
                 new_row = db_sh.payload.rows.add()
-                new_row.CopyFrom(row)
+                new_row.values.extend(str(row.get(col, "")) for col in columns)
             raw_sh = Envelope(
                 type=MessageType.DATA_BATCH, data_batch=db_sh
             ).SerializeToString()
