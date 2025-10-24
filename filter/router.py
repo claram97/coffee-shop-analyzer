@@ -11,10 +11,8 @@ from dataclasses import dataclass
 from random import randint
 from typing import Any, Dict, List, Optional, Union
 
-from middleware.middleware_client import (
-    MessageMiddlewareExchange,
-    MessageMiddlewareQueue,
-)
+from middleware.middleware_client import (MessageMiddlewareExchange,
+                                          MessageMiddlewareQueue)
 from protocol.constants import Opcodes
 from protocol.databatch import DataBatch
 from protocol.messages import EOFMessage
@@ -195,13 +193,15 @@ class FilterRouter:
         producer: "ExchangeBusProducer",
         policy: QueryPolicyResolver,
         table_cfg: TableConfig,
+        orch_workers: int,
     ):
         self._p = producer
         self._pol = policy
         self._cfg = table_cfg
         self._log = logging.getLogger("filter-router")
         self._pending_batches: Dict[tuple[str, str], int] = defaultdict(int)
-        self._pending_eof: Dict[tuple[str, str], EOFMessage] = {}
+        self._pending_eof: Dict[tuple[str, str], tuple[int, EOFMessage]] = {}
+        self._orch_workers = orch_workers
 
     def process_message(self, msg: Any) -> None:
         try:
@@ -314,15 +314,16 @@ class FilterRouter:
     def _handle_table_eof(self, eof: EOFMessage) -> None:
         key = (eof.table_type, eof.client_id)
         self._log.info("TABLE_EOF received: key=%s", key)
-        self._pending_eof[key] = eof
+        (recvd, _eof) = self._pending_eof.get(key, (0, eof))
+        self._pending_eof[key] = (recvd + 1, eof)
         self._maybe_flush_pending_eof(key)
 
     def _maybe_flush_pending_eof(self, key: tuple[str, str]) -> None:
         pending = self._pending_batches.get(key, 0)
-        eof = self._pending_eof.get(key)
-        if eof is None or pending > 0:
+        (recvd, eof) = self._pending_eof.get(key, (0, None))
+        if eof is None or recvd < self._orch_workers or pending > 0:
             if eof is not None:
-                self._log.info("TABLE_EOF deferred: key=%s pending=%d", key, pending)
+                self._log.debug("TABLE_EOF deferred: key=%s pending=%d", key, pending)
             return
         total_parts = max(1, int(self._cfg.aggregators))
         self._log.info("TABLE_EOF -> aggregators: key=%s parts=%d", key, total_parts)
@@ -537,11 +538,15 @@ class RouterServer:
         policy: QueryPolicyResolver,
         table_cfg: TableConfig,
         stop_event: threading.Event,
+        orch_workers: int,
     ):
         self._producer = producer
         self._mw_in = router_in
         self._router = FilterRouter(
-            producer=producer, policy=policy, table_cfg=table_cfg
+            producer=producer,
+            policy=policy,
+            table_cfg=table_cfg,
+            orch_workers=orch_workers,
         )
         self._log = logging.getLogger("filter-router-server")
         self._stop_event = stop_event

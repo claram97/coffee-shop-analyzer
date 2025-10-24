@@ -58,7 +58,8 @@ def build_filter_router_from_config(
         producer=producer,
         policy=policy,
         table_cfg=table_cfg,
-        stop_event=stop_event,  # Pass the event here
+        stop_event=stop_event,
+        orch_workers=cfg.workers.orchestrators,
     )
     return server
 
