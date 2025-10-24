@@ -64,17 +64,27 @@ class Orchestrator:
         self._queue_maxsize = max(1, int(os.getenv("ORCH_PROCESS_QUEUE_SIZE", "128")))
         worker_default = os.getenv("ORCH_PROCESS_COUNT") or str(self._num_routers)
         self._worker_count = max(1, int(worker_default))
+        # Queue put timeout (seconds). If not configured, use a sensible
+        # default so the orchestrator doesn't retry indefinitely by default.
         queue_timeout_raw = os.getenv("ORCH_PROCESS_QUEUE_TIMEOUT")
-        self._queue_put_timeout = None
+        default_timeout = 5.0
+        self._queue_put_timeout = default_timeout
         if queue_timeout_raw:
             try:
                 self._queue_put_timeout = float(queue_timeout_raw)
             except ValueError:
                 logging.warning(
-                    "action: queue_timeout_parse | result: fail | value: %s",
+                    "action: queue_timeout_parse | result: fail | value: %s | using_default: %s",
                     queue_timeout_raw,
+                    default_timeout,
                 )
-        self._task_queue: mp.Queue = self._mp_context.Queue(maxsize=self._queue_maxsize)
+        # Use one multiprocessing.Queue per worker so we can route messages
+        # to individual workers (one-queue-per-worker). Queues are created
+        # when starting worker processes.
+        self._task_queues: list[mp.Queue] = []
+        # Round-robin pointer and lock for thread-safe assignment
+        self._rr_lock = threading.Lock()
+        self._next_worker_idx = 0
         self._workers: list[mp.Process] = []
 
         self._setup_message_processors()
@@ -240,11 +250,14 @@ class Orchestrator:
         )
 
         for worker_idx in range(self._worker_count):
+            q = self._mp_context.Queue(maxsize=self._queue_maxsize)
+            self._task_queues.append(q)
+
             proc = self._mp_context.Process(
                 target=processing_worker_main,
                 name=f"orch-worker-{worker_idx}",
                 args=(
-                    self._task_queue,
+                    q,
                     worker_idx,
                     self._host,
                     self._fr_exchange,
@@ -260,9 +273,10 @@ class Orchestrator:
         if not getattr(self, "_workers", None):
             return
 
-        for _ in self._workers:
+        # Put sentinel None into each worker queue to signal shutdown
+        for q in getattr(self, "_task_queues", []):
             try:
-                self._task_queue.put(None)
+                q.put(None)
             except Exception:
                 logging.exception("action: stop_worker_processes | result: put_sentinel_failed")
 
@@ -278,27 +292,60 @@ class Orchestrator:
 
         self._workers.clear()
 
+        # Close/join all task queues
         try:
-            self._task_queue.close()
-            self._task_queue.join_thread()
+            for q in getattr(self, "_task_queues", []):
+                try:
+                    q.close()
+                    q.join_thread()
+                except Exception:
+                    logging.debug("action: stop_worker_processes | result: queue_close_skip | queue_idx: %s", getattr(q, "_reader", "unknown"))
         except Exception:
-            logging.debug("action: stop_worker_processes | result: queue_close_skip")
+            logging.debug("action: stop_worker_processes | result: queue_close_skip_all")
 
     def _enqueue_processing_task(self, msg, client_id: str):
+        # Try to assign to worker queues using round-robin. If the chosen
+        # queue is full, try the next one. If all are full, wait and retry
+        # until a queue accepts the task or the optional timeout elapses.
+        if not getattr(self, "_task_queues", None):
+            raise RuntimeError("no task queues available for workers")
+
+        start_time = time.time()
+        deadline = None if self._queue_put_timeout is None else start_time + self._queue_put_timeout
+        attempts = 0
+        num_queues = len(self._task_queues)
+
         while True:
-            try:
-                self._task_queue.put((msg, client_id), block=True, timeout=self._queue_put_timeout)
-                break  # Exit the loop if the message is successfully added to the queue
-            except queue.Full:
-                logging.warning(
-                    "action: enqueue_data_batch | result: retry | reason: queue_full | batch_number: %d | opcode: %d",
-                    getattr(msg, "batch_number", 0),
-                    getattr(msg, "opcode", -1),
-                )
-                time.sleep(0.1)  # Wait for a short time before retrying
-            except Exception:
-                logging.exception("action: enqueue_data_batch | result: fail | reason: unexpected")
-                raise
+            with self._rr_lock:
+                start_idx = self._next_worker_idx
+
+            for i in range(num_queues):
+                idx = (start_idx + i) % num_queues
+                q = self._task_queues[idx]
+                try:
+                    q.put((msg, client_id), block=False)
+                    # Advance round-robin pointer to next worker after the one we used
+                    with self._rr_lock:
+                        self._next_worker_idx = (idx + 1) % num_queues
+                    return
+                except queue.Full:
+                    # Try the next queue
+                    continue
+
+            # No queue had space this iteration
+            attempts += 1
+            logging.warning(
+                "action: enqueue_data_batch | result: retry | reason: all_queues_full | attempts: %d | batch_number: %d | opcode: %d",
+                attempts,
+                getattr(msg, "batch_number", 0),
+                getattr(msg, "opcode", -1),
+            )
+
+            if deadline is not None and time.time() >= deadline:
+                # Respect configured timeout: raise to let caller respond with failure
+                raise queue.Full()
+
+            time.sleep(0.1)
 
     def _process_data_message(self, msg, client_sock) -> bool:
         try:
@@ -342,20 +389,59 @@ class Orchestrator:
         try:
             table_type = msg.get_table_type()
             logging.info(
-                "action: eof_received | result: success | table_type: %s | batch_number: %d",
+                "action: eof_received | result: enqueue_to_workers | table_type: %s | batch_number: %d",
                 table_type,
                 getattr(msg, "batch_number", 0),
             )
 
-            message_bytes = msg.to_bytes()
+            # Enqueue a copy of the EOF message into each worker's queue.
+            # If any worker queue is full, retry until the configured timeout
+            # elapses. Use an overall deadline so the total waiting time is
+            # bounded.
+            if not getattr(self, "_task_queues", None):
+                raise RuntimeError("no task queues available for workers")
 
-            self._broadcast_eof_to_all(message_bytes)
+            now = time.time()
+            overall_deadline = None if self._queue_put_timeout is None else now + self._queue_put_timeout
+            client_id = getattr(msg, "client_id", None)
+
+            message_bytes = msg.to_bytes()
+            for idx, q in enumerate(self._task_queues):
+                enqueued = False
+                while True:
+                    try:
+                        # enqueue a marker with the raw bytes to avoid pickling
+                        # issues with message objects (EOFMessage may contain
+                        # lambdas/locals that aren't picklable).
+                        q.put(("__eof__", message_bytes, client_id), block=False)
+                        enqueued = True
+                        logging.info(
+                            "action: eof_enqueue | result: success | worker_queue: %d | table_type: %s | batch_number: %d",
+                            idx,
+                            table_type,
+                            getattr(msg, "batch_number", 0),
+                        )
+                        break
+                    except queue.Full:
+                        if overall_deadline is not None and time.time() >= overall_deadline:
+                            logging.error(
+                                "action: eof_enqueue | result: fail | reason: timeout | worker_queue: %d | table_type: %s | batch_number: %d",
+                                idx,
+                                table_type,
+                                getattr(msg, "batch_number", 0),
+                            )
+                            raise
+                        # short sleep before retrying
+                        time.sleep(0.1)
+
+                if not enqueued:
+                    # should not reach here because we either enqueued or raised
+                    raise queue.Full()
 
             logging.info(
-                "action: eof_forwarded | result: success | table_type: %s | bytes_length: %d | replicas: %d",
+                "action: eof_enqueued_all | result: success | table_type: %s | replicas: %d",
                 table_type,
-                len(message_bytes),
-                self._num_routers,
+                len(self._task_queues),
             )
 
             ResponseHandler.send_success(client_sock)
