@@ -9,7 +9,7 @@ set -euo pipefail
 #   - config_subscript.py en el mismo repo (o en PATH)
 #   - config.ini con las secciones acordadas
 
-INI_PATH="app_config/config.ini"
+INI_PATH="./app_config/config.ini"
 OUT_PATH="docker-compose-dev.yaml"
 
 while getopts "c:o:" opt; do

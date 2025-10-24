@@ -24,6 +24,8 @@ COPY middleware ./middleware
 # Copy all the Python scripts and other files from results-finisher
 COPY results-finisher .
 
+ENV PYTHONPATH=/:/protocol2
+
 # Create __init__.py files to make sure the packages can be imported properly
 RUN touch protocol/__init__.py || true
 RUN touch middleware/__init__.py || true

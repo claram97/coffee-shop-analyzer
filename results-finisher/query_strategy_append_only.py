@@ -8,10 +8,10 @@ concentrating all business logic in the finalization step.
 Its primary trade-off is higher memory usage.
 """
 
+import logging
 import datetime
 from collections import defaultdict
 from typing import Any, Callable, Dict, List
-import logging
 
 from constants import QueryType
 
@@ -24,6 +24,12 @@ def _group_by(
         key = key_func(item)
         grouped[key].append(item)
     return grouped
+
+
+def _get_value(row: Any, field: str, default: Any = None) -> Any:
+    if isinstance(row, dict):
+        return row.get(field, default)
+    return getattr(row, field, default)
 
 
 # --- Base Strategy ---
@@ -48,7 +54,7 @@ class BaseQueryStrategy:
     def _safe_extract_date(
         self, row: Any, date_field: str = "created_at"
     ) -> datetime.datetime:
-        date_str = getattr(row, date_field, None)
+        date_str = _get_value(row, date_field, None)
         if not date_str:
             raise ValueError(f"Date field '{date_field}' is missing.")
         return datetime.datetime.fromisoformat(date_str.replace("Z", "+00:00"))
@@ -57,7 +63,7 @@ class BaseQueryStrategy:
         self, row: Any, field: str, default: float = 0.0
     ) -> float:
         try:
-            return float(getattr(row, field, default))
+            return float(_get_value(row, field, default))
         except (ValueError, TypeError):
             return default
 
@@ -80,7 +86,10 @@ class Q1Strategy(BaseQueryStrategy):
                 final_amount = self._safe_extract_numeric(row, "final_amount")
 
                 filtered_transactions.append(
-                    {"transaction_id": row.transaction_id, "final_amount": final_amount}
+                    {
+                        "transaction_id": _get_value(row, "transaction_id", ""),
+                        "final_amount": final_amount,
+                    }
                 )
             except (ValueError, AttributeError):
                 continue
@@ -112,18 +121,18 @@ class Q2Strategy(BaseQueryStrategy):
             try:
                 date = self._safe_extract_date(row)
                 month_key = date.strftime("%Y-%m")
-                item_name = getattr(row, "item_name", "Unknown Item")
+                item_name = _get_value(row, "item_name", "Unknown Item")
 
                 # Aggregate by month and product name
                 key = (month_key, item_name)
 
                 # Add the pre-aggregated quantities and revenues from this batch
                 # Handle quantity safely - convert to correct integer value
-                quantity_str = getattr(row, "quantity", "0")
+                quantity_str = str(_get_value(row, "quantity", "0") or "0")
                 try:
                     # Parse the quantity string to integer without any arbitrary adjustments
                     raw_quantity_val = (
-                        float(quantity_str) if quantity_str.strip() else 0
+                        float(quantity_str) if str(quantity_str).strip() else 0
                     )
                     quantity_val = int(raw_quantity_val)
 
@@ -215,14 +224,14 @@ class Q3Strategy(BaseQueryStrategy):
         for row in consolidated_data.get("TransactionStores", []):
             try:
                 # Extract data from the pre-aggregated format
-                created_at = getattr(row, "created_at", "")
+                created_at = _get_value(row, "created_at", "")
                 if not created_at:
                     continue
 
-                store_name = getattr(row, "store_name", "Unknown Store")
+                store_name = _get_value(row, "store_name", "Unknown Store")
 
                 # Get the raw amount string for logging
-                amount_str = getattr(row, "final_amount", "0")
+                amount_str = _get_value(row, "final_amount", "0")
                 amount = self._safe_extract_numeric(row, "final_amount")
 
                 # Log the amount processing for diagnosis
@@ -291,17 +300,17 @@ class Q4Strategy(BaseQueryStrategy):
 
         if table_type == "TransactionStores":
             for r in new_rows or []:
-                store = getattr(r, "store_name", "") or ""
-                uid = self._norm_uid(getattr(r, "user_id", None))
+                store = _get_value(r, "store_name", "") or ""
+                uid = self._norm_uid(_get_value(r, "user_id", None))
                 if not store or not uid:
                     continue
                 counts[store][uid] += 1  # una compra por fila
         elif table_type == "Users":
             for u in new_rows or []:
-                uid = self._norm_uid(getattr(u, "user_id", None))
+                uid = self._norm_uid(_get_value(u, "user_id", None))
                 if not uid:
                     continue
-                bd = getattr(u, "birthdate", "") or ""
+                bd = _get_value(u, "birthdate", "") or ""
                 # si llega vacío, no pisa un valor previo no vacío
                 if bd or uid not in users:
                     users[uid] = bd

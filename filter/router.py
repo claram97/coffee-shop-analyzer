@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import copy
 import hashlib
 import logging
 import random
@@ -124,7 +123,7 @@ class FilterRouter:
             self._log.warning("Unknown message type: %r", type(msg))
 
     def _handle_data(self, batch: DataBatch) -> None:
-        self._log.info("Handling DataBatch message: %r", batch)
+        # self._log.info("Handling DataBatch message: %r", batch)
         table = batch.payload.name
         queries = batch.query_ids
         mask = batch.filter_steps
@@ -146,8 +145,8 @@ class FilterRouter:
         key = (cid, table)
 
         if mask == 0:
-            self._pending_batches[table] += 1
-            self._log.debug("pending++ %s -> %d", table, self._pending_batches[key])
+            self._pending_batches[key] += 1
+            self._log.debug("pending++ %s -> %d", key, self._pending_batches[key])
 
         total_steps = self._pol.total_steps(table, queries)
         next_step = first_zero_bit(mask, total_steps)
@@ -183,25 +182,22 @@ class FilterRouter:
             )
 
             try:
-                self._pending_batches[table] += dup_count
+                self._pending_batches[key] += dup_count
                 for i in range(dup_count):
                     new_queries = self._pol.get_new_batch_queries(
                         table, queries, copy_number=i
                     ) or list(queries)
-                    b = copy.copy(batch)
-                    inner = copy.copy(batch.batch_msg)
-                    b.batch_msg = inner
-                    b.query_ids = list(new_queries)
-                    b.batch_bytes = b.batch_bytes
+                    b = DataBatch()
+                    b.CopyFrom(batch)
+                    b.query_ids.clear()
+                    b.query_ids.extend(new_queries)
                     self._handle_data(b)
             except Exception as e:
                 self._log.error("requeue_to_router failed: %s", e)
 
-            self._pending_batches[table] = max(0, self._pending_batches[key] - 1)
+            self._pending_batches[key] = max(0, self._pending_batches[key] - 1)
             self._log.debug(
-                "pending-- (fanout parent) %s -> %d",
-                key,
-                self._pending_batches[key],
+                "pending-- (fanout parent) %s -> %d", key, self._pending_batches[key]
             )
             return
 
@@ -210,8 +206,8 @@ class FilterRouter:
         except Exception as e:
             self._log.error("send_sharded failed: %s", e)
 
-        self._pending_batches[table] = max(0, self._pending_batches[table] - 1)
-        self._log.debug("pending-- %s -> %d", table, self._pending_batches[table])
+        self._pending_batches[key] = max(0, self._pending_batches[key] - 1)
+        self._log.debug("pending-- %s -> %d", key, self._pending_batches[key])
         self._maybe_flush_pending_eof(key)
 
     def _send_to_some_aggregator(self, batch: DataBatch) -> None:

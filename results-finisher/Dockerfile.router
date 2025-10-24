@@ -18,6 +18,9 @@ COPY protocol ./protocol
 
 COPY protocol2 /protocol2
 
+ENV PYTHONPATH=/:/protocol2
+
+
 # Copy middleware implementation
 COPY middleware ./middleware
 

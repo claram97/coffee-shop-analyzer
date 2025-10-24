@@ -4,8 +4,13 @@ import signal
 import threading
 from typing import Dict, List
 
-from middleware.middleware_client import MessageMiddlewareQueue, MessageMiddlewareDisconnectedError
-from protocol import DataBatch, ProtocolError, Opcodes
+from google.protobuf.message import DecodeError
+
+from middleware.middleware_client import (
+    MessageMiddlewareDisconnectedError,
+    MessageMiddlewareQueue,
+)
+from protocol2.envelope_pb2 import Envelope, MessageType
 
 logging.basicConfig(
     level=logging.INFO,
@@ -51,6 +56,7 @@ class ResultsRouter:
         return self.output_queue_names[target_index]
 
     def _process_message(self, body: bytes):
+        # logger.info("Processing message")
         """
         Parses, validates, and routes a single incoming message.
         This is the core callback for the message consumer.
@@ -61,18 +67,24 @@ class ResultsRouter:
 
         try:
             # The primary responsibility is to route DataBatch messages.
-            if body[0] != Opcodes.DATA_BATCH:
-                logger.warning(f"Received message with unsupported opcode {body[0]}. Discarding.")
+            envelope = Envelope()
+            envelope.ParseFromString(body)
+
+            if envelope.type != MessageType.DATA_BATCH:
+                logger.warning(
+                    "Received envelope with unsupported type %s. Discarding.",
+                    envelope.type,
+                )
                 return
 
-            message = DataBatch.deserialize_from_bytes(body)
-            
+            message = envelope.data_batch
+
             if not message.query_ids:
                 logger.warning("DataBatch contains no query_ids for routing. Discarding.")
                 return
-            
+
             # Route based on the first query_id in the list.
-            query_id = str(message.query_ids[0])
+            query_id = str(int(message.query_ids[0]))
             client_id = getattr(message, "client_id", None)
             if not client_id:
                 logger.warning(
@@ -82,12 +94,12 @@ class ResultsRouter:
                 return
 
             routing_key = f"{client_id}:{query_id}"
-            batch_number = message.batch_number
+            batch_number = getattr(message.payload, "batch_number", 0)
             target_queue_name = self._get_target_queue_name(routing_key)
             target_client = self.output_clients[target_queue_name]
             
             target_client.send(body)
-            logger.debug(
+            logger.info(
                 "Routed DATA_BATCH %s for query '%s' (client %s) to queue '%s'",
                 batch_number,
                 query_id,
@@ -95,8 +107,12 @@ class ResultsRouter:
                 target_queue_name,
             )
 
-        except ProtocolError as e:
-            logger.error(f"Failed to parse message due to protocol error, discarding. Error: {e}. Body prefix: {body[:60]!r}")
+        except DecodeError as e:
+            logger.error(
+                "Failed to parse envelope due to protobuf error, discarding. Error: %s. Body prefix: %r",
+                e,
+                body[:60],
+            )
         except Exception as e:
             logger.critical(f"An unexpected error occurred in the message handler: {e}", exc_info=True)
 
