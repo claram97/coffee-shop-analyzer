@@ -18,7 +18,7 @@ func (m MenuItemHandler) ProcessRecord(record []string) (map[string]string, erro
 		return nil, fmt.Errorf("expected 7 fields, got %d: %v", len(record), record)
 	}
 	return map[string]string{
-		"product_id":     record[0],
+		"item_id":        record[0],
 		"name":           record[1],
 		"category":       record[2],
 		"price":          record[3],

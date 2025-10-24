@@ -34,7 +34,9 @@ def serialize_header(n_rows: int, batch_number: int, batch_status: int) -> bytea
     return body
 
 
-_KEY_METADATA_CACHE: OrderedDict[Tuple[str, ...], Tuple[Tuple[str, bytes], ...]] = OrderedDict()
+_KEY_METADATA_CACHE: OrderedDict[Tuple[str, ...], Tuple[Tuple[str, bytes], ...]] = (
+    OrderedDict()
+)
 _KEY_METADATA_CACHE_SIZE = 32
 
 
@@ -131,7 +133,7 @@ def serialize_filtered_menu_items(
     """
     Serializes filtered menu items data using a predefined set of required keys.
 
-    Required keys: ["product_id", "name", "price"]
+    Required keys: ["item_id", "name", "price"]
 
     Args:
         filtered_rows: A list of filtered menu item dictionaries.
@@ -141,7 +143,7 @@ def serialize_filtered_menu_items(
     Returns:
         The serialized message body as a bytes object.
     """
-    required_keys = ["product_id", "name", "price"]
+    required_keys = ["item_id", "name", "price"]
     return serialize_filtered_data(
         filtered_rows, batch_number, batch_status, required_keys, "menu_items"
     )
@@ -239,4 +241,3 @@ def serialize_filtered_users(
     return serialize_filtered_data(
         filtered_rows, batch_number, batch_status, required_keys, "users"
     )
-

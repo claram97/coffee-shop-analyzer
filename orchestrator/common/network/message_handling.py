@@ -7,7 +7,10 @@ import logging
 import os
 from typing import Any, Dict, Optional
 
-from common.processing import create_filtered_data_batch, create_filtered_data_batch_protocol2
+from common.processing import (
+    create_filtered_data_batch,
+    create_filtered_data_batch_protocol2,
+)
 
 from middleware.middleware_client import MessageMiddlewareExchange
 from protocol.constants import Opcodes
@@ -53,7 +56,9 @@ class MessageHandler:
             and msg.opcode != Opcodes.BATCH_RECV_FAIL
         )
 
-    def old_handle_message(self, msg: Any, client_sock: Any, client_id: Optional[str] = None) -> bool:
+    def old_handle_message(
+        self, msg: Any, client_sock: Any, client_id: Optional[str] = None
+    ) -> bool:
         # 1) Fast-path: tablas livianas → Filter Router 0 por exchange
         effective_client_id = client_id or getattr(msg, "client_id", None)
         if msg.opcode in (Opcodes.NEW_MENU_ITEMS, Opcodes.NEW_STORES):
@@ -82,7 +87,9 @@ class MessageHandler:
 
         # 2) Camino normal (procesadores registrados)
         if msg.opcode in self.message_processors:
-            logging.debug("mensaje con opcode %d está en message_processors", msg.opcode)
+            logging.debug(
+                "mensaje con opcode %d está en message_processors", msg.opcode
+            )
             return self.message_processors[msg.opcode](msg, client_sock)
 
         # 3) Fallback por defecto (logs + ACK)
@@ -97,7 +104,9 @@ class MessageHandler:
         )
         return True
 
-    def handle_message(self, msg: Any, client_sock: Any, client_id: Optional[str] = None) -> bool:
+    def handle_message(
+        self, msg: Any, client_sock: Any, client_id: Optional[str] = None
+    ) -> bool:
         """
         Protocol2-aware variant of handle_message.
 
@@ -119,9 +128,6 @@ class MessageHandler:
                 env = create_filtered_data_batch_protocol2(msg, effective_client_id)
                 # env is a protobuf Envelope; serialize to bytes for transport
                 raw = env.SerializeToString()
-                tname = (
-                    "menu_items" if msg.opcode == Opcodes.NEW_MENU_ITEMS else "stores"
-                )
                 # Attempt to log a batch_number if present in the payload
                 bn = 0
                 try:
@@ -132,7 +138,7 @@ class MessageHandler:
 
                 logging.info(
                     "action=orch_forward_light_proto table=%s bn=%d bytes=%d rk=%s",
-                    tname,
+                    env.data_batch.payload.name,
                     bn,
                     len(raw),
                     self._rk_fr0,
@@ -146,7 +152,9 @@ class MessageHandler:
 
         # 2) Camino normal (procesadores registrados)
         if msg.opcode in self.message_processors:
-            logging.debug("mensaje con opcode %d está en message_processors", msg.opcode)
+            logging.debug(
+                "mensaje con opcode %d está en message_processors", msg.opcode
+            )
             return self.message_processors[msg.opcode](msg, client_sock)
 
         # 3) Fallback por defecto (logs + ACK)
@@ -157,7 +165,8 @@ class MessageHandler:
             return True
 
         logging.warning(
-            "action=handle_message_protocol2 result=unknown_opcode opcode=%d", msg.opcode
+            "action=handle_message_protocol2 result=unknown_opcode opcode=%d",
+            msg.opcode,
         )
         return True
 

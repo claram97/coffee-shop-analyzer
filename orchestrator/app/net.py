@@ -7,18 +7,18 @@ import logging
 import multiprocessing as mp
 import os
 import queue
-import time
 import threading
+import time
 from typing import Optional
 
 from app.results_consumer import ResultsConsumer
 from common.network import MessageHandler, ResponseHandler, ServerManager
 
 from middleware.middleware_client import MessageMiddlewareExchange
+from protocol2.envelope_pb2 import Envelope, MessageType
+from protocol2.eof_message_pb2 import EOFMessage as PB_EOFMessage
 from protocol.constants import Opcodes
 from protocol.messages import Finished
-from protocol2.eof_message_pb2 import EOFMessage as PB_EOFMessage
-from protocol2.envelope_pb2 import Envelope, MessageType
 
 from .worker_pool import processing_worker_main
 
@@ -116,11 +116,6 @@ class Orchestrator:
             )
             self._publishers[rk] = pub
         return pub
-
-    def _send_to_filter_router_exchange(self, raw: bytes, batch_number: Optional[int]):
-        pid = 0 if batch_number is None else int(batch_number) % self._num_routers
-        rk = self._fr_rk_fmt.format(pid=pid)
-        self._publisher_for_rk(rk).send(raw)
 
     def _broadcast_eof_to_all(self, raw: bytes):
         for pid in range(self._num_routers):
