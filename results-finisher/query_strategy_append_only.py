@@ -121,7 +121,9 @@ class Q2Strategy(BaseQueryStrategy):
             try:
                 date = self._safe_extract_date(row)
                 month_key = date.strftime("%Y-%m")
-                item_name = _get_value(row, "item_name", "Unknown Item")
+                item_name = _get_value(row, "item_name", None) or _get_value(
+                    row, "name", "Unknown Item"
+                )
 
                 # Aggregate by month and product name
                 key = (month_key, item_name)

@@ -251,21 +251,16 @@ class Aggregator:
                     # For now, assume out is list of dicts
                     columns = ['transaction_id', 'store_id', 'payment_method_id', 'user_id', 'original_amount', 'discount_applied', 'final_amount', 'created_at']
                     row_values = [[str(row.get(col, '')) for col in columns] for row in out]
-                    status = table_data.status
                     new_table_data = build_table_data(
                         table_name=TableName.TRANSACTIONS,
                         columns=columns,
                         rows=row_values,
                         batch_number=table_data.batch_number,
-                        status=status
+                        status=table_data.status
                     )
-                    new_data_batch = DataBatch(
-                        query_ids=data_batch.query_ids,
-                        filter_steps=data_batch.filter_steps,
-                        shards_info=data_batch.shards_info,
-                        client_id=data_batch.client_id,
-                        payload=new_table_data
-                    )
+                    new_data_batch = DataBatch()
+                    new_data_batch.CopyFrom(data_batch)
+                    new_data_batch.payload.CopyFrom(new_table_data)
                     new_envelope = Envelope(type=MessageType.DATA_BATCH, data_batch=new_data_batch)
                     new_message = new_envelope.SerializeToString()
                     self._forward_databatch_by_table(new_message, "transactions")
@@ -274,27 +269,23 @@ class Aggregator:
                     out = serialize_query4_transaction_results(processed)
                     columns = ['transaction_id', 'store_id', 'payment_method_id', 'voucher_id', 'user_id', 'original_amount', 'discount_applied', 'final_amount', 'created_at']
                     row_values = [[str(row.get(col, '')) for col in columns] for row in out]
-                    status = table_data.status
                     new_table_data = build_table_data(
                         table_name=TableName.TRANSACTIONS,
                         columns=columns,
                         rows=row_values,
                         batch_number=table_data.batch_number,
-                        status=status
+                        status=table_data.status
                     )
-                    new_data_batch = DataBatch(
-                        query_ids=data_batch.query_ids,
-                        filter_steps=data_batch.filter_steps,
-                        shards_info=data_batch.shards_info,
-                        client_id=data_batch.client_id,
-                        payload=new_table_data
-                    )
+                    new_data_batch = DataBatch()
+                    new_data_batch.CopyFrom(data_batch)
+                    new_data_batch.payload.CopyFrom(new_table_data)
                     new_envelope = Envelope(type=MessageType.DATA_BATCH, data_batch=new_data_batch)
                     new_message = new_envelope.SerializeToString()
                     self._forward_databatch_by_table(new_message, "transactions")
                 else:
                     logging.error("Unexpected query_id=%s for transaction table", query_id)
                     return False
+            else:
             else:
                 logging.warning("Unknown message type: %s", envelope.type)
             return True
