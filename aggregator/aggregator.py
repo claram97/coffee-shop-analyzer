@@ -286,7 +286,6 @@ class Aggregator:
                     logging.error("Unexpected query_id=%s for transaction table", query_id)
                     return False
             else:
-            else:
                 logging.warning("Unknown message type: %s", envelope.type)
             return True
         except Exception:
