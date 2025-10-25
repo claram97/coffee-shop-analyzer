@@ -251,12 +251,13 @@ class Aggregator:
                     # For now, assume out is list of dicts
                     columns = ['transaction_id', 'store_id', 'payment_method_id', 'user_id', 'original_amount', 'discount_applied', 'final_amount', 'created_at']
                     row_values = [[str(row.get(col, '')) for col in columns] for row in out]
+                    status = table_data.status
                     new_table_data = build_table_data(
                         table_name=TableName.TRANSACTIONS,
                         columns=columns,
                         rows=row_values,
                         batch_number=table_data.batch_number,
-                        status=TableStatus.CONTINUE
+                        status=status
                     )
                     new_data_batch = DataBatch(
                         query_ids=data_batch.query_ids,
@@ -273,12 +274,13 @@ class Aggregator:
                     out = serialize_query4_transaction_results(processed)
                     columns = ['transaction_id', 'store_id', 'payment_method_id', 'voucher_id', 'user_id', 'original_amount', 'discount_applied', 'final_amount', 'created_at']
                     row_values = [[str(row.get(col, '')) for col in columns] for row in out]
+                    status = table_data.status
                     new_table_data = build_table_data(
                         table_name=TableName.TRANSACTIONS,
                         columns=columns,
                         rows=row_values,
                         batch_number=table_data.batch_number,
-                        status=TableStatus.CONTINUE
+                        status=status
                     )
                     new_data_batch = DataBatch(
                         query_ids=data_batch.query_ids,
@@ -328,12 +330,13 @@ class Aggregator:
                     # TODO: Convert out to protobuf
                     columns = ['transaction_item_id', 'transaction_id', 'item_id', 'quantity', 'subtotal', 'created_at']
                     row_values = [[str(row.get(col, '')) for col in columns] for row in out]
+                    status = table_data.status
                     new_table_data = build_table_data(
                         table_name=TableName.TRANSACTION_ITEMS,
                         columns=columns,
                         rows=row_values,
                         batch_number=table_data.batch_number,
-                        status=TableStatus.CONTINUE
+                        status=status
                     )
                     new_data_batch = DataBatch(
                         query_ids=data_batch.query_ids,
