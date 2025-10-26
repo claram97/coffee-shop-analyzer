@@ -134,6 +134,8 @@ def filter_transactions_columns(rows: List[RawTransaction]) -> List[Dict]:
             "transaction_id": row.transaction_id,
             "store_id": row.store_id,
             "user_id": row.user_id,
+            "original_amount": row.original_amount,
+            "discount_applied": row.discount_applied,
             "final_amount": row.final_amount,
             "created_at": row.created_at,
         }
@@ -162,4 +164,3 @@ def filter_users_columns(rows: List[RawUser]) -> List[Dict]:
         }
         for row in rows
     ]
-
