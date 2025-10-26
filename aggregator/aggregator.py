@@ -17,7 +17,6 @@ from processing import (
     serialize_query3_results,
     serialize_query4_transaction_results,
 )
-from queryid import QueryId
 
 from app_config.config_loader import Config
 from middleware.middleware_client import (
@@ -25,9 +24,8 @@ from middleware.middleware_client import (
     MessageMiddlewareQueue,
 )
 from protocol2.envelope_pb2 import Envelope, MessageType
-from protocol2.databatch_pb2 import DataBatch, Query
-from protocol2.eof_message_pb2 import EOFMessage
-from protocol2.table_data_pb2 import TableData, TableName, TableStatus
+from protocol2.databatch_pb2 import DataBatch
+from protocol2.table_data_pb2 import TableName
 from protocol2.table_data_utils import build_table_data, iterate_rows_as_dicts
 
 # Para transactions y query 1: re-enviar
