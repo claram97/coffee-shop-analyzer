@@ -9,6 +9,7 @@ set -euo pipefail
 
 CLIENT_COUNT=1
 OUT_PATH="docker-compose-client.yaml"
+MAKE_PATH="Makefile"
 
 usage() {
   echo "Uso: $0 [-n cantidad_clientes] [-o archivo_salida]" >&2
@@ -69,3 +70,71 @@ networks:
       config:
         - subnet: 172.25.125.0/24
 YAML
+
+cat > "$MAKE_PATH" <<'MAKE'
+SHELL := /bin/bash
+PWD := $(shell pwd)
+
+GIT_REMOTE = github.com/7574-sistemas-distribuidos/docker-compose-init
+
+default: build
+
+all:
+
+deps:
+	go mod tidy
+	go mod vendor
+
+build: deps
+	GOOS=linux go build -o bin/client github.com/7574-sistemas-distribuidos/docker-compose-init/client
+.PHONY: build
+
+docker-image:
+	docker build -f ./orchestrator/Dockerfile -t "orchestrator:latest" .
+	docker build -f ./client/Dockerfile -t "client:latest" .
+	# Execute this command from time to time to clean up intermediate stages generated 
+	# during client build (your hard drive will like this :) ). Don't left uncommented if you 
+	# want to avoid rebuilding client image every time the docker-compose-up command 
+	# is executed, even when client code has not changed
+	# docker rmi `docker images --filter label=intermediateStageToBeDeleted=true -q`
+.PHONY: docker-image
+
+docker-compose-up: docker-image
+	docker compose -f docker-compose-dev.yaml up -d --build
+.PHONY: docker-compose-up
+
+docker-compose-down:
+	docker compose -f docker-compose-dev.yaml stop -t 1
+	docker compose -f docker-compose-dev.yaml down
+.PHONY: docker-compose-down
+
+docker-compose-logs:
+	docker compose -f docker-compose-dev.yaml logs -f
+.PHONY: docker-compose-logs
+
+docker-compose-up-client: docker-image
+	docker compose -f docker-compose-client.yaml up -d --build
+.PHONY: docker-compose-up-client
+
+docker-compose-down-client:
+	docker compose -f docker-compose-client.yaml stop -t 1
+	docker compose -f docker-compose-client.yaml down
+.PHONY: docker-compose-down-client
+
+docker-compose-logs-client:
+	docker compose -f docker-compose-client.yaml logs -f
+.PHONY: docker-compose-logs-client
+
+MAKE
+
+for i in $(seq 1 "$CLIENT_COUNT"); do
+  {
+    printf 'docker-compose-up-client%u: docker-image\n' "$i"
+    printf '\tdocker compose -f docker-compose-client.yaml up -d --build client%u\n' "$i"
+    printf '.PHONY: docker-compose-up-client%u\n\n' "$i"
+    printf 'docker-compose-down-client%u:\n' "$i"
+    printf '\tdocker compose -f docker-compose-client.yaml stop -t 1 client%u\n' "$i"
+    printf '\tdocker compose -f docker-compose-client.yaml rm -f client%u\n' "$i"
+    printf '.PHONY: docker-compose-down-client%u\n\n' "$i"
+  } >> "$MAKE_PATH"
+done
