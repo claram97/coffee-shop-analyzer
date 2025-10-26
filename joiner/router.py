@@ -76,7 +76,7 @@ def _shard_key_for_row(
 
     if Query.Q3 in q and table_name == TableName.TRANSACTIONS:
         key = row["store_id"]
-        logging.info("key: %s", key if key is not None else "?")
+        logging.debug("key: %s", key if key is not None else "?")
         return str(key) if key is not None else None
 
     logging.warning("returning None key for queries %s and table %d", q, table_name)

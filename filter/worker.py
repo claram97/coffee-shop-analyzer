@@ -190,7 +190,7 @@ class FilterWorker:
         return pub
 
     def _send_to_router(self, raw: bytes, batch_number: int | None) -> None:
-        logger.info("Enviando batch al router | batch_number=%s", batch_number)
+        logger.debug("Enviando batch al router | batch_number=%s", batch_number)
         pid = 0 if batch_number is None else int(batch_number) % self._num_routers
         rk = self._rk_fmt.format(pid=pid)
         pub = self._publisher_for_rk(rk)
@@ -201,7 +201,7 @@ class FilterWorker:
         self._in.start_consuming(self._on_raw)
 
     def _on_raw(self, raw: bytes) -> None:
-        logger.info("Mensaje recibido, tamaño=%d bytes", len(raw))
+        logger.debug("Mensaje recibido, tamaño=%d bytes", len(raw))
         # Small hex preview to help identify message payload in logs (first 48 bytes)
         try:
             preview = raw[:48].hex()
@@ -234,11 +234,11 @@ class FilterWorker:
             rows_count = len(db.payload.rows) if db and db.payload and db.payload.rows is not None else 0
         except Exception:
             rows_count = -1
-        logger.info("Parsed Envelope type=%s client_id=%s batch_rows=%s", env.type, getattr(db, "client_id", None), rows_count)
+        logger.debug("Parsed Envelope type=%s client_id=%s batch_rows=%s", env.type, getattr(db, "client_id", None), rows_count)
         # protocol2 DataBatch puts the batch_number inside payload.batch_number.
         # Provide a safe accessor that handles both legacy and protobuf shapes.
         def _safe_batch_number(database) -> int | None:
-            logger.info("Obteniendo batch_number seguro del DataBatch")
+            logger.debug("Obteniendo batch_number seguro del DataBatch")
             try:
                 # protobuf path: payload.batch_number
                 if getattr(database, "payload", None) and getattr(database.payload, "batch_number", None) is not None:
@@ -260,7 +260,7 @@ class FilterWorker:
         step_mask = db.filter_steps
         step = current_step_from_mask(step_mask)
         if step is None:
-            logger.info(
+            logger.debug(
                 "Sin step activo en máscara: reenvío sin cambios | table_id=%s mask=%s",
                 inner.name,
                 step_mask,
@@ -326,7 +326,7 @@ class FilterWorker:
             # message fields.
             env.data_batch.CopyFrom(db)
             out_raw = env.SerializeToString()
-            logger.info(
+            logger.debug(
                 "Filtro aplicado con éxito: filas antes=%d, después=%d | table_id=%s step=%s queries=%s filter=%s",
                 len(inner.rows) + (len(new_rows) - len(rows_objs)),
                 len(new_rows),

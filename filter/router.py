@@ -124,7 +124,7 @@ class FilterRouter:
             self._log.warning("Unknown message type: %r", type(msg))
 
     def _handle_data(self, batch: DataBatch) -> None:
-        # self._log.info("Handling DataBatch message: %r", batch)
+        self._log.debug("Handling DataBatch message: %r", batch)
         table = batch.payload.name
         queries = batch.query_ids
         mask = batch.filter_steps
@@ -213,7 +213,7 @@ class FilterRouter:
 
     def _send_to_some_aggregator(self, batch: DataBatch) -> None:
         if batch.payload.name in [TableName.MENU_ITEMS, TableName.STORES]:
-            self._log.info(
+            self._log.debug(
                 "_send_to_some_aggregator table=%s bn=%s",
                 batch.payload.name,
                 batch.payload.batch_number,
@@ -222,9 +222,9 @@ class FilterRouter:
         self._p.send_to_aggregator_partition(randint(0, num_parts - 1), batch)
 
     def _handle_table_eof(self, eof: EOFMessage) -> None:
-        self._log.info("Handling TABLE_EOF message: %r", eof)
+        self._log.debug("Handling TABLE_EOF message: %r", eof)
         key = (eof.table, eof.client_id)
-        self._log.info("TABLE_EOF received: key=%s", key)
+        self._log.debug("TABLE_EOF received: key=%s", key)
         (recvd, _eof) = self._pending_eof.get(key, (0, eof))
         self._pending_eof[key] = (recvd + 1, eof)
         self._maybe_flush_pending_eof(key)
@@ -342,7 +342,7 @@ class ExchangeBusProducer:
         Envía `payload` al exchange/rk indicado por `key`, con reintentos y recreación del publisher.
         Bloquea por key para serializar accesos concurrentes al mismo canal.
         """
-        self._log.info("send_with_retry key=%s payload_size=%d", key, len(payload))
+        self._log.debug("send_with_retry key=%s payload_size=%d", key, len(payload))
         lock = self._pub_locks.setdefault(key, threading.Lock())
         with lock:
             attempt = 0
@@ -386,7 +386,7 @@ class ExchangeBusProducer:
 
     def send_to_filters_pool(self, batch: DataBatch) -> None:
         try:
-            self._log.info("publish → filters_pool")
+            self._log.debug("publish → filters_pool")
             envelope = Envelope(type=MessageType.DATA_BATCH, data_batch=batch)
             raw = envelope.SerializeToString()
             self._filters_pub.send(raw)
@@ -414,8 +414,8 @@ class ExchangeBusProducer:
     def requeue_to_router(self, batch: DataBatch) -> None:
         env = Envelope(type=MessageType.DATA_BATCH, data_batch=batch)
         try:
-            self._log.debug(
-                "requeue_to_router: reinyectando batch table=%s queries=%s",
+            self._log.info(
+                "requeue_to_router: reinjecting batch table=%s queries=%s",
                 batch.payload.name,
                 batch.query_ids,
             )
@@ -432,7 +432,7 @@ class ExchangeBusProducer:
             env = Envelope(type=MessageType.EOF_MESSAGE, eof=eof)
             payload = env.SerializeToString()
             k = self._key_for(key[0], int(partition_id))
-            self._log.debug(
+            self._log.info(
                 "publish TABLE_EOF → aggregator key=%s part=%d", key, int(partition_id)
             )
             self._send_with_retry(k, payload)
@@ -488,7 +488,7 @@ class RouterServer:
 
         try:
             self._mw_in.start_consuming(_cb)
-            self._log.debug("RouterServer consuming (thread started)")
+            self._log.info("RouterServer consuming (thread started)")
         except Exception as e:
             self._log.exception("start_consuming failed: %s", e)
 

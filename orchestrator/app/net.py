@@ -1,4 +1,3 @@
-# orchestrator/app/net.py
 """
 Refactored Orchestrator using modular architecture.
 """
@@ -360,78 +359,6 @@ class Orchestrator:
         except Exception as e:
             return ResponseHandler.handle_processing_error(msg, client_sock, e)
 
-    def _old_process_eof_message(self, msg, client_sock) -> bool:
-        """Reenvía EOFs al exchange del Filter Router (broadcast a todas las réplicas)."""
-        try:
-            table_type = msg.get_table_type()
-            logging.info(
-                "action: eof_received | result: enqueue_to_workers | table_type: %s | batch_number: %d",
-                getattr(msg, "batch_number", 0),
-            )
-
-            # Enqueue a copy of the EOF message into each worker's queue.
-            # If any worker queue is full, retry until the configured timeout
-            # elapses. Use an overall deadline so the total waiting time is
-            # bounded.
-            if not getattr(self, "_task_queues", None):
-                raise RuntimeError("no task queues available for workers")
-
-            now = time.time()
-            overall_deadline = None if self._queue_put_timeout is None else now + self._queue_put_timeout
-            client_id = getattr(msg, "client_id", None)
-
-            
-            message_bytes = msg.to_bytes()
-            for idx, q in enumerate(self._task_queues):
-                enqueued = False
-                while True:
-                    try:
-                        # enqueue a marker with the raw bytes to avoid pickling
-                        # issues with message objects (EOFMessage may contain
-                        # lambdas/locals that aren't picklable).
-                        q.put(("__eof__", message_bytes, client_id), block=False)
-                        enqueued = True
-                        logging.info(
-                            "action: eof_enqueue | result: success | worker_queue: %d | table_type: %s | batch_number: %d",
-                            idx,
-                            table_type,
-                            getattr(msg, "batch_number", 0),
-                        )
-                        break
-                    except queue.Full:
-                        if overall_deadline is not None and time.time() >= overall_deadline:
-                            logging.error(
-                                "action: eof_enqueue | result: fail | reason: timeout | worker_queue: %d | table_type: %s | batch_number: %d",
-                                idx,
-                                table_type,
-                                getattr(msg, "batch_number", 0),
-                            )
-                            raise
-                        # short sleep before retrying
-                        time.sleep(0.1)
-
-                if not enqueued:
-                    # should not reach here because we either enqueued or raised
-                    raise queue.Full()
-
-            logging.info(
-                "action: eof_enqueued_all | result: success | table_type: %s | replicas: %d",
-                table_type,
-                len(self._task_queues),
-            )
-
-            ResponseHandler.send_success(client_sock)
-            return True
-
-        except Exception as e:
-            logging.error(
-                "action: eof_processing | result: fail | table_type: %s | batch_number: %d | error: %s",
-                getattr(msg, "table_type", "unknown"),
-                getattr(msg, "batch_number", 0),
-                str(e),
-            )
-            return ResponseHandler.handle_processing_error(msg, client_sock, e)
-
     def _process_eof_message(self, msg, client_sock) -> bool:
         """Reenvía EOFs al exchange del Filter Router (broadcast a todas las réplicas) usando protocol2 Envelope."""
         try:
@@ -469,7 +396,7 @@ class Orchestrator:
                 if table_enum is not None:
                     pb_eof.table = table_enum
             except Exception:
-                # ignore mapping failures
+                logging.error("Failed to map table_type to proto enum")
                 pass
 
             env = Envelope()

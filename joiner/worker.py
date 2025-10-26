@@ -178,7 +178,7 @@ class JoinerWorker:
             return
         cid = db.client_id
         bn = db.payload.batch_number
-        self._log.info(
+        self._log.debug(
             "IN: menu_items batch_number=%s shard=%s shards_info=%s queries=%s cid=%s",
             bn,
             self._shard,
@@ -188,7 +188,7 @@ class JoinerWorker:
         )
         idx = index_by_attr(db.payload, "item_id")
         self._cache_menu[(cid)] = idx
-        self._log.info("Cache menu_items idx_size=%d", len(idx))
+        self._log.debug("Cache menu_items idx_size=%d", len(idx))
 
     def _on_raw_stores(self, raw: bytes):
         envelope = Envelope()
@@ -207,7 +207,7 @@ class JoinerWorker:
             return
         cid = db.client_id
         bn = db.payload.batch_number
-        self._log.info(
+        self._log.debug(
             "IN: stores batch_number=%s shard=%s shards_info=%s queries=%s cid=%s",
             bn,
             self._shard,
@@ -217,7 +217,7 @@ class JoinerWorker:
         )
         idx = index_by_attr(db.payload, "store_id")
         self._cache_stores[(cid)] = idx
-        self._log.info("Cache stores idx_size=%d", len(idx))
+        self._log.debug("Cache stores idx_size=%d", len(idx))
 
     def _on_raw_ti(self, raw: bytes):
         envelope = Envelope()
@@ -252,7 +252,7 @@ class JoinerWorker:
             return
 
         if Query.Q2 not in db.query_ids:
-            self._log.info("TI sin Q2 → passthrough")
+            self._log.debug("TI sin Q2 → passthrough")
             self._safe_send(raw)
             return
 

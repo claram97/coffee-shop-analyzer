@@ -10,7 +10,6 @@ RUN pip install --no-cache-dir protobuf==6.32.1 && \
 # Copy all code to root for easier imports
 COPY filter /filter
 COPY middleware /middleware
-COPY protocol /protocol
 
 COPY protocol2 /protocol2
 

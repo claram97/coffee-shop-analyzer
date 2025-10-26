@@ -99,7 +99,7 @@ class ResultsRouter:
             target_client = self.output_clients[target_queue_name]
             
             target_client.send(body)
-            logger.info(
+            logger.debug(
                 "Routed DATA_BATCH %s for query '%s' (client %s) to queue '%s'",
                 batch_number,
                 query_id,
