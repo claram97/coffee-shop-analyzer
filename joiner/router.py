@@ -76,8 +76,10 @@ def _shard_key_for_row(
 
     if Query.Q3 in q and table_name == TableName.TRANSACTIONS:
         key = row["store_id"]
+        logging.info("key: %s", key if key is not None else "?")
         return str(key) if key is not None else None
 
+    logging.warning("returning None key for queries %s and table %d", q, table_name)
     return None
 
 
@@ -188,6 +190,7 @@ class JoinerRouter:
 
         if Query.Q1 in queries:
             self._publish(cfg, randint(0, cfg.joiner_shards - 1), raw)
+            return
 
         if cfg is None:
             log.warning("no route cfg for table=%s", table)
