@@ -523,24 +523,24 @@ func ReadMessage(reader *bufio.Reader, logger *logging.Logger) (Readable, error)
 			for i, row := range msg.Rows {
 				switch msg.OpCode {
 				case OpCodeQueryResult1:
-					logger.Infof("Transaction ID: %s | Final Amount: $%.2f", row["transaction_id"], parseFloat(row["final_amount"]))
+					logger.Debugf("Transaction ID: %s | Final Amount: $%.2f", row["transaction_id"], parseFloat(row["final_amount"]))
 				case OpCodeQueryResult2:
-					logger.Infof("Product: %s | Month: %s | Quantity: %s | Revenue: $%.2f", row["name"], row["month"], row["quantity"], parseFloat(row["revenue"]))
+					logger.Debugf("Product: %s | Month: %s | Quantity: %s | Revenue: $%.2f", row["name"], row["month"], row["quantity"], parseFloat(row["revenue"]))
 				case OpCodeQueryResult3:
-					logger.Infof("Store: %s | Period: %s | Amount: $%.2f", row["store_name"], row["period"], parseFloat(row["amount"]))
+					logger.Debugf("Store: %s | Period: %s | Amount: $%.2f", row["store_name"], row["period"], parseFloat(row["amount"]))
 				case OpCodeQueryResult4:
-					logger.Infof("Customer Birthdate: %s | Purchase Count: %s | Store: %s", row["birthdate"], row["purchase_count"], row["store_name"])
+					logger.Debugf("Customer Birthdate: %s | Purchase Count: %s | Store: %s", row["birthdate"], row["purchase_count"], row["store_name"])
 				case OpCodeQueryResultError:
 					rowJson, _ := json.Marshal(row)
-					logger.Infof("Error Row: %s", string(rowJson))
+					logger.Debugf("Error Row: %s", string(rowJson))
 				}
-				logger.Infof("")
+				logger.Debugf("")
 				if i == 49 {
 					break
 				}
 			}
 			if len(msg.Rows) > 50 {
-				logger.Infof("Only the first 50 transactions are shown as an example. Total transactions: %d", len(msg.Rows))
+				logger.Debugf("Only the first 50 transactions are shown as an example. Total transactions: %d", len(msg.Rows))
 			}
 			return msg, err
 		}
