@@ -102,13 +102,15 @@ class FilterRouter:
         producer: "ExchangeBusProducer",
         policy: QueryPolicyResolver,
         table_cfg: TableConfig,
+        orch_workers: int,
     ):
         self._p = producer
         self._pol = policy
         self._cfg = table_cfg
         self._log = logging.getLogger("filter-router")
         self._pending_batches: Dict[tuple[TableName, str], int] = defaultdict(int)
-        self._pending_eof: Dict[tuple[TableName, str], EOFMessage] = {}
+        self._pending_eof: Dict[tuple[str, str], tuple[int, EOFMessage]] = {}
+        self._orch_workers = orch_workers
 
     def process_message(self, msg: Envelope) -> None:
         self._log.debug("Processing message: %r, message type: %r", msg, msg.type)
@@ -223,13 +225,14 @@ class FilterRouter:
         self._log.info("Handling TABLE_EOF message: %r", eof)
         key = (eof.table, eof.client_id)
         self._log.info("TABLE_EOF received: key=%s", key)
-        self._pending_eof[key] = eof
+        (recvd, _eof) = self._pending_eof.get(key, (0, eof))
+        self._pending_eof[key] = (recvd + 1, eof)
         self._maybe_flush_pending_eof(key)
 
     def _maybe_flush_pending_eof(self, key: tuple[TableName, str]) -> None:
         pending = self._pending_batches.get(key, 0)
-        eof = self._pending_eof.get(key)
-        if eof is None or pending > 0:
+        (recvd, eof) = self._pending_eof.get(key, (0, None))
+        if eof is None or recvd < self._orch_workers or pending > 0:
             if eof is not None:
                 self._log.info("TABLE_EOF deferred: key=%s pending=%d", key, pending)
             return
@@ -451,11 +454,15 @@ class RouterServer:
         policy: QueryPolicyResolver,
         table_cfg: TableConfig,
         stop_event: threading.Event,
+        orch_workers: int,
     ):
         self._producer = producer
         self._mw_in = router_in
         self._router = FilterRouter(
-            producer=producer, policy=policy, table_cfg=table_cfg
+            producer=producer,
+            policy=policy,
+            table_cfg=table_cfg,
+            orch_workers=orch_workers,
         )
         self._log = logging.getLogger("filter-router-server")
         self._stop_event = stop_event

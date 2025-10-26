@@ -9,6 +9,7 @@ from common.processing import create_filtered_data_batch_protocol2
 
 STATUS_TEXT_MAP = {0: "Continue", 1: "EOF", 2: "Cancel"}
 
+from protocol.constants import Opcodes
 
 def processing_worker_main(
     task_queue: mp.Queue,
@@ -27,7 +28,7 @@ def processing_worker_main(
 
     publishers: Dict[str, MessageMiddlewareExchange] = {}
 
-    # def _publisher_for_rk(rk: str) -> MessageMiddlewareExchange:
+    # def _old_publisher_for_rk(rk: str) -> MessageMiddlewareExchange:
     #     pub = publishers.get(rk)
     #     if pub is None:
     #         logging.info(
@@ -50,8 +51,25 @@ def processing_worker_main(
     #         logging.info("action: worker_stop | worker: %d", worker_idx)
     #         break
 
-    #     msg, client_id = task
+    #     # Tasks can be either:
+    #     # - (msg_object, client_id)  -> normal processing (existing flow)
+    #     # - ("__eof__", message_bytes, client_id) -> EOF marker with raw bytes
     #     try:
+    #         if isinstance(task, tuple) and len(task) == 3 and task[0] == "__eof__":
+    #             _, batch_bytes, client_id = task
+    #             # Broadcast EOF to all filter router replicas
+    #             for pid in range(num_routers):
+    #                 rk = rk_fmt.format(pid=pid)
+    #                 _publisher_for_rk(rk).send(batch_bytes)
+
+    #             logging.info(
+    #                 "action: worker_eof_forwarded | result: success | worker: %d | replicas: %d",
+    #                 worker_idx,
+    #                 num_routers,
+    #             )
+    #             continue
+
+    #         msg, client_id = task
     #         setattr(msg, "client_id", client_id)
     #         status_value = getattr(msg, "batch_status", 0)
     #         status_text = STATUS_TEXT_MAP.get(status_value, f"Unknown({status_value})")
@@ -98,9 +116,27 @@ def processing_worker_main(
         if task is None:
             logging.info("action: worker_stop | worker: %d", worker_idx)
             break
-
-        msg, client_id = task
+        
+        # Tasks can be either:
+        # - (msg_object, client_id)  -> normal processing (existing flow)
+        # - ("__eof__", message_bytes, client_id) -> EOF marker with raw bytes
         try:
+            if isinstance(task, tuple) and len(task) == 3 and task[0] == "__eof__":
+                _, batch_bytes, client_id = task
+                # Broadcast EOF to all filter router replicas
+                for pid in range(num_routers):
+                    rk = rk_fmt.format(pid=pid)
+                    _publisher_for_rk(rk).send(batch_bytes)
+
+                logging.info(
+                    "action: worker_eof_forwarded | result: success | worker: %d | replicas: %d",
+                    worker_idx,
+                    num_routers,
+                )
+                continue
+
+            msg, client_id = task
+
             setattr(msg, "client_id", client_id)
             status_value = getattr(msg, "batch_status", 0)
             status_text = STATUS_TEXT_MAP.get(status_value, f"Unknown({status_value})")
