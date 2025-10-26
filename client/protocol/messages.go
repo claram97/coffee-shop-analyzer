@@ -518,7 +518,11 @@ func ReadMessage(reader *bufio.Reader, logger *logging.Logger) (Readable, error)
 			msg := &QueryResultTable{OpCode: opcode}
 			err := msg.readFrom(reader)
 			if err == nil && logger != nil {
-				logger.Infof("action: query_result_received | opcode: %d | status: %d | rows: %d", msg.OpCode, msg.BatchStatus, len(msg.Rows))
+				logger.Infof("action: query_result_received | opcode: %s | status: %d | rows: %d",
+					OpCodeName(msg.OpCode),
+					msg.BatchStatus,
+					len(msg.Rows),
+				)
 			}
 			for i, row := range msg.Rows {
 				switch msg.OpCode {

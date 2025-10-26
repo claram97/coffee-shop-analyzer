@@ -1,5 +1,7 @@
 package common
 
+import "fmt"
+
 // Protocol Operation Codes
 const (
 	BatchRecvSuccessOpCode    byte = 1
@@ -38,3 +40,30 @@ const (
 const (
 	HeaderOverhead = 18 // +1 (opcode) +4 (length) +4 (nLines) +8 (batchNumber) +1 (status)
 )
+
+var opCodeNames = map[byte]string{
+	BatchRecvSuccessOpCode:    "BATCH_RECV_SUCCESS",
+	BatchRecvFailOpCode:       "BATCH_RECV_FAIL",
+	OpCodeFinished:            "FINISHED",
+	OpCodeNewMenuItems:        "NEW_MENU_ITEMS",
+	OpCodeNewStores:           "NEW_STORES",
+	OpCodeNewTransactionItems: "NEW_TRANSACTION_ITEMS",
+	OpCodeNewTransaction:      "NEW_TRANSACTION",
+	OpCodeNewUsers:            "NEW_USERS",
+	OpCodeEOF:                 "EOF",
+	OpCodeClientHello:         "CLIENT_HELLO",
+	OpCodeDataBatch:           "DATA_BATCH",
+	OpCodeQueryResult1:        "QUERY_RESULT_1",
+	OpCodeQueryResult2:        "QUERY_RESULT_2",
+	OpCodeQueryResult3:        "QUERY_RESULT_3",
+	OpCodeQueryResult4:        "QUERY_RESULT_4",
+	OpCodeQueryResultError:    "QUERY_RESULT_ERROR",
+}
+
+// OpCodeName returns a readable name for the given opcode, or UNKNOWN(<value>) if it is not mapped.
+func OpCodeName(op byte) string {
+	if name, ok := opCodeNames[op]; ok {
+		return name
+	}
+	return fmt.Sprintf("UNKNOWN(%d)", op)
+}
