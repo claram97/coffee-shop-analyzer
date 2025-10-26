@@ -6,7 +6,6 @@ from utils.aggregationUtils import (
     create_query2_aggregation,
     create_query3_aggregation,
     log_query4_transactions,
-    log_query4_users,
 )
 from utils.datetimeUtils import calculate_semester, extract_year, parse_datetime
 from utils.debug import log_query2_results, log_query3_results

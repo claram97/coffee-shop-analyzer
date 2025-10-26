@@ -2,14 +2,12 @@ import logging
 import multiprocessing as mp
 from typing import Dict
 
-from common.processing import create_filtered_data_batch, message_logger
+from common.processing import message_logger
 
 from middleware.middleware_client import MessageMiddlewareExchange
 from common.processing import create_filtered_data_batch_protocol2
 
 STATUS_TEXT_MAP = {0: "Continue", 1: "EOF", 2: "Cancel"}
-
-from protocol.constants import Opcodes
 
 def processing_worker_main(
     task_queue: mp.Queue,

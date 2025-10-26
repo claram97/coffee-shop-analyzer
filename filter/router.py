@@ -1,14 +1,12 @@
 from __future__ import annotations
 
-import hashlib
 import logging
 import random
 import threading
 import time
 from collections import defaultdict
-from dataclasses import dataclass
 from random import randint
-from typing import Any, Dict, List, Optional, Union
+from typing import Dict, Optional
 
 from middleware.middleware_client import (MessageMiddlewareExchange,
                                           MessageMiddlewareQueue)

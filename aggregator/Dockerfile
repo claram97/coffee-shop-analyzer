@@ -1,9 +1,5 @@
 FROM python:3.9.7-slim
 
-# Copy requirements.txt if you have one
-# COPY aggregator/requirements.txt /tmp/requirements.txt
-# RUN pip install -r /tmp/requirements.txt && rm /tmp/requirements.txt
-
 # Install required dependencies (including protobuf runtime required by generated pb2)
 RUN pip install --no-cache-dir protobuf==6.32.1 pika
 

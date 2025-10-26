@@ -2,7 +2,7 @@ import logging
 import os
 import signal
 import threading
-from typing import Dict, List
+from typing import Dict
 
 from google.protobuf.message import DecodeError
 

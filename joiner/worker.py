@@ -1,23 +1,13 @@
 from __future__ import annotations
-
-import copy
-import hashlib
 import logging
-import os
-import pickle
-import struct
 import threading
-from collections import defaultdict
-from typing import Any, Callable, Dict, List, Optional, Set, Tuple, Union
-
+from typing import Callable, Dict, List, Optional, Set, Tuple
 from middleware.middleware_client import MessageMiddleware
-from protocol2.databatch_pb2 import DataBatch, Query, ShardInfo
+from protocol2.databatch_pb2 import DataBatch, Query
 from protocol2.envelope_pb2 import Envelope, MessageType
 from protocol2.eof_message_pb2 import EOFMessage
-from protocol2.table_data_pb2 import Row, TableData, TableName, TableSchema, TableStatus
+from protocol2.table_data_pb2 import Row, TableData, TableName, TableSchema
 from protocol2.table_data_utils import iterate_rows_as_dicts
-
-_RecordPtr = Tuple[int, int]
 
 log = logging.getLogger("joiner-worker")
 

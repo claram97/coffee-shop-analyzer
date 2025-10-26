@@ -1,9 +1,7 @@
 import logging
 import os
 import signal
-import time
 from configparser import ConfigParser
-
 from aggregator import Aggregator
 
 
