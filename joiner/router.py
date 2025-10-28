@@ -135,15 +135,19 @@ class JoinerRouter:
         route_cfg: Dict[int, TableRouteCfg],
         fr_replicas: int,
         stop_event: threading.Event,
+        router_id: int = 0,
     ):
         self._in = in_mw
         self._pool = publisher_pool
         self._cfg = route_cfg
-        self._pending_eofs: Dict[tuple[TableName, str], Set[int]] = {}
+        self._pending_eofs: Dict[tuple[TableName, str], Set[str]] = (
+            {}
+        )  # Changed to Set[str] for trace strings
         self._part_counter: Dict[tuple[TableName, str], int] = {}
         self._fr_replicas = fr_replicas
         self._stop_event = stop_event
         self._is_shutting_down = False
+        self._router_id = router_id
         log.info(
             "JoinerRouter init: tables=%s",
             {
@@ -224,8 +228,8 @@ class JoinerRouter:
             log.debug("shard plan table=%s -> %s", table, sizes)
 
         for shard, shard_rows in buckets.items():
-            if not shard_rows:
-                continue
+            # if not shard_rows:
+            #     continue
             db_sh = DataBatch()
             db_sh.CopyFrom(db)
             shard_info = db_sh.shards_info.add()
@@ -253,14 +257,25 @@ class JoinerRouter:
             log.warning("EOF for unknown table_id=%s; ignoring", table)
             return
 
-        recvd = self._pending_eofs.setdefault(key, set())
-        next_idx = self._part_counter.get(key, 0) + 1
-        self._part_counter[key] = next_idx
-        recvd.add(next_idx)
+        # Use trace field to detect duplicates
+        trace = eof.trace if eof.trace else None
+        if trace:
+            recvd = self._pending_eofs.setdefault(key, set())
+            if trace in recvd:
+                log.warning("Duplicate EOF ignored: key=%s trace=%s", key, trace)
+                return
+            recvd.add(trace)
+        else:
+            # Fallback to old behavior if no trace (backward compatibility)
+            recvd = self._pending_eofs.setdefault(key, set())
+            next_idx = self._part_counter.get(key, 0) + 1
+            self._part_counter[key] = next_idx
+            recvd.add(next_idx)
 
         log.info(
-            "EOF recv key=%s progress=%d/%d",
+            "EOF recv key=%s trace=%s progress=%d/%d",
             key,
+            trace or "no-trace",
             len(recvd),
             cfg.agg_shards * self._fr_replicas,
         )
@@ -271,7 +286,13 @@ class JoinerRouter:
                 key,
                 cfg.joiner_shards,
             )
-            self._broadcast(cfg, raw_env, shards=cfg.joiner_shards)
+            # Update trace to include joiner_router_id before broadcasting
+            eof_updated = EOFMessage(
+                table=eof.table, client_id=eof.client_id, trace=str(self._router_id)
+            )
+            env_updated = Envelope(type=MessageType.EOF_MESSAGE, eof=eof_updated)
+            raw_updated = env_updated.SerializeToString()
+            self._broadcast(cfg, raw_updated, shards=cfg.joiner_shards)
             # Use safe pops in case concurrent callbacks already cleared these.
             self._pending_eofs.pop(key, None)
             self._part_counter.pop(key, None)

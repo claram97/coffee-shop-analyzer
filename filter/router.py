@@ -109,17 +109,26 @@ class FilterRouter:
         self._pending_batches: Dict[tuple[TableName, str], int] = defaultdict(int)
         self._pending_eof: Dict[tuple[str, str], tuple[int, EOFMessage]] = {}
         self._orch_workers = orch_workers
+        # Store unacked EOF messages: key=(table, client_id) -> list of (channel, delivery_tag)
+        self._unacked_eofs: Dict[tuple[TableName, str], list] = {}
+        self._eof_ack_lock = threading.Lock()
 
-    def process_message(self, msg: Envelope) -> None:
-        self._log.debug("Processing message: %r, message type: %r", msg, msg.type)
+    def process_message(self, msg: Envelope, channel=None, delivery_tag=None, redelivered=False) -> tuple[bool, bool]:
+        """
+        Process a message and return (should_ack, ack_now).
+        - should_ack: True if message should eventually be acked
+        - ack_now: True if should ack immediately, False if should delay ack
+        """
+        self._log.debug("Processing message: %r, message type: %r, redelivered: %r", msg, msg.type, redelivered)
         if msg.type == MessageType.DATA_BATCH:
             self._handle_data(msg.data_batch)
+            return (True, True)  # Regular messages: ack immediately
         elif msg.type == MessageType.EOF_MESSAGE:
-            # EOF messages carry an EOFMessage, handle them with the
-            # dedicated EOF handler instead of the DataBatch handler.
-            self._handle_table_eof(msg.eof)
+            # EOF messages: delay ack until fully processed
+            return self._handle_table_eof(msg.eof, channel, delivery_tag, redelivered)
         else:
             self._log.warning("Unknown message type: %r", type(msg))
+            return (True, True)
 
     def _handle_data(self, batch: DataBatch) -> None:
         self._log.debug("Handling DataBatch message: %r", batch)
@@ -219,13 +228,31 @@ class FilterRouter:
         num_parts = max(1, int(self._cfg.aggregators))
         self._p.send_to_aggregator_partition(randint(0, num_parts - 1), batch)
 
-    def _handle_table_eof(self, eof: EOFMessage) -> None:
-        self._log.debug("Handling TABLE_EOF message: %r", eof)
+    def _handle_table_eof(self, eof: EOFMessage, channel=None, delivery_tag=None, redelivered=False) -> tuple[bool, bool]:
+        """
+        Handle EOF message. Returns (should_ack, ack_now).
+        For EOFs: store the ack info and don't ack until fully processed.
+        """
         key = (eof.table, eof.client_id)
-        self._log.debug("TABLE_EOF received: key=%s", key)
+        
+        if redelivered:
+            self._log.info("TABLE_EOF REDELIVERED (recovering state): key=%s", key)
+        else:
+            self._log.debug("TABLE_EOF received: key=%s", key)
+        
+        # Store the channel and delivery_tag for later acking (append to list)
+        with self._eof_ack_lock:
+            if channel is not None and delivery_tag is not None:
+                if key not in self._unacked_eofs:
+                    self._unacked_eofs[key] = []
+                self._unacked_eofs[key].append((channel, delivery_tag))
+        
         (recvd, _eof) = self._pending_eof.get(key, (0, eof))
         self._pending_eof[key] = (recvd + 1, eof)
         self._maybe_flush_pending_eof(key)
+        
+        # Return: should_ack=True (eventually), ack_now=False (delay until processed)
+        return (True, False)
 
     def _maybe_flush_pending_eof(self, key: tuple[TableName, str]) -> None:
         pending = self._pending_batches.get(key, 0)
@@ -246,8 +273,25 @@ class FilterRouter:
                     key,
                     e,
                 )
+        
+        # Now ACK the EOF message since we've successfully forwarded it
+        self._ack_eof(key)
+        
         self._pending_eof.pop(key, None)
         self._pending_batches.pop(key, None)
+    
+    def _ack_eof(self, key: tuple[TableName, str]) -> None:
+        """Acknowledge all EOF messages for this key after they have been fully processed."""
+        with self._eof_ack_lock:
+            ack_list = self._unacked_eofs.get(key, [])
+            if ack_list:
+                self._log.info("ACKing %d TABLE_EOF messages: key=%s", len(ack_list), key)
+                for channel, delivery_tag in ack_list:
+                    try:
+                        channel.basic_ack(delivery_tag=delivery_tag)
+                    except Exception as e:
+                        self._log.error("Failed to ACK EOF key=%s delivery_tag=%s: %s", key, delivery_tag, e)
+                del self._unacked_eofs[key]
 
 
 class ExchangeBusProducer:
@@ -259,6 +303,7 @@ class ExchangeBusProducer:
         exchange_fmt: str = "ex.{table}",
         rk_fmt: str = "agg.{table}.{pid:02d}",
         *,
+        router_id: int = 0,
         max_retries: int = 5,
         base_backoff_ms: int = 100,
         backoff_multiplier: float = 2.0,
@@ -271,6 +316,7 @@ class ExchangeBusProducer:
         self._pub_cache: dict[tuple[TableName, str], MessageMiddlewareExchange] = {}
         self._pub_locks: dict[tuple[TableName, str], threading.Lock] = {}
         self._in_mw = in_mw
+        self._router_id = router_id
 
         self._max_retries = int(max_retries)
         self._base_backoff_ms = int(base_backoff_ms)
@@ -426,12 +472,14 @@ class ExchangeBusProducer:
         self, key: tuple[TableName, str], partition_id: int
     ) -> None:
         try:
-            eof = EOFMessage(table=key[0], client_id=key[1])
+            # Add trace: "filter_router_id:aggregator_id"
+            trace = f"{self._router_id}:{partition_id}"
+            eof = EOFMessage(table=key[0], client_id=key[1], trace=trace)
             env = Envelope(type=MessageType.EOF_MESSAGE, eof=eof)
             payload = env.SerializeToString()
             k = self._key_for(key[0], int(partition_id))
             self._log.info(
-                "publish TABLE_EOF → aggregator key=%s part=%d", key, int(partition_id)
+                "publish TABLE_EOF → aggregator key=%s part=%d trace=%s", key, int(partition_id), trace
             )
             self._send_with_retry(k, payload)
         except Exception as e:
@@ -468,21 +516,21 @@ class RouterServer:
     def run(self) -> None:
         self._log.debug("RouterServer starting consume")
 
-        def _cb(body: bytes):
+        def _cb(body: bytes, channel=None, delivery_tag=None, redelivered=False):
             if self._stop_event.is_set():
                 self._log.warning("Shutdown in progress, skipping incoming message.")
-                return
+                return True  # Auto-ack to avoid redelivery during shutdown
             try:
                 if len(body) < 1:
                     self._log.error("Received empty message")
-                    return
+                    return True  # Ack empty messages
                 msg = Envelope()
                 msg.ParseFromString(body)
-                self._router.process_message(msg)
+                should_ack, ack_now = self._router.process_message(msg, channel, delivery_tag, redelivered)
+                return ack_now  # Return whether to ack immediately
             except Exception as e:
                 self._log.exception("Error in router callback: %s", e)
-            except Exception as e:
-                self._log.exception("Error in router callback: %s", e)
+                return True  # Ack on error to avoid infinite redelivery loop
 
         try:
             self._mw_in.start_consuming(_cb)

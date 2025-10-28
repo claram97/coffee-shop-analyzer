@@ -102,7 +102,7 @@ class MessageMiddlewareQueue(MessageMiddleware):
     def _create_callback_wrapper(self, on_message_callback):
         def callback_wrapper(ch, method, properties, body):
             logging.debug(
-                f"DEBUG: Callback received message, delivery_tag: {method.delivery_tag}, body_size: {len(body)}"
+                f"DEBUG: Callback received message, delivery_tag: {method.delivery_tag}, body_size: {len(body)}, redelivered: {method.redelivered}"
             )
 
             if self._stop_event.is_set():
@@ -110,11 +110,31 @@ class MessageMiddlewareQueue(MessageMiddleware):
                 return
             try:
                 logging.debug(f"DEBUG: About to call on_message_callback")
-                on_message_callback(body)
-                logging.debug(
-                    f"DEBUG: Message processed successfully, sending ACK for delivery_tag: {method.delivery_tag}"
-                )
-                ch.basic_ack(delivery_tag=method.delivery_tag)
+                # Try calling with additional context first (new API)
+                try:
+                    result = on_message_callback(
+                        body,
+                        channel=ch,
+                        delivery_tag=method.delivery_tag,
+                        redelivered=method.redelivered,
+                    )
+                except TypeError:
+                    # Fallback to old API (callback only accepts body)
+                    result = on_message_callback(body)
+
+                # If callback returns True or None, ack immediately
+                # If callback returns False, don't ack (manual ack required)
+                should_ack = result if result is not None else True
+
+                if should_ack:
+                    logging.debug(
+                        f"DEBUG: Message processed successfully, sending ACK for delivery_tag: {method.delivery_tag}"
+                    )
+                    ch.basic_ack(delivery_tag=method.delivery_tag)
+                else:
+                    logging.debug(
+                        f"DEBUG: Message processed, ACK delayed (manual) for delivery_tag: {method.delivery_tag}"
+                    )
             except Exception as e:
                 logging.error(
                     f"DEBUG: Exception in message callback: {e}, sending NACK for delivery_tag: {method.delivery_tag}"
@@ -255,7 +275,7 @@ class MessageMiddlewareExchange(MessageMiddleware):
                         queue=self.queue_name,
                         routing_key=key,
                     )
-                self._channel.basic_qos(prefetch_count=3)
+                self._channel.basic_qos(prefetch_count=100)
                 logging.debug(
                     f"[MMX] ensured binding ex={self.exchange_name} q={self.queue_name} rk={self.route_keys}"
                 )
@@ -308,7 +328,7 @@ class MessageMiddlewareExchange(MessageMiddleware):
                     )
                     raise
 
-            self._channel.basic_qos(prefetch_count=3)
+            self._channel.basic_qos(prefetch_count=100)
 
             self._stop_event.clear()
             callback_wrapper = self._create_callback_wrapper(on_message_callback)
@@ -320,7 +340,7 @@ class MessageMiddlewareExchange(MessageMiddleware):
     def _create_callback_wrapper(self, on_message_callback):
         def callback_wrapper(ch, method, properties, body):
             logging.debug(
-                f"Exchange callback received message, delivery_tag: {method.delivery_tag}, body_size: {len(body)}"
+                f"Exchange callback received message, delivery_tag: {method.delivery_tag}, body_size: {len(body)}, redelivered: {method.redelivered}"
             )
 
             if self._stop_event.is_set():
@@ -331,11 +351,31 @@ class MessageMiddlewareExchange(MessageMiddleware):
 
             try:
                 logging.debug("About to call exchange message callback")
-                on_message_callback(body)
-                logging.debug(
-                    f"Exchange message processed, sending ACK for delivery_tag: {method.delivery_tag}"
-                )
-                ch.basic_ack(delivery_tag=method.delivery_tag)
+                # Try calling with additional context first (new API)
+                try:
+                    result = on_message_callback(
+                        body,
+                        channel=ch,
+                        delivery_tag=method.delivery_tag,
+                        redelivered=method.redelivered,
+                    )
+                except TypeError:
+                    # Fallback to old API (callback only accepts body)
+                    result = on_message_callback(body)
+
+                # If callback returns True or None, ack immediately
+                # If callback returns False, don't ack (manual ack required)
+                should_ack = result if result is not None else True
+
+                if should_ack:
+                    logging.debug(
+                        f"Exchange message processed, sending ACK for delivery_tag: {method.delivery_tag}"
+                    )
+                    ch.basic_ack(delivery_tag=method.delivery_tag)
+                else:
+                    logging.debug(
+                        f"Exchange message processed, ACK delayed (manual) for delivery_tag: {method.delivery_tag}"
+                    )
             except Exception as e:
                 logging.error(
                     f"Exception in exchange message callback: {e}, sending NACK",

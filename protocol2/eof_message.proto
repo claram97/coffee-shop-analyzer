@@ -7,4 +7,5 @@ import "table_data.proto";
 message EOFMessage {
   TableName table = 1;
   string client_id = 2;
+  string trace = 3;  // Trace path: "filter_router_id:aggregator_id" or "joiner_router_id"
 }

@@ -25,7 +25,7 @@ _sym_db = _symbol_database.Default()
 import table_data_pb2 as table__data__pb2
 
 
-DESCRIPTOR = _descriptor_pool.Default().AddSerializedFile(b'\n\x11\x65of_message.proto\x12\x08protocol\x1a\x10table_data.proto\"C\n\nEOFMessage\x12\"\n\x05table\x18\x01 \x01(\x0e\x32\x13.protocol.TableName\x12\x11\n\tclient_id\x18\x02 \x01(\tb\x06proto3')
+DESCRIPTOR = _descriptor_pool.Default().AddSerializedFile(b'\n\x11\x65of_message.proto\x12\x08protocol\x1a\x10table_data.proto\"R\n\nEOFMessage\x12\"\n\x05table\x18\x01 \x01(\x0e\x32\x13.protocol.TableName\x12\x11\n\tclient_id\x18\x02 \x01(\t\x12\r\n\x05trace\x18\x03 \x01(\tb\x06proto3')
 
 _globals = globals()
 _builder.BuildMessageAndEnumDescriptors(DESCRIPTOR, _globals)
@@ -33,5 +33,5 @@ _builder.BuildTopDescriptorsAndMessages(DESCRIPTOR, 'eof_message_pb2', _globals)
 if not _descriptor._USE_C_DESCRIPTORS:
   DESCRIPTOR._loaded_options = None
   _globals['_EOFMESSAGE']._serialized_start=49
-  _globals['_EOFMESSAGE']._serialized_end=116
+  _globals['_EOFMESSAGE']._serialized_end=131
 # @@protoc_insertion_point(module_scope)
