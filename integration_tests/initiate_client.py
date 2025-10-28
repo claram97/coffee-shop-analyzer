@@ -18,10 +18,7 @@ services:
     volumes:
       - ./client/config.yaml:/config.yaml:ro
       - ./integration_tests/test_data:/data:ro
-      - ./integration_tests/query1_results.json:/query1_results.json
-      - ./integration_tests/query2_results.json:/query2_results.json
-      - ./integration_tests/query3_results.json:/query3_results.json
-      - ./integration_tests/query4_results.json:/query4_results.json
+      - ./integration_tests/client_runs:/client_runs
 
 networks:
   testing_net:
