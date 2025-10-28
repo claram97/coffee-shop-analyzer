@@ -224,8 +224,6 @@ class JoinerRouter:
             log.debug("shard plan table=%s -> %s", table, sizes)
 
         for shard, shard_rows in buckets.items():
-            if not shard_rows:
-                continue
             db_sh = DataBatch()
             db_sh.CopyFrom(db)
             shard_info = db_sh.shards_info.add()
