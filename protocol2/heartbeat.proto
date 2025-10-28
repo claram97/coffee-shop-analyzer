@@ -1,0 +1,15 @@
+syntax = "proto3";
+
+package protocol2;
+
+message Heartbeat {
+  // nombre lógico del servicio (p.ej. "filter-router", "aggregator")
+  string node_type = 1;
+
+  // identificador numérico de la instancia (0, 1, ...)
+  uint32 node_id = 2;
+
+  // epoch en milisegundos (ahorrate conversiones en Python/Go)
+  int64 timestamp_ms = 3;
+
+}

@@ -270,6 +270,26 @@ cat >> "$OUT_PATH" <<YAML
 YAML
 done
 
+# --- heartbeat monitor ---
+cat >> "$OUT_PATH" <<YAML
+
+  heartbeat-monitor:
+    container_name: heartbeat-monitor
+    build:
+      context: .
+      dockerfile: heartbeat_monitor/Dockerfile
+    environment:
+      - PYTHONUNBUFFERED=1
+      - LOG_LEVEL=INFO
+      - RABBITMQ_HOST=rabbitmq
+      - HEARTBEAT_QUEUE=heartbeat_queue
+    networks:
+      - testing_net
+    depends_on:
+      rabbitmq:
+        condition: service_healthy
+YAML
+
 # --- networks ---
 cat >> "$OUT_PATH" <<'YAML'
 
