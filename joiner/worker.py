@@ -1,7 +1,9 @@
 from __future__ import annotations
+
 import logging
 import threading
 from typing import Callable, Dict, List, Optional, Set, Tuple
+
 from middleware.middleware_client import MessageMiddleware
 from protocol2.databatch_pb2 import DataBatch, Query
 from protocol2.envelope_pb2 import Envelope, MessageType
@@ -66,7 +68,7 @@ class JoinerWorker:
 
         self._stop_event = stop_event
         self._is_shutting_down = False
-        
+
         # Store unacked messages: key=(table, client_id) -> list of (channel, delivery_tag)
         self._unacked_light_tables: Dict[tuple[TableName, str], list] = {}
         self._unacked_eofs: Dict[tuple[TableName, str], list] = {}
@@ -156,7 +158,9 @@ class JoinerWorker:
         except Exception as e:
             self._log.error("requeue failed table_id=%s: %s", table_name, e)
 
-    def _on_raw_menu(self, raw: bytes, channel=None, delivery_tag=None, redelivered=False):
+    def _on_raw_menu(
+        self, raw: bytes, channel=None, delivery_tag=None, redelivered=False
+    ):
         """Process menu_items messages. Returns True to ACK immediately, False to delay."""
         envelope = Envelope()
         envelope.ParseFromString(raw)
@@ -176,10 +180,10 @@ class JoinerWorker:
             return True
         cid = db.client_id
         bn = db.payload.batch_number
-        
+
         if redelivered:
             self._log.info("REDELIVERED: menu_items batch_number=%s cid=%s", bn, cid)
-        
+
         self._log.debug(
             "IN: menu_items batch_number=%s shard=%s shards_info=%s queries=%s cid=%s",
             bn,
@@ -188,7 +192,7 @@ class JoinerWorker:
             db.query_ids,
             cid,
         )
-        
+
         # Store channel and delivery_tag for later ACK
         key = (TableName.MENU_ITEMS, cid)
         with self._ack_lock:
@@ -196,15 +200,17 @@ class JoinerWorker:
                 if key not in self._unacked_light_tables:
                     self._unacked_light_tables[key] = []
                 self._unacked_light_tables[key].append((channel, delivery_tag))
-        
+
         idx = index_by_attr(db.payload, "item_id")
         self._cache_menu[(cid)] = idx
         self._log.debug("Cache menu_items idx_size=%d", len(idx))
-        
+
         # Delay ACK until complete lifecycle
         return False
 
-    def _on_raw_stores(self, raw: bytes, channel=None, delivery_tag=None, redelivered=False):
+    def _on_raw_stores(
+        self, raw: bytes, channel=None, delivery_tag=None, redelivered=False
+    ):
         """Process stores messages. Returns True to ACK immediately, False to delay."""
         envelope = Envelope()
         envelope.ParseFromString(raw)
@@ -224,10 +230,10 @@ class JoinerWorker:
             return True
         cid = db.client_id
         bn = db.payload.batch_number
-        
+
         if redelivered:
             self._log.info("REDELIVERED: stores batch_number=%s cid=%s", bn, cid)
-        
+
         self._log.debug(
             "IN: stores batch_number=%s shard=%s shards_info=%s queries=%s cid=%s",
             bn,
@@ -236,7 +242,7 @@ class JoinerWorker:
             db.query_ids,
             cid,
         )
-        
+
         # Store channel and delivery_tag for later ACK
         key = (TableName.STORES, cid)
         with self._ack_lock:
@@ -244,15 +250,17 @@ class JoinerWorker:
                 if key not in self._unacked_light_tables:
                     self._unacked_light_tables[key] = []
                 self._unacked_light_tables[key].append((channel, delivery_tag))
-        
+
         idx = index_by_attr(db.payload, "store_id")
         self._cache_stores[(cid)] = idx
         self._log.debug("Cache stores idx_size=%d", len(idx))
-        
+
         # Delay ACK until complete lifecycle
         return False
 
-    def _on_raw_ti(self, raw: bytes, channel=None, delivery_tag=None, redelivered=False):
+    def _on_raw_ti(
+        self, raw: bytes, channel=None, delivery_tag=None, redelivered=False
+    ):
         """Process transaction_items messages. Returns True to ACK immediately, False to delay."""
         envelope = Envelope()
         envelope.ParseFromString(raw)
@@ -285,7 +293,7 @@ class JoinerWorker:
         if not self._phase_ready(TableName.TRANSACTION_ITEMS, cid):
             self._log.debug("TI fase NO lista → requeue (cid=%s)", cid)
             self._requeue(TableName.TRANSACTION_ITEMS, raw)
-            return False  # Don't ACK, will be redelivered
+            return True  # Don't ACK, will be redelivered
 
         if Query.Q2 not in db.query_ids:
             self._log.debug("TI sin Q2 → passthrough")
@@ -294,7 +302,8 @@ class JoinerWorker:
 
         menu_idx: Optional[dict[str, dict[str, str]]] = self._cache_menu.get((cid))
         if not menu_idx:
-            self._log.warning("Menu cache no disponible aún; drop batch TI")
+            self._log.warning("Menu cache no disponible aún; requeue batch TI")
+            self._requeue(TableName.TRANSACTION_ITEMS, raw)
             return True
 
         out_cols = ["transaction_id", "name", "quantity", "subtotal", "created_at"]
@@ -330,7 +339,9 @@ class JoinerWorker:
         self._safe_send(raw)
         return True
 
-    def _on_raw_tx(self, raw: bytes, channel=None, delivery_tag=None, redelivered=False):
+    def _on_raw_tx(
+        self, raw: bytes, channel=None, delivery_tag=None, redelivered=False
+    ):
         """Process transactions messages. Returns True to ACK immediately, False to delay."""
         envelope = Envelope()
         envelope.ParseFromString(raw)
@@ -363,7 +374,7 @@ class JoinerWorker:
         if not self._phase_ready(TableName.TRANSACTIONS, cid):
             self._log.debug("TX fase NO lista → requeue (cid=%s)", cid)
             self._requeue(TableName.TRANSACTIONS, raw)
-            return False  # Don't ACK, will be redelivered
+            return True
 
         if Query.Q1 in db.query_ids:
             self._log.debug("TX Q1 passthrough")
@@ -373,6 +384,7 @@ class JoinerWorker:
         stores_idx: Optional[Dict[str, Row]] = self._cache_stores.get((cid))
         if not stores_idx:
             self._log.warning("Stores cache no disponible aún; drop batch TX")
+            self._requeue(TableName.TRANSACTIONS, raw)
             return True
 
         out_cols = [
@@ -420,7 +432,9 @@ class JoinerWorker:
         self._safe_send(raw)
         return True
 
-    def _on_raw_users(self, raw: bytes, channel=None, delivery_tag=None, redelivered=False):
+    def _on_raw_users(
+        self, raw: bytes, channel=None, delivery_tag=None, redelivered=False
+    ):
         """Process users messages. Returns True to ACK immediately, False to delay."""
         envelope = Envelope()
         envelope.ParseFromString(raw)
@@ -451,33 +465,40 @@ class JoinerWorker:
         )
 
         if not self._phase_ready(TableName.USERS, cid):
-            self._log.debug("U fase NO lista → requeue (cid=%s)", cid)
+            self._log.warning("U fase NO lista → requeue (cid=%s)", cid)
             self._requeue(TableName.USERS, raw)
-            return False  # Don't ACK, will be redelivered
+            return True
 
         self._safe_send(raw)
         return True
 
-    def _on_table_eof(self, table_name: TableName, client_id: str, channel=None, delivery_tag=None, redelivered=False) -> bool:
+    def _on_table_eof(
+        self,
+        table_name: TableName,
+        client_id: str,
+        channel=None,
+        delivery_tag=None,
+        redelivered=False,
+    ) -> bool:
         """
         Handle EOF message. Returns True to ACK immediately, False to delay.
         For EOFs: delay ACK until all EOFs are received and joins are complete.
         """
         key = (table_name, client_id)
         tname = NAME_TO_STR.get(table_name, f"#{table_name}")
-        
+
         if redelivered:
             log.info("TABLE_EOF REDELIVERED: table=%s cid=%s", tname, client_id)
         else:
             log.debug("TABLE_EOF received: table=%s cid=%s", tname, client_id)
-        
+
         # Store channel and delivery_tag for later ACK
         with self._ack_lock:
             if channel is not None and delivery_tag is not None:
                 if key not in self._unacked_eofs:
                     self._unacked_eofs[key] = []
                 self._unacked_eofs[key].append((channel, delivery_tag))
-        
+
         recvd = self._pending_eofs.setdefault(key, set())
         next_idx = self._part_counter.get(key, 0) + 1
         self._part_counter[key] = next_idx
@@ -501,13 +522,13 @@ class JoinerWorker:
                 client_id,
                 sorted(self._eof),
             )
-            
+
             # Check if we can ACK light tables and all EOFs for this client
             self._maybe_ack_complete_lifecycle(client_id)
-        
+
         # Delay ACK until complete lifecycle
         return False
-    
+
     def _maybe_ack_complete_lifecycle(self, client_id: str) -> None:
         """
         Check if all EOFs have been received for a client and all joins are complete.
@@ -521,38 +542,45 @@ class JoinerWorker:
             (TableName.TRANSACTIONS, client_id),
             (TableName.USERS, client_id),
         ]
-        
+
         if all(eof_key in self._eof for eof_key in required_eofs):
             self._log.info(
                 "Complete lifecycle detected for client_id=%s, ACKing light tables and EOFs",
-                client_id
+                client_id,
             )
-            
+
             # ACK light tables
             self._ack_light_table((TableName.MENU_ITEMS, client_id))
             self._ack_light_table((TableName.STORES, client_id))
-            
+
             # ACK all EOFs
             for eof_key in required_eofs:
                 self._ack_eof(eof_key)
-            
+
             # Clean up caches for this client
             self._cache_menu.pop(client_id, None)
             self._cache_stores.pop(client_id, None)
-    
+
     def _ack_light_table(self, key: tuple[TableName, str]) -> None:
         """Acknowledge all light table messages for this key."""
         with self._ack_lock:
             ack_list = self._unacked_light_tables.get(key, [])
             if ack_list:
-                self._log.info("ACKing %d light table messages: key=%s", len(ack_list), key)
+                self._log.info(
+                    "ACKing %d light table messages: key=%s", len(ack_list), key
+                )
                 for channel, delivery_tag in ack_list:
                     try:
                         channel.basic_ack(delivery_tag=delivery_tag)
                     except Exception as e:
-                        self._log.error("Failed to ACK light table key=%s delivery_tag=%s: %s", key, delivery_tag, e)
+                        self._log.error(
+                            "Failed to ACK light table key=%s delivery_tag=%s: %s",
+                            key,
+                            delivery_tag,
+                            e,
+                        )
                 del self._unacked_light_tables[key]
-    
+
     def _ack_eof(self, key: tuple[TableName, str]) -> None:
         """Acknowledge all EOF messages for this key."""
         with self._ack_lock:
@@ -563,7 +591,12 @@ class JoinerWorker:
                     try:
                         channel.basic_ack(delivery_tag=delivery_tag)
                     except Exception as e:
-                        self._log.error("Failed to ACK EOF key=%s delivery_tag=%s: %s", key, delivery_tag, e)
+                        self._log.error(
+                            "Failed to ACK EOF key=%s delivery_tag=%s: %s",
+                            key,
+                            delivery_tag,
+                            e,
+                        )
                 del self._unacked_eofs[key]
 
     def _safe_send(self, raw: bytes):
