@@ -15,6 +15,7 @@ from joiner.router import (
     JoinerRouter,
     build_route_cfg_from_config,
 )
+from leader_election import ElectionCoordinator
 from middleware.middleware_client import (
     MessageMiddlewareExchange,
     MessageMiddlewareQueue,
@@ -124,6 +125,7 @@ def main():
     args = ap.parse_args()
 
     jr_index = int(os.environ["JOINER_ROUTER_INDEX"])
+    election_port = int(os.environ.get("ELECTION_PORT", 9500 + jr_index))
 
     logging.basicConfig(
         level=getattr(logging, args.log_level.upper(), logging.INFO),
@@ -155,6 +157,35 @@ def main():
 
     broker_host = cfg.broker.host
     fr_replicas = cfg.routers.filter
+
+    election_coordinator = None
+    try:
+        total_joiner_routers = cfg.routers.joiner
+
+        all_nodes = [
+            (i, f"joiner-router-{i}", 9500 + i) for i in range(total_joiner_routers)
+        ]
+
+        log.info(
+            f"Initializing election coordinator for joiner-router-{jr_index} on port {election_port}"
+        )
+        log.info(f"Cluster nodes: {all_nodes}")
+
+        election_coordinator = ElectionCoordinator(
+            my_id=jr_index,
+            my_host="0.0.0.0",
+            my_port=election_port,
+            all_nodes=all_nodes,
+            on_leader_change=None,
+            election_timeout=5.0,
+        )
+
+        election_coordinator.start()
+        log.info(f"Election listener started on port {election_port}")
+
+    except Exception as e:
+        log.error(f"Failed to initialize election coordinator: {e}", exc_info=True)
+        election_coordinator = None
 
     pool = ExchangePublisherPool(factory=_rabbit_exchange_factory(broker_host))
 
@@ -193,6 +224,11 @@ def main():
         log.info("Stop event received, starting shutdown process.")
     finally:
         log.info("Cleaning up resources...")
+
+        if election_coordinator:
+            log.info("Stopping election coordinator...")
+            election_coordinator.stop()
+
         server.shutdown()
         router.shutdown()
         log.info("Graceful shutdown complete. Exiting.")
