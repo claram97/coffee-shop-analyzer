@@ -11,6 +11,7 @@ from router import ExchangeBusProducer, QueryPolicyResolver, RouterServer, Table
 
 from app_config.config_loader import Config, ConfigError
 from middleware.middleware_client import MessageMiddlewareExchange
+from leader_election import ElectionCoordinator
 
 
 def resolve_config_path(cli_value: str | None) -> str:
@@ -70,6 +71,9 @@ def main():
     ap.add_argument("--log-level", default=os.environ.get("LOG_LEVEL", "INFO"))
     args = ap.parse_args()
 
+    fr_index = int(os.environ["FILTER_ROUTER_INDEX"])
+    election_port = int(os.environ.get("ELECTION_PORT", 9200 + fr_index))
+
     logging.basicConfig(
         level=getattr(logging, args.log_level.upper(), logging.INFO),
         format="%(asctime)s %(levelname)s %(name)s - %(message)s",
@@ -96,6 +100,37 @@ def main():
 
     signal.signal(signal.SIGINT, shutdown_handler)
     signal.signal(signal.SIGTERM, shutdown_handler)
+    
+    # Initialize election coordinator (listener only for now)
+    election_coordinator = None
+    try:
+        total_filter_routers = cfg.routers.filter
+        
+        # Build list of all filter router nodes in the cluster
+        all_nodes = [
+            (i, f"filter-router-{i}", 9200 + i)
+            for i in range(total_filter_routers)
+        ]
+        
+        log.info(f"Initializing election coordinator for filter-router-{fr_index} on port {election_port}")
+        log.info(f"Cluster nodes: {all_nodes}")
+        
+        election_coordinator = ElectionCoordinator(
+            my_id=fr_index,
+            my_host="0.0.0.0",
+            my_port=election_port,
+            all_nodes=all_nodes,
+            on_leader_change=None,
+            election_timeout=5.0
+        )
+        
+        election_coordinator.start()
+        log.info(f"Election listener started on port {election_port}")
+        
+    except Exception as e:
+        log.error(f"Failed to initialize election coordinator: {e}", exc_info=True)
+        election_coordinator = None
+    
     server = build_filter_router_from_config(cfg, stop_event)
     try:
         server.run()
@@ -103,6 +138,11 @@ def main():
         stop_event.wait()
     finally:
         log.info("Cleaning up resources...")
+        
+        if election_coordinator:
+            log.info("Stopping election coordinator...")
+            election_coordinator.stop()
+        
         server.stop()
         log.info("Graceful shutdown complete. Exiting.")
 
