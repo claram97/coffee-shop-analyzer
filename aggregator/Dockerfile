@@ -9,6 +9,7 @@ COPY middleware /middleware
 COPY protocol /protocol
 COPY protocol2 /protocol2
 COPY app_config /app_config
+COPY leader_election /leader_election
 
 # Set Python path to include root directory
 ENV PYTHONPATH=/:/protocol2

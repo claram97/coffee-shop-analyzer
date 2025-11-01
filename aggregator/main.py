@@ -1,8 +1,11 @@
 import logging
 import os
 import signal
+import threading
 from configparser import ConfigParser
+
 from aggregator import Aggregator
+from leader_election import ElectionCoordinator
 
 
 def resolve_config_path() -> str:
@@ -57,7 +60,7 @@ def initialize_config():
 def main():
     config_params = initialize_config()
     logging_level = config_params["logging_level"]
-    aggregator_id = config_params["aggregator_id"]
+    aggregator_id = int(config_params["aggregator_id"])
 
     initialize_log(logging_level)
 
@@ -67,17 +70,67 @@ def main():
         f"aggregator_id: {aggregator_id}"
     )
 
+    election_port = int(os.getenv("ELECTION_PORT", 9300 + aggregator_id))
+
+    # Get total aggregators from config
+    cfg_path = resolve_config_path()
+    from app_config.config_loader import Config
+
+    cfg = Config(cfg_path)
+    total_aggregators = cfg.workers.aggregators
+
+    stop_event = threading.Event()
+
     def signal_handler(signum, _frame):
         logging.info(f"Received signal {signum}, initiating graceful shutdown...")
-        if 'server' in locals():
-            server.stop()
+        stop_event.set()
 
     signal.signal(signal.SIGTERM, signal_handler)
     signal.signal(signal.SIGINT, signal_handler)
 
+    # Initialize election coordinator (listener only for now)
+    election_coordinator = None
+    try:
+        # Build list of all aggregator nodes in the cluster
+        all_nodes = [(i, f"aggregator-{i}", 9300 + i) for i in range(total_aggregators)]
+
+        logging.info(
+            f"Initializing election coordinator for aggregator-{aggregator_id} on port {election_port}"
+        )
+        logging.info(f"Cluster nodes: {all_nodes}")
+
+        election_coordinator = ElectionCoordinator(
+            my_id=aggregator_id,
+            my_host="0.0.0.0",
+            my_port=election_port,
+            all_nodes=all_nodes,
+            on_leader_change=None,
+            election_timeout=5.0,
+        )
+
+        election_coordinator.start()
+        logging.info(f"Election listener started on port {election_port}")
+
+    except Exception as e:
+        logging.error(f"Failed to initialize election coordinator: {e}", exc_info=True)
+        election_coordinator = None
+
     server = Aggregator(aggregator_id)
     server.run()
-    signal.pause()
+
+    try:
+        stop_event.wait()
+    except KeyboardInterrupt:
+        logging.info("KeyboardInterrupt received, shutting down...")
+    finally:
+        logging.info("Cleaning up resources...")
+
+        if election_coordinator:
+            logging.info("Stopping election coordinator...")
+            election_coordinator.stop()
+
+        server.stop()
+        logging.info("Graceful shutdown complete.")
 
 
 def initialize_log(logging_level):
