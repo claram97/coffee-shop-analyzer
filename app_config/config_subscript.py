@@ -68,7 +68,6 @@ def _read_election_ports(cp: configparser.ConfigParser):
     if "election_ports" not in cp:
         # Return defaults if section missing
         return {
-            "orchestrator": 9000,
             "filter_workers": 9100,
             "filter_routers": 9200,
             "aggregators": 9300,
@@ -80,7 +79,6 @@ def _read_election_ports(cp: configparser.ConfigParser):
     
     ep = cp["election_ports"]
     return {
-        "orchestrator": ep.getint("orchestrator", 9000),
         "filter_workers": ep.getint("filter_workers", 9100),
         "filter_routers": ep.getint("filter_routers", 9200),
         "aggregators": ep.getint("aggregators", 9300),
@@ -151,7 +149,6 @@ def cmd_election_ports(cp: configparser.ConfigParser, fmt: str):
     ep = _read_election_ports(cp)
     if fmt == "plain":
         print(
-            ep["orchestrator"],
             ep["filter_workers"],
             ep["filter_routers"],
             ep["aggregators"],
@@ -161,7 +158,6 @@ def cmd_election_ports(cp: configparser.ConfigParser, fmt: str):
             ep["results_routers"],
         )
     elif fmt == "env":
-        print(f"ELECTION_PORT_ORCHESTRATOR={ep['orchestrator']}")
         print(f"ELECTION_PORT_FILTER_WORKERS={ep['filter_workers']}")
         print(f"ELECTION_PORT_FILTER_ROUTERS={ep['filter_routers']}")
         print(f"ELECTION_PORT_AGGREGATORS={ep['aggregators']}")

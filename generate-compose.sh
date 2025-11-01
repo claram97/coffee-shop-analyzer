@@ -25,6 +25,9 @@ read FR_ROUTERS J_ROUTERS RESULTS_ROUTERS < <(python3 ./app_config/config_subscr
 
 eval "$(python3 ./app_config/config_subscript.py -c "$INI_PATH" broker --format=env)"
 
+# Read election ports from config
+eval "$(python3 ./app_config/config_subscript.py -c "$INI_PATH" election_ports --format=env)"
+
 # Defaults por si faltan en INI
 : "${RABBIT_HOST:=rabbitmq}"
 : "${RABBIT_PORT:=5672}"
@@ -32,6 +35,16 @@ eval "$(python3 ./app_config/config_subscript.py -c "$INI_PATH" broker --format=
 : "${RABBIT_USER:=guest}"
 : "${RABBIT_PASS:=guest}"
 : "${RABBIT_VHOST:=/}"
+
+# Election port defaults (100 ports per component group)
+: "${ELECTION_PORT_ORCHESTRATOR:=9000}"
+: "${ELECTION_PORT_FILTER_WORKERS:=9100}"
+: "${ELECTION_PORT_FILTER_ROUTERS:=9200}"
+: "${ELECTION_PORT_AGGREGATORS:=9300}"
+: "${ELECTION_PORT_JOINER_WORKERS:=9400}"
+: "${ELECTION_PORT_JOINER_ROUTERS:=9500}"
+: "${ELECTION_PORT_RESULTS_WORKERS:=9600}"
+: "${ELECTION_PORT_RESULTS_ROUTERS:=9700}"
 
 cat > "$OUT_PATH" <<YAML
 version: '3.8'
@@ -76,6 +89,7 @@ services:
       - ORCH_PROCESS_COUNT=${ORCHESTRATORS}
       - ORCH_PROCESS_QUEUE_SIZE=256
       - ORCH_PROCESS_QUEUE_TIMEOUT=10.0
+      - ELECTION_PORT=${ELECTION_PORT_ORCHESTRATOR}
     networks:
       - testing_net
     volumes:
@@ -100,6 +114,7 @@ cat >> "$OUT_PATH" <<YAML
       - LOG_LEVEL=INFO
       - CONFIG_PATH=/config/config.ini
       - FILTER_ROUTER_INDEX=${i}
+      - ELECTION_PORT=$((ELECTION_PORT_FILTER_ROUTERS + i))
     networks:
       - testing_net
     volumes:
@@ -124,6 +139,7 @@ cat >> "$OUT_PATH" <<YAML
       - RABBITMQ_HOST=rabbitmq
       - LOG_LEVEL=INFO
       - CONFIG_PATH=/config/config.ini
+      - ELECTION_PORT=$((ELECTION_PORT_FILTER_WORKERS + i))
     networks:
       - testing_net
     volumes:
@@ -150,6 +166,7 @@ cat >> "$OUT_PATH" <<YAML
       - CONFIG_PATH=/config/config.ini
       - LOG_LEVEL=INFO
       - AGGREGATOR_ID=${i}
+      - ELECTION_PORT=$((ELECTION_PORT_AGGREGATORS + i))
     networks:
       - testing_net
     volumes:
@@ -176,6 +193,7 @@ cat >> "$OUT_PATH" <<YAML
       - LOG_LEVEL=INFO
       - CONFIG_PATH=/config/config.ini
       - JOINER_ROUTER_INDEX=${i}
+      - ELECTION_PORT=$((ELECTION_PORT_JOINER_ROUTERS + i))
     networks:
       - testing_net
     volumes:
@@ -202,6 +220,7 @@ cat >> "$OUT_PATH" <<YAML
       - LOG_LEVEL=INFO
       - JOINER_WORKER_INDEX=${i}
       - CONFIG_PATH=/config/config.ini
+      - ELECTION_PORT=$((ELECTION_PORT_JOINER_WORKERS + i))
     networks:
       - testing_net
     volumes:
@@ -232,6 +251,7 @@ cat >> "$OUT_PATH" <<YAML
       - LOG_LEVEL=INFO
       - INPUT_QUEUE=results.controller.in
       - OUTPUT_QUEUES=${FINISHER_QUEUES}
+      - ELECTION_PORT=$((ELECTION_PORT_RESULTS_ROUTERS + i))
     networks:
       - testing_net
     volumes:
@@ -258,6 +278,7 @@ cat >> "$OUT_PATH" <<YAML
       - STRATEGY_MODE=append_only  # Can be 'append_only' or 'incremental'
       - INPUT_QUEUE=finisher_input_queue_${i}
       - OUTPUT_QUEUE=orchestrator_results_queue
+      - ELECTION_PORT=$((ELECTION_PORT_RESULTS_WORKERS + i))
     networks:
       - testing_net
     volumes:
