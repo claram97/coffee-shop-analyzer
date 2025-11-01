@@ -11,6 +11,7 @@ from middleware.middleware_client import (
     MessageMiddlewareQueue,
 )
 from protocol2.envelope_pb2 import Envelope, MessageType
+from leader_election import ElectionCoordinator
 
 logging.basicConfig(
     level=logging.INFO,
@@ -143,6 +144,10 @@ def main():
         if not output_queues:
             raise ValueError("OUTPUT_QUEUES environment variable must be configured with at least one queue.")
 
+        # Results routers don't have explicit index but we can derive from hostname
+        router_index = hash(os.getenv("HOSTNAME", "results-router")) % 100
+        election_port = int(os.getenv("ELECTION_PORT", 9700 + router_index))
+
         logger.info("--- ResultsRouter Service ---")
         logger.info(f"Connecting to RabbitMQ at: {rabbitmq_host}")
         logger.info(f"Consuming from input queue: {input_queue}")
@@ -155,6 +160,39 @@ def main():
             name: MessageMiddlewareQueue(host=rabbitmq_host, queue_name=name)
             for name in output_queues
         }
+
+        # Initialize election coordinator (listener only for now)
+        election_coordinator = None
+        try:
+            from app_config.config_loader import Config
+            cfg_path = os.getenv("CONFIG_PATH", "/config/config.ini")
+            cfg = Config(cfg_path)
+            total_results_routers = cfg.routers.results
+            
+            # Build list of all results router nodes in the cluster
+            all_nodes = [
+                (i, f"results-router-{i}", 9700 + i)
+                for i in range(total_results_routers)
+            ]
+            
+            logger.info(f"Initializing election coordinator for results-router-{router_index} on port {election_port}")
+            logger.info(f"Cluster nodes: {all_nodes}")
+            
+            election_coordinator = ElectionCoordinator(
+                my_id=router_index,
+                my_host="0.0.0.0",
+                my_port=election_port,
+                all_nodes=all_nodes,
+                on_leader_change=None,
+                election_timeout=5.0
+            )
+            
+            election_coordinator.start()
+            logger.info(f"Election listener started on port {election_port}")
+            
+        except Exception as e:
+            logger.error(f"Failed to initialize election coordinator: {e}", exc_info=True)
+            election_coordinator = None
 
         # Setup and run the router
         router = ResultsRouter(input_client=input_client, output_clients=output_clients)
@@ -174,6 +212,12 @@ def main():
         shutdown_event.wait()
         
         # Perform cleanup
+        logger.info("Cleaning up resources...")
+        
+        if election_coordinator:
+            logger.info("Stopping election coordinator...")
+            election_coordinator.stop()
+        
         router.stop()
         logger.info("Shutdown complete.")
 
