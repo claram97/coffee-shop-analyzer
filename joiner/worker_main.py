@@ -18,6 +18,7 @@ from middleware.middleware_client import (
     MessageMiddlewareQueue,
 )
 from protocol2.table_data_pb2 import TableName
+from leader_election import ElectionCoordinator
 
 
 def force_bind(host: str, exchange: str, queue: str, routing_key: str):
@@ -139,6 +140,7 @@ def main(argv=None):
     log.info("Usando config: %s", cfg_path)
 
     shard = int(os.environ["JOINER_WORKER_INDEX"], 0)
+    election_port = int(os.environ.get("ELECTION_PORT", 9400 + shard))
 
     try:
         cfg = Config(cfg_path)
@@ -157,6 +159,36 @@ def main(argv=None):
 
     host = cfg.broker.host
     out_q_name = cfg.names.results_controller_queue
+
+    # Initialize election coordinator (listener only for now)
+    election_coordinator = None
+    try:
+        total_joiner_workers = cfg.workers.joiners
+        
+        # Build list of all joiner worker nodes in the cluster
+        all_nodes = [
+            (i, f"joiner-worker-{i}", 9400 + i)
+            for i in range(total_joiner_workers)
+        ]
+        
+        log.info(f"Initializing election coordinator for joiner-worker-{shard} on port {election_port}")
+        log.info(f"Cluster nodes: {all_nodes}")
+        
+        election_coordinator = ElectionCoordinator(
+            my_id=shard,
+            my_host="0.0.0.0",
+            my_port=election_port,
+            all_nodes=all_nodes,
+            on_leader_change=None,
+            election_timeout=5.0
+        )
+        
+        election_coordinator.start()
+        log.info(f"Election listener started on port {election_port}")
+        
+    except Exception as e:
+        log.error(f"Failed to initialize election coordinator: {e}", exc_info=True)
+        election_coordinator = None
 
     in_mw = build_inputs_for_shard(cfg, host, shard)
 
@@ -190,6 +222,11 @@ def main(argv=None):
         log.info("Stop event received, starting shutdown process.")
     finally:
         log.info("Cleaning up resources...")
+        
+        if election_coordinator:
+            log.info("Stopping election coordinator...")
+            election_coordinator.stop()
+        
         worker.shutdown()
         log.info("Graceful shutdown complete. Exiting.")
 
