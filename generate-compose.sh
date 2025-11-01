@@ -37,7 +37,6 @@ eval "$(python3 ./app_config/config_subscript.py -c "$INI_PATH" election_ports -
 : "${RABBIT_VHOST:=/}"
 
 # Election port defaults (100 ports per component group)
-: "${ELECTION_PORT_ORCHESTRATOR:=9000}"
 : "${ELECTION_PORT_FILTER_WORKERS:=9100}"
 : "${ELECTION_PORT_FILTER_ROUTERS:=9200}"
 : "${ELECTION_PORT_AGGREGATORS:=9300}"
@@ -89,7 +88,6 @@ services:
       - ORCH_PROCESS_COUNT=${ORCHESTRATORS}
       - ORCH_PROCESS_QUEUE_SIZE=256
       - ORCH_PROCESS_QUEUE_TIMEOUT=10.0
-      - ELECTION_PORT=${ELECTION_PORT_ORCHESTRATOR}
     networks:
       - testing_net
     volumes:
