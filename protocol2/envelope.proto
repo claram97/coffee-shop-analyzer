@@ -6,6 +6,10 @@ import "databatch.proto";
 import "eof_message.proto";
 import "table_data.proto";
 import "query_result.proto";
+import "election_message.proto";
+import "election_answer_message.proto";
+import "coordinator_message.proto";
+
 
 enum MessageType {
   UNKNOWN = 0;
@@ -13,6 +17,9 @@ enum MessageType {
   EOF_MESSAGE = 2;
   TABLE_DATA = 3;
   QUERY_RESULT = 4;
+  ELECTION = 5;
+  ELECTION_ANSWER = 6;
+  COORDINATOR = 7;
 }
 
 
@@ -24,5 +31,8 @@ message Envelope {
     EOFMessage eof = 3;
     TableData table = 4;
     QueryResult query_result = 5;
+    Election election = 6;
+    ElectionAnswer election_answeer = 7;
+    Coordinator coordinator = 8;
   }
 }

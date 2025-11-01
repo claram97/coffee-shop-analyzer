@@ -22,8 +22,8 @@ _runtime_version.ValidateProtobufRuntimeVersion(
 _sym_db = _symbol_database.Default()
 
 
-import databatch_pb2 as databatch__pb2
-import table_data_pb2 as table__data__pb2
+from . import databatch_pb2 as databatch__pb2
+from . import table_data_pb2 as table__data__pb2
 
 
 DESCRIPTOR = _descriptor_pool.Default().AddSerializedFile(b'\n\x12query_result.proto\x12\x08protocol\x1a\x0f\x64\x61tabatch.proto\x1a\x10table_data.proto\"t\n\x0bQueryResult\x12!\n\x08query_id\x18\x01 \x01(\x0e\x32\x0f.protocol.Query\x12%\n\x06schema\x18\x02 \x01(\x0b\x32\x15.protocol.TableSchema\x12\x1b\n\x04rows\x18\x03 \x03(\x0b\x32\r.protocol.Rowb\x06proto3')

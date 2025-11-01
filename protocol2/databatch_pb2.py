@@ -22,7 +22,7 @@ _runtime_version.ValidateProtobufRuntimeVersion(
 _sym_db = _symbol_database.Default()
 
 
-import table_data_pb2 as table__data__pb2
+from . import table_data_pb2 as table__data__pb2
 
 
 DESCRIPTOR = _descriptor_pool.Default().AddSerializedFile(b'\n\x0f\x64\x61tabatch.proto\x12\x08protocol\x1a\x10table_data.proto\"7\n\tShardInfo\x12\x14\n\x0ctotal_shards\x18\x01 \x01(\x05\x12\x14\n\x0cshard_number\x18\x02 \x01(\x05\"\xa8\x01\n\tDataBatch\x12\"\n\tquery_ids\x18\x01 \x03(\x0e\x32\x0f.protocol.Query\x12\x14\n\x0c\x66ilter_steps\x18\x02 \x01(\x05\x12(\n\x0bshards_info\x18\x03 \x03(\x0b\x32\x13.protocol.ShardInfo\x12\x11\n\tclient_id\x18\x04 \x01(\t\x12$\n\x07payload\x18\x05 \x01(\x0b\x32\x13.protocol.TableData*\'\n\x05Query\x12\x06\n\x02Q1\x10\x00\x12\x06\n\x02Q2\x10\x01\x12\x06\n\x02Q3\x10\x02\x12\x06\n\x02Q4\x10\x03\x62\x06proto3')
