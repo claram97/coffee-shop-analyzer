@@ -10,6 +10,7 @@ import threading
 from worker import FilterWorker
 
 from app_config.config_loader import Config
+from leader_election import ElectionCoordinator
 
 
 def main():
@@ -19,6 +20,11 @@ def main():
         format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
     )
     logger = logging.getLogger("filter-worker-main")
+
+    # Filter workers don't have an explicit index, but we can use a unique identifier
+    # Since they're in a pool, we'll use the hostname or generate an ID
+    worker_id = hash(os.getenv("HOSTNAME", "filter-worker")) % 100
+    election_port = int(os.getenv("ELECTION_PORT", 9100 + worker_id))
 
     stop_event = threading.Event()
 
@@ -43,6 +49,36 @@ def main():
     logger.info(f"Input queue (filters pool): {filters_pool_queue}")
     logger.info(f"Output exchange (router input): {router_exchange}")
 
+    # Initialize election coordinator (listener only for now)
+    election_coordinator = None
+    try:
+        total_filter_workers = cfg.workers.filters
+        
+        # Build list of all filter worker nodes in the cluster
+        all_nodes = [
+            (i, f"filter-worker-{i}", 9100 + i)
+            for i in range(total_filter_workers)
+        ]
+        
+        logger.info(f"Initializing election coordinator for filter-worker-{worker_id} on port {election_port}")
+        logger.info(f"Cluster nodes: {all_nodes}")
+        
+        election_coordinator = ElectionCoordinator(
+            my_id=worker_id,
+            my_host="0.0.0.0",
+            my_port=election_port,
+            all_nodes=all_nodes,
+            on_leader_change=None,
+            election_timeout=5.0
+        )
+        
+        election_coordinator.start()
+        logger.info(f"Election listener started on port {election_port}")
+        
+    except Exception as e:
+        logger.error(f"Failed to initialize election coordinator: {e}", exc_info=True)
+        election_coordinator = None
+
     worker = None
     try:
         worker = FilterWorker(
@@ -62,6 +98,11 @@ def main():
         logger.error(f"An unexpected error occurred: {e}", exc_info=True)
     finally:
         logger.info("Cleaning up resources...")
+        
+        if election_coordinator:
+            logger.info("Stopping election coordinator...")
+            election_coordinator.stop()
+        
         if worker:
             worker.shutdown()
         logger.info("Graceful shutdown complete. Exiting.")
