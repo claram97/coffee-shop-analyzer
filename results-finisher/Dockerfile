@@ -18,6 +18,10 @@ COPY protocol2 /protocol2
 # Copy middleware implementation
 COPY middleware ./middleware
 
+COPY app_config /app_config
+
+COPY leader_election /leader_election
+
 # Copy all the Python scripts and other files from results-finisher
 COPY results-finisher .
 
