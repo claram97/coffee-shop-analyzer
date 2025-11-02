@@ -1,6 +1,9 @@
 from __future__ import annotations
 
+import base64
+import json
 import logging
+import os
 import threading
 from typing import Callable, Dict, List, Optional, Set, Tuple
 
@@ -47,6 +50,7 @@ class JoinerWorker:
         logger=None,
         shard_index: int = 0,
         out_factory: Optional[Callable[[], MessageMiddleware]] = None,
+        persistence_dir: str = "/tmp/joiner_state",
     ):
         self._in = in_mw
         self._out = out_results_mw
@@ -63,16 +67,178 @@ class JoinerWorker:
         self._shard = int(shard_index)
         self._router_replicas = router_replicas
 
-        self._pending_eofs: Dict[tuple[TableName, str], Set[int]] = {}
-        self._part_counter: Dict[tuple[TableName, str], int] = {}
+        self._pending_eofs: Dict[tuple[TableName, str], Set[str]] = {}
 
         self._stop_event = stop_event
         self._is_shutting_down = False
 
-        # Store unacked messages: key=(table, client_id) -> list of (channel, delivery_tag)
-        self._unacked_light_tables: Dict[tuple[TableName, str], list] = {}
-        self._unacked_eofs: Dict[tuple[TableName, str], list] = {}
-        self._ack_lock = threading.Lock()
+        # Persistence
+        self._persistence_dir = persistence_dir
+        self._persistence_lock = threading.Lock()
+        os.makedirs(self._persistence_dir, exist_ok=True)
+
+        # Restore state from disk
+        self._restore_state()
+
+    def _get_pending_batch_path(self, table_name: TableName, client_id: str, batch_number: int) -> str:
+        """Get file path for a pending batch."""
+        return os.path.join(
+            self._persistence_dir, f"pending_{table_name}_{client_id}_{batch_number}.bin"
+        )
+
+    def _get_light_table_path(self, table_name: TableName, client_id: str) -> str:
+        """Get file path for light table cache."""
+        return os.path.join(
+            self._persistence_dir, f"light_{table_name}_{client_id}.json"
+        )
+
+    def _get_eof_path(self, table_name: TableName, client_id: str) -> str:
+        """Get file path for EOF metadata."""
+        return os.path.join(self._persistence_dir, f"eof_{table_name}_{client_id}.json")
+
+    def _save_pending_batch(self, table_name: TableName, client_id: str, batch_number: int, raw_data: bytes) -> None:
+        """Save a pending batch to disk."""
+        path = self._get_pending_batch_path(table_name, client_id, batch_number)
+        temp_path = path + ".tmp"
+        try:
+            with open(temp_path, "wb") as f:
+                f.write(raw_data)
+            os.rename(temp_path, path)
+            self._log.info("Saved pending batch: table=%s client=%s batch=%d size=%d bytes",
+                          table_name, client_id, batch_number, len(raw_data))
+        except Exception as e:
+            self._log.error("Failed to save pending batch: %s", e)
+            if os.path.exists(temp_path):
+                os.remove(temp_path)
+            raise
+
+    def _delete_pending_batch(self, table_name: TableName, client_id: str, batch_number: int) -> None:
+        """Delete a pending batch from disk."""
+        path = self._get_pending_batch_path(table_name, client_id, batch_number)
+        try:
+            if os.path.exists(path):
+                os.remove(path)
+                self._log.debug("Deleted pending batch: table=%s client=%s batch=%d",
+                              table_name, client_id, batch_number)
+        except Exception as e:
+            self._log.warning("Failed to delete pending batch: %s", e)
+
+    def _load_pending_batches(self, table_name: TableName, client_id: str) -> List[Tuple[int, bytes]]:
+        """Load all pending batches for a table/client from disk."""
+        pattern = f"pending_{table_name}_{client_id}_"
+        batches = []
+        try:
+            for filename in os.listdir(self._persistence_dir):
+                if filename.startswith(pattern) and filename.endswith(".bin"):
+                    batch_num_str = filename[len(pattern):-4]
+                    batch_number = int(batch_num_str)
+                    path = os.path.join(self._persistence_dir, filename)
+                    with open(path, "rb") as f:
+                        raw_data = f.read()
+                    batches.append((batch_number, raw_data))
+            return sorted(batches)  # Process in order
+        except Exception as e:
+            self._log.error("Failed to load pending batches: %s", e)
+            return []
+
+    def _persist_light_table(self, table_name: TableName, client_id: str, data: dict) -> None:
+        """Persist light table cache to disk."""
+        path = self._get_light_table_path(table_name, client_id)
+        temp_path = path + ".tmp"
+        try:
+            with open(temp_path, "w") as f:
+                json.dump(data, f)
+            os.rename(temp_path, path)
+            self._log.debug("Persisted light table: table=%s client=%s", table_name, client_id)
+        except Exception as e:
+            self._log.error("Failed to persist light table: %s", e)
+            if os.path.exists(temp_path):
+                os.remove(temp_path)
+            raise
+
+    def _persist_eof(self, table_name: TableName, client_id: str, traces: set) -> None:
+        """Persist EOF metadata to disk."""
+        path = self._get_eof_path(table_name, client_id)
+        temp_path = path + ".tmp"
+        try:
+            with open(temp_path, "w") as f:
+                json.dump({
+                    "traces": list(traces),
+                    "complete": len(traces) >= self._router_replicas,
+                }, f)
+            os.rename(temp_path, path)
+            self._log.debug("Persisted EOF: table=%s client=%s traces=%d",
+                          table_name, client_id, len(traces))
+        except Exception as e:
+            self._log.error("Failed to persist EOF: %s", e)
+            if os.path.exists(temp_path):
+                os.remove(temp_path)
+            raise
+
+    def _restore_state(self) -> None:
+        """Restore state from disk on startup."""
+        if not os.path.exists(self._persistence_dir):
+            return
+
+        self._log.info("Restoring state from disk: %s", self._persistence_dir)
+
+        # Restore light tables
+        for filename in os.listdir(self._persistence_dir):
+            if filename.startswith("light_") and filename.endswith(".json"):
+                try:
+                    parts = filename[6:-5].split("_", 1)
+                    table_name = int(parts[0])
+                    client_id = parts[1]
+
+                    path = os.path.join(self._persistence_dir, filename)
+                    with open(path, "r") as f:
+                        data = json.load(f)
+
+                    if table_name == TableName.MENU_ITEMS:
+                        self._cache_menu[client_id] = data
+                        self._log.info("Restored menu cache for client=%s", client_id)
+                    elif table_name == TableName.STORES:
+                        self._cache_stores[client_id] = data
+                        self._log.info("Restored stores cache for client=%s", client_id)
+                except Exception as e:
+                    self._log.warning("Failed to restore light table from %s: %s", filename, e)
+
+            elif filename.startswith("eof_") and filename.endswith(".json"):
+                try:
+                    parts = filename[4:-5].split("_", 1)
+                    table_name = int(parts[0])
+                    client_id = parts[1]
+
+                    path = os.path.join(self._persistence_dir, filename)
+                    with open(path, "r") as f:
+                        eof_data = json.load(f)
+
+                    key = (table_name, client_id)
+                    traces = eof_data.get("traces", [])
+
+                    if traces:
+                        self._pending_eofs[key] = set(traces)
+                        self._log.info("Restored partial EOF for table=%s client=%s traces=%d",
+                                      table_name, client_id, len(traces))
+
+                    if eof_data.get("complete", False):
+                        self._eof.add(key)
+                        self._log.info("Restored complete EOF for table=%s client=%s",
+                                      table_name, client_id)
+                except Exception as e:
+                    self._log.warning("Failed to restore EOF from %s: %s", filename, e)
+
+        self._log.info("State restoration complete")
+
+    def _cleanup_persisted_client(self, client_id: str) -> None:
+        """Clean up all persisted data for a client."""
+        for filename in os.listdir(self._persistence_dir):
+            if client_id in filename:
+                try:
+                    os.remove(os.path.join(self._persistence_dir, filename))
+                    self._log.debug("Cleaned up: %s", filename)
+                except Exception as e:
+                    self._log.warning("Failed to cleanup %s: %s", filename, e)
 
     def _log_db(self, where: str, db: DataBatch):
         try:
@@ -143,7 +309,7 @@ class JoinerWorker:
         elif table_name == TableName.TRANSACTIONS:
             need = [TableName.MENU_ITEMS, TableName.STORES]
         elif table_name == TableName.USERS:
-            need = [TableName.TRANSACTIONS]
+            need = []  # USERS doesn't need to wait for any table
         else:
             need = []
         return all((t, client_id) in self._eof for t in need)
@@ -161,7 +327,7 @@ class JoinerWorker:
     def _on_raw_menu(
         self, raw: bytes, channel=None, delivery_tag=None, redelivered=False
     ):
-        """Process menu_items messages. Returns True to ACK immediately, False to delay."""
+        """Process menu_items messages. Returns True to ACK immediately."""
         envelope = Envelope()
         envelope.ParseFromString(raw)
         if envelope.type == MessageType.EOF_MESSAGE:
@@ -169,6 +335,7 @@ class JoinerWorker:
             return self._on_table_eof(
                 eof.table,
                 eof.client_id,
+                eof.trace,
                 channel,
                 delivery_tag,
                 redelivered,
@@ -180,9 +347,6 @@ class JoinerWorker:
             return True
         cid = db.client_id
         bn = db.payload.batch_number
-
-        if redelivered:
-            self._log.info("REDELIVERED: menu_items batch_number=%s cid=%s", bn, cid)
 
         self._log.debug(
             "IN: menu_items batch_number=%s shard=%s shards_info=%s queries=%s cid=%s",
@@ -193,25 +357,22 @@ class JoinerWorker:
             cid,
         )
 
-        # Store channel and delivery_tag for later ACK
-        key = (TableName.MENU_ITEMS, cid)
-        with self._ack_lock:
-            if channel is not None and delivery_tag is not None:
-                if key not in self._unacked_light_tables:
-                    self._unacked_light_tables[key] = []
-                self._unacked_light_tables[key].append((channel, delivery_tag))
-
         idx = index_by_attr(db.payload, "item_id")
-        self._cache_menu[(cid)] = idx
+        self._cache_menu[cid] = idx
         self._log.debug("Cache menu_items idx_size=%d", len(idx))
+        
+        # Persist to disk
+        try:
+            self._persist_light_table(TableName.MENU_ITEMS, cid, idx)
+        except Exception as e:
+            self._log.error("Failed to persist menu cache: %s", e)
 
-        # Delay ACK until complete lifecycle
-        return False
+        return True  # ACK immediately
 
     def _on_raw_stores(
         self, raw: bytes, channel=None, delivery_tag=None, redelivered=False
     ):
-        """Process stores messages. Returns True to ACK immediately, False to delay."""
+        """Process stores messages. Returns True to ACK immediately."""
         envelope = Envelope()
         envelope.ParseFromString(raw)
         if envelope.type == MessageType.EOF_MESSAGE:
@@ -219,6 +380,7 @@ class JoinerWorker:
             return self._on_table_eof(
                 eof.table,
                 eof.client_id,
+                eof.trace,
                 channel,
                 delivery_tag,
                 redelivered,
@@ -230,9 +392,6 @@ class JoinerWorker:
             return True
         cid = db.client_id
         bn = db.payload.batch_number
-
-        if redelivered:
-            self._log.info("REDELIVERED: stores batch_number=%s cid=%s", bn, cid)
 
         self._log.debug(
             "IN: stores batch_number=%s shard=%s shards_info=%s queries=%s cid=%s",
@@ -243,25 +402,22 @@ class JoinerWorker:
             cid,
         )
 
-        # Store channel and delivery_tag for later ACK
-        key = (TableName.STORES, cid)
-        with self._ack_lock:
-            if channel is not None and delivery_tag is not None:
-                if key not in self._unacked_light_tables:
-                    self._unacked_light_tables[key] = []
-                self._unacked_light_tables[key].append((channel, delivery_tag))
-
         idx = index_by_attr(db.payload, "store_id")
-        self._cache_stores[(cid)] = idx
+        self._cache_stores[cid] = idx
         self._log.debug("Cache stores idx_size=%d", len(idx))
 
-        # Delay ACK until complete lifecycle
-        return False
+        # Persist to disk
+        try:
+            self._persist_light_table(TableName.STORES, cid, idx)
+        except Exception as e:
+            self._log.error("Failed to persist stores cache: %s", e)
+
+        return True  # ACK immediately
 
     def _on_raw_ti(
         self, raw: bytes, channel=None, delivery_tag=None, redelivered=False
     ):
-        """Process transaction_items messages. Returns True to ACK immediately, False to delay."""
+        """Process transaction_items messages. Returns True to ACK immediately."""
         envelope = Envelope()
         envelope.ParseFromString(raw)
         if envelope.type == MessageType.EOF_MESSAGE:
@@ -269,6 +425,7 @@ class JoinerWorker:
             return self._on_table_eof(
                 eof.table,
                 eof.client_id,
+                eof.trace,
                 channel,
                 delivery_tag,
                 redelivered,
@@ -279,8 +436,8 @@ class JoinerWorker:
             self._log.warning("Unknown message type: %s. Skipping.", envelope.type)
             return True
         cid = db.client_id
-
         bn = db.payload.batch_number
+
         self._log.debug(
             "IN: transaction_items batch_number=%s shard=%s shards_info=%s queries=%s cid=%s",
             bn,
@@ -291,20 +448,31 @@ class JoinerWorker:
         )
 
         if not self._phase_ready(TableName.TRANSACTION_ITEMS, cid):
-            self._log.debug("TI fase NO lista → requeue (cid=%s)", cid)
-            self._requeue(TableName.TRANSACTION_ITEMS, raw)
-            return True  # Don't ACK, will be redelivered
+            self._log.info("TI fase NO lista, saving batch to disk (cid=%s batch=%d)", cid, bn)
+            try:
+                self._save_pending_batch(TableName.TRANSACTION_ITEMS, cid, bn, raw)
+            except Exception as e:
+                self._log.error("Failed to save pending batch: %s", e)
+            return True  # ACK immediately - batch saved to disk
+
+        return self._process_ti_batch(raw, cid, bn)
+
+    def _process_ti_batch(self, raw: bytes, cid: str, bn: int) -> bool:
+        """Process a transaction_items batch (either fresh or from disk)."""
+        envelope = Envelope()
+        envelope.ParseFromString(raw)
+        db: DataBatch = envelope.data_batch
 
         if Query.Q2 not in db.query_ids:
             self._log.debug("TI sin Q2 → passthrough")
             self._safe_send(raw)
+            self._delete_pending_batch(TableName.TRANSACTION_ITEMS, cid, bn)
             return True
 
         menu_idx: Optional[dict[str, dict[str, str]]] = self._cache_menu.get((cid))
         if not menu_idx:
-            self._log.warning("Menu cache no disponible aún; requeue batch TI")
-            self._requeue(TableName.TRANSACTION_ITEMS, raw)
-            return True
+            self._log.warning("Menu cache no disponible; cannot process batch=%d", bn)
+            return False
 
         out_cols = ["transaction_id", "name", "quantity", "subtotal", "created_at"]
         out_schema = TableSchema(columns=out_cols)
@@ -337,12 +505,13 @@ class JoinerWorker:
         self._log.debug("Q2 preserving TI batch_status=%d", db.payload.status)
         raw = Envelope(type=MessageType.DATA_BATCH, data_batch=db).SerializeToString()
         self._safe_send(raw)
+        self._delete_pending_batch(TableName.TRANSACTION_ITEMS, cid, bn)
         return True
 
     def _on_raw_tx(
         self, raw: bytes, channel=None, delivery_tag=None, redelivered=False
     ):
-        """Process transactions messages. Returns True to ACK immediately, False to delay."""
+        """Process transactions messages. Returns True to ACK immediately."""
         envelope = Envelope()
         envelope.ParseFromString(raw)
         if envelope.type == MessageType.EOF_MESSAGE:
@@ -350,6 +519,7 @@ class JoinerWorker:
             return self._on_table_eof(
                 eof.table,
                 eof.client_id,
+                eof.trace,
                 channel,
                 delivery_tag,
                 redelivered,
@@ -360,8 +530,8 @@ class JoinerWorker:
             self._log.warning("Unknown message type: %s. Skipping.", envelope.type)
             return True
         cid = db.client_id
-
         bn = db.payload.batch_number
+
         self._log.debug(
             "IN: transactions batch_number=%s shard=%s shards_info=%s queries=%s cid=%s",
             bn,
@@ -372,20 +542,31 @@ class JoinerWorker:
         )
 
         if not self._phase_ready(TableName.TRANSACTIONS, cid):
-            self._log.debug("TX fase NO lista → requeue (cid=%s)", cid)
-            self._requeue(TableName.TRANSACTIONS, raw)
-            return True
+            self._log.info("TX fase NO lista, saving batch to disk (cid=%s batch=%d)", cid, bn)
+            try:
+                self._save_pending_batch(TableName.TRANSACTIONS, cid, bn, raw)
+            except Exception as e:
+                self._log.error("Failed to save pending batch: %s", e)
+            return True  # ACK immediately
+
+        return self._process_tx_batch(raw, cid, bn)
+
+    def _process_tx_batch(self, raw: bytes, cid: str, bn: int) -> bool:
+        """Process a transactions batch (either fresh or from disk)."""
+        envelope = Envelope()
+        envelope.ParseFromString(raw)
+        db: DataBatch = envelope.data_batch
 
         if Query.Q1 in db.query_ids:
             self._log.debug("TX Q1 passthrough")
             self._safe_send(raw)
+            self._delete_pending_batch(TableName.TRANSACTIONS, cid, bn)
             return True
 
         stores_idx: Optional[Dict[str, Row]] = self._cache_stores.get((cid))
         if not stores_idx:
-            self._log.warning("Stores cache no disponible aún; drop batch TX")
-            self._requeue(TableName.TRANSACTIONS, raw)
-            return True
+            self._log.warning("Stores cache no disponible; cannot process batch=%d", bn)
+            return False
 
         out_cols = [
             "transaction_id",
@@ -430,12 +611,13 @@ class JoinerWorker:
         )
         raw = Envelope(type=MessageType.DATA_BATCH, data_batch=db).SerializeToString()
         self._safe_send(raw)
+        self._delete_pending_batch(TableName.TRANSACTIONS, cid, bn)
         return True
 
     def _on_raw_users(
         self, raw: bytes, channel=None, delivery_tag=None, redelivered=False
     ):
-        """Process users messages. Returns True to ACK immediately, False to delay."""
+        """Process users messages. Returns True to ACK immediately."""
         envelope = Envelope()
         envelope.ParseFromString(raw)
         if envelope.type == MessageType.EOF_MESSAGE:
@@ -443,6 +625,7 @@ class JoinerWorker:
             return self._on_table_eof(
                 eof.table,
                 eof.client_id,
+                eof.trace,
                 channel,
                 delivery_tag,
                 redelivered,
@@ -453,8 +636,8 @@ class JoinerWorker:
             self._log.warning("Unknown message type: %s. Skipping.", envelope.type)
             return True
         cid = db.client_id
-
         bn = db.payload.batch_number
+
         self._log.debug(
             "IN: users batch_number=%s shard=%s shards_info=%s queries=%s cid=%s",
             bn,
@@ -465,56 +648,68 @@ class JoinerWorker:
         )
 
         if not self._phase_ready(TableName.USERS, cid):
-            self._log.warning("U fase NO lista → requeue (cid=%s)", cid)
-            self._requeue(TableName.USERS, raw)
-            return True
+            self._log.info("USERS fase NO lista, saving batch to disk (cid=%s batch=%d)", cid, bn)
+            try:
+                self._save_pending_batch(TableName.USERS, cid, bn, raw)
+            except Exception as e:
+                self._log.error("Failed to save pending batch: %s", e)
+            return True  # ACK immediately
 
+        return self._process_users_batch(raw, cid, bn)
+
+    def _process_users_batch(self, raw: bytes, cid: str, bn: int) -> bool:
+        """Process a users batch (either fresh or from disk)."""
         self._safe_send(raw)
+        self._delete_pending_batch(TableName.USERS, cid, bn)
         return True
 
     def _on_table_eof(
         self,
         table_name: TableName,
         client_id: str,
+        trace: str,
         channel=None,
         delivery_tag=None,
         redelivered=False,
     ) -> bool:
-        """
-        Handle EOF message. Returns True to ACK immediately, False to delay.
-        For EOFs: delay ACK until all EOFs are received and joins are complete.
-        """
+        """Handle EOF message. Returns True to ACK immediately."""
         key = (table_name, client_id)
         tname = NAME_TO_STR.get(table_name, f"#{table_name}")
 
         if redelivered:
-            log.info("TABLE_EOF REDELIVERED: table=%s cid=%s", tname, client_id)
+            log.info("TABLE_EOF REDELIVERED: table=%s cid=%s trace=%s", tname, client_id, trace)
         else:
-            log.debug("TABLE_EOF received: table=%s cid=%s", tname, client_id)
-
-        # Store channel and delivery_tag for later ACK
-        with self._ack_lock:
-            if channel is not None and delivery_tag is not None:
-                if key not in self._unacked_eofs:
-                    self._unacked_eofs[key] = []
-                self._unacked_eofs[key].append((channel, delivery_tag))
+            log.debug("TABLE_EOF received: table=%s cid=%s trace=%s", tname, client_id, trace)
 
         recvd = self._pending_eofs.setdefault(key, set())
-        next_idx = self._part_counter.get(key, 0) + 1
-        self._part_counter[key] = next_idx
-        recvd.add(next_idx)
+        
+        # Track by trace to make it idempotent
+        if trace in recvd:
+            log.info("EOF from trace=%s already received for table=%s cid=%s",
+                    trace, tname, client_id)
+            return True
+        
+        recvd.add(trace)
+
+        # Persist EOF state
+        try:
+            self._persist_eof(table_name, client_id, recvd)
+        except Exception as e:
+            self._log.error("Failed to persist EOF: %s", e)
+            recvd.discard(trace)
+            return False
 
         log.info(
-            "EOF recv table=%s cid=%s progress=%d/%d",
+            "EOF recv table=%s cid=%s trace=%s progress=%d/%d",
             tname,
             client_id,
+            trace,
             len(recvd),
             self._router_replicas,
         )
 
         if len(recvd) >= self._router_replicas:
             self._pending_eofs.pop(key, None)
-            self._part_counter.pop(key, None)
             self._eof.add(key)
             self._log.info(
                 "EOF marcado table_id=%s cid=%s; eof_set=%s",
@@ -523,18 +718,51 @@ class JoinerWorker:
                 sorted(self._eof),
             )
 
-            # Check if we can ACK light tables and all EOFs for this client
-            self._maybe_ack_complete_lifecycle(client_id)
+            # Process pending batches that are now ready
+            self._process_pending_batches_for_phase(client_id)
 
-        # Delay ACK until complete lifecycle
-        return False
+            # Check if we can cleanup for this client
+            self._maybe_cleanup_complete_lifecycle(client_id)
 
-    def _maybe_ack_complete_lifecycle(self, client_id: str) -> None:
-        """
-        Check if all EOFs have been received for a client and all joins are complete.
-        If so, ACK the light tables and all EOFs for that client.
-        """
-        # Check if we have all required EOFs for this client
+        return True  # ACK immediately
+
+    def _process_pending_batches_for_phase(self, client_id: str) -> None:
+        """Process pending batches that may now be ready after EOF received."""
+        # Check TRANSACTION_ITEMS (needs MENU_ITEMS and STORES)
+        if self._phase_ready(TableName.TRANSACTION_ITEMS, client_id):
+            batches = self._load_pending_batches(TableName.TRANSACTION_ITEMS, client_id)
+            if batches:
+                self._log.info("Processing %d pending TI batches for client=%s", len(batches), client_id)
+                for bn, raw_data in batches:
+                    try:
+                        self._process_ti_batch(raw_data, client_id, bn)
+                    except Exception as e:
+                        self._log.error("Failed to process pending TI batch=%d: %s", bn, e)
+
+        # Check TRANSACTIONS (needs MENU_ITEMS and STORES)
+        if self._phase_ready(TableName.TRANSACTIONS, client_id):
+            batches = self._load_pending_batches(TableName.TRANSACTIONS, client_id)
+            if batches:
+                self._log.info("Processing %d pending TX batches for client=%s", len(batches), client_id)
+                for bn, raw_data in batches:
+                    try:
+                        self._process_tx_batch(raw_data, client_id, bn)
+                    except Exception as e:
+                        self._log.error("Failed to process pending TX batch=%d: %s", bn, e)
+
+        # Check USERS (needs TRANSACTIONS)
+        if self._phase_ready(TableName.USERS, client_id):
+            batches = self._load_pending_batches(TableName.USERS, client_id)
+            if batches:
+                self._log.info("Processing %d pending USERS batches for client=%s", len(batches), client_id)
+                for bn, raw_data in batches:
+                    try:
+                        self._process_users_batch(raw_data, client_id, bn)
+                    except Exception as e:
+                        self._log.error("Failed to process pending USERS batch=%d: %s", bn, e)
+
+    def _maybe_cleanup_complete_lifecycle(self, client_id: str) -> None:
+        """Check if all EOFs received and no pending batches, then cleanup."""
         required_eofs = [
             (TableName.MENU_ITEMS, client_id),
             (TableName.STORES, client_id),
@@ -543,25 +771,32 @@ class JoinerWorker:
             (TableName.USERS, client_id),
         ]
 
-        if all(eof_key in self._eof for eof_key in required_eofs):
-            self._log.info(
-                "Complete lifecycle detected for client_id=%s, ACKing light tables and EOFs",
-                client_id,
-            )
+        if not all(eof_key in self._eof for eof_key in required_eofs):
+            return
 
-            # ACK light tables
-            self._ack_light_table((TableName.MENU_ITEMS, client_id))
-            self._ack_light_table((TableName.STORES, client_id))
+        # Check if there are pending batches
+        has_pending = False
+        for table_name in [TableName.TRANSACTION_ITEMS, TableName.TRANSACTIONS, TableName.USERS]:
+            batches = self._load_pending_batches(table_name, client_id)
+            if batches:
+                has_pending = True
+                self._log.info("Client %s has %d pending batches for table=%s",
+                             client_id, len(batches), table_name)
 
-            # ACK all EOFs
-            for eof_key in required_eofs:
-                self._ack_eof(eof_key)
+        if has_pending:
+            self._log.info("Client %s has pending batches, not cleaning up yet", client_id)
+            return
 
-            # Clean up caches for this client
-            self._cache_menu.pop(client_id, None)
-            self._cache_stores.pop(client_id, None)
+        self._log.info("Complete lifecycle for client=%s, cleaning up", client_id)
 
-    def _ack_light_table(self, key: tuple[TableName, str]) -> None:
+        # Cleanup caches
+        self._cache_menu.pop(client_id, None)
+        self._cache_stores.pop(client_id, None)
+
+        # Cleanup persisted data
+        self._cleanup_persisted_client(client_id)
+
+    def _requeue(self, table_name: TableName, raw: bytes):
         """Acknowledge all light table messages for this key."""
         with self._ack_lock:
             ack_list = self._unacked_light_tables.get(key, [])
