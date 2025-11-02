@@ -569,16 +569,28 @@ class JoinerWorker:
                 self._log.info(
                     "ACKing %d light table messages: key=%s", len(ack_list), key
                 )
+                acked_count = 0
+                failed_count = 0
                 for channel, delivery_tag in ack_list:
                     try:
+                        if not channel:
+                            self._log.warning("Channel is None for light table key=%s delivery_tag=%s - skipping ACK", key, delivery_tag)
+                            failed_count += 1
+                            continue
                         channel.basic_ack(delivery_tag=delivery_tag)
+                        acked_count += 1
                     except Exception as e:
-                        self._log.error(
-                            "Failed to ACK light table key=%s delivery_tag=%s: %s",
+                        self._log.warning(
+                            "Failed to ACK light table key=%s delivery_tag=%s (will be redelivered): %s",
                             key,
                             delivery_tag,
                             e,
                         )
+                        failed_count += 1
+                
+                if failed_count > 0:
+                    self._log.warning("Failed to ACK %d/%d light table messages for key=%s - they will be redelivered", failed_count, len(ack_list), key)
+                
                 del self._unacked_light_tables[key]
 
     def _ack_eof(self, key: tuple[TableName, str]) -> None:
@@ -587,16 +599,28 @@ class JoinerWorker:
             ack_list = self._unacked_eofs.get(key, [])
             if ack_list:
                 self._log.info("ACKing %d EOF messages: key=%s", len(ack_list), key)
+                acked_count = 0
+                failed_count = 0
                 for channel, delivery_tag in ack_list:
                     try:
+                        if not channel:
+                            self._log.warning("Channel is None for EOF key=%s delivery_tag=%s - skipping ACK", key, delivery_tag)
+                            failed_count += 1
+                            continue
                         channel.basic_ack(delivery_tag=delivery_tag)
+                        acked_count += 1
                     except Exception as e:
-                        self._log.error(
-                            "Failed to ACK EOF key=%s delivery_tag=%s: %s",
+                        self._log.warning(
+                            "Failed to ACK EOF key=%s delivery_tag=%s (will be redelivered): %s",
                             key,
                             delivery_tag,
                             e,
                         )
+                        failed_count += 1
+                
+                if failed_count > 0:
+                    self._log.warning("Failed to ACK %d/%d EOF messages for key=%s - they will be redelivered", failed_count, len(ack_list), key)
+                
                 del self._unacked_eofs[key]
 
     def _safe_send(self, raw: bytes):

@@ -339,11 +339,23 @@ class JoinerRouter:
             ack_list = self._unacked_eofs.get(key, [])
             if ack_list:
                 log.info("ACKing %d TABLE_EOF messages: key=%s", len(ack_list), key)
+                acked_count = 0
+                failed_count = 0
                 for channel, delivery_tag in ack_list:
                     try:
+                        if not channel:
+                            log.warning("Channel is None for EOF key=%s delivery_tag=%s - skipping ACK", key, delivery_tag)
+                            failed_count += 1
+                            continue
                         channel.basic_ack(delivery_tag=delivery_tag)
+                        acked_count += 1
                     except Exception as e:
-                        log.error("Failed to ACK EOF key=%s delivery_tag=%s: %s", key, delivery_tag, e)
+                        log.warning("Failed to ACK EOF key=%s delivery_tag=%s (will be redelivered): %s", key, delivery_tag, e)
+                        failed_count += 1
+                
+                if failed_count > 0:
+                    log.warning("Failed to ACK %d/%d EOF messages for key=%s - they will be redelivered", failed_count, len(ack_list), key)
+                
                 del self._unacked_eofs[key]
 
     def _rk(self, cfg: TableRouteCfg, shard: int) -> str:
