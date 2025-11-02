@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import json
 import logging
+import os
 import random
 import threading
 import time
@@ -101,6 +103,8 @@ class FilterRouter:
         policy: QueryPolicyResolver,
         table_cfg: TableConfig,
         orch_workers: int,
+        persistence_dir: str = "/tmp/filter_router_state",
+        router_id: int = 0,
     ):
         self._p = producer
         self._pol = policy
@@ -112,6 +116,104 @@ class FilterRouter:
         # Store unacked EOF messages: key=(table, client_id) -> list of (channel, delivery_tag)
         self._unacked_eofs: Dict[tuple[TableName, str], list] = {}
         self._eof_ack_lock = threading.Lock()
+        
+        # Persistence
+        self._persistence_dir = persistence_dir
+        self._router_id = router_id
+        self._persistence_lock = threading.Lock()
+        os.makedirs(self._persistence_dir, exist_ok=True)
+        
+        # Restore state from disk
+        self._restore_state()
+
+    def _get_pending_batches_path(self) -> str:
+        """Get file path for pending batches state."""
+        return os.path.join(self._persistence_dir, f"router_{self._router_id}_pending_batches.json")
+    
+    def _get_pending_eof_path(self) -> str:
+        """Get file path for pending EOF state."""
+        return os.path.join(self._persistence_dir, f"router_{self._router_id}_pending_eof.json")
+    
+    def _persist_pending_batches(self) -> None:
+        """Persist pending batches counter to disk."""
+        with self._persistence_lock:
+            path = self._get_pending_batches_path()
+            temp_path = path + ".tmp"
+            try:
+                # Convert tuple keys to strings for JSON serialization
+                data = {f"{table}:{client}": count for (table, client), count in self._pending_batches.items()}
+                with open(temp_path, "w") as f:
+                    json.dump(data, f)
+                os.rename(temp_path, path)
+                self._log.debug("Persisted pending batches: %d entries", len(data))
+            except Exception as e:
+                self._log.error("Failed to persist pending batches: %s", e)
+                if os.path.exists(temp_path):
+                    os.remove(temp_path)
+                raise
+    
+    def _persist_pending_eof(self) -> None:
+        """Persist pending EOF state to disk."""
+        with self._persistence_lock:
+            path = self._get_pending_eof_path()
+            temp_path = path + ".tmp"
+            try:
+                # Convert to serializable format
+                data = {}
+                for (table, client), (count, eof) in self._pending_eof.items():
+                    key = f"{table}:{client}"
+                    data[key] = {
+                        "count": count,
+                        "table": eof.table,
+                        "client_id": eof.client_id,
+                    }
+                with open(temp_path, "w") as f:
+                    json.dump(data, f)
+                os.rename(temp_path, path)
+                self._log.debug("Persisted pending EOF: %d entries", len(data))
+            except Exception as e:
+                self._log.error("Failed to persist pending EOF: %s", e)
+                if os.path.exists(temp_path):
+                    os.remove(temp_path)
+                raise
+    
+    def _restore_state(self) -> None:
+        """Restore state from disk on startup."""
+        if not os.path.exists(self._persistence_dir):
+            return
+        
+        self._log.info("Restoring filter router state from disk: %s", self._persistence_dir)
+        
+        # Restore pending batches
+        batches_path = self._get_pending_batches_path()
+        if os.path.exists(batches_path):
+            try:
+                with open(batches_path, "r") as f:
+                    data = json.load(f)
+                for key_str, count in data.items():
+                    table_str, client = key_str.split(":", 1)
+                    table = int(table_str)
+                    self._pending_batches[(table, client)] = count
+                self._log.info("Restored %d pending batch counters", len(self._pending_batches))
+            except Exception as e:
+                self._log.warning("Failed to restore pending batches: %s", e)
+        
+        # Restore pending EOFs
+        eof_path = self._get_pending_eof_path()
+        if os.path.exists(eof_path):
+            try:
+                with open(eof_path, "r") as f:
+                    data = json.load(f)
+                for key_str, eof_data in data.items():
+                    table_str, client = key_str.split(":", 1)
+                    table = int(table_str)
+                    eof = EOFMessage(table=eof_data["table"], client_id=eof_data["client_id"])
+                    self._pending_eof[(table, client)] = (eof_data["count"], eof)
+                self._log.info("Restored %d pending EOF entries", len(self._pending_eof))
+            except Exception as e:
+                self._log.warning("Failed to restore pending EOFs: %s", e)
+        
+        self._log.info("Filter router state restoration complete")
 
     def process_message(self, msg: Envelope, channel=None, delivery_tag=None, redelivered=False) -> tuple[bool, bool]:
         """
@@ -155,6 +257,11 @@ class FilterRouter:
         if mask == 0:
             self._pending_batches[key] += 1
             self._log.debug("pending++ %s -> %d", key, self._pending_batches[key])
+            try:
+                self._persist_pending_batches()
+            except Exception as e:
+                self._log.error("Failed to persist pending batches after increment: %s", e)
+                raise
 
         total_steps = self._pol.total_steps(table, queries)
         next_step = first_zero_bit(mask, total_steps)
@@ -177,10 +284,8 @@ class FilterRouter:
                 table,
                 bin(new_mask),
             )
-            try:
-                self._p.send_to_filters_pool(batch)
-            except Exception as e:
-                self._log.error("send_to_filters_pool failed: %s", e)
+            # Send to filters - if this fails, raise exception to trigger NACK
+            self._p.send_to_filters_pool(batch)
             return
 
         dup_count = int(self._pol.get_duplication_count(queries) or 1)
@@ -189,33 +294,47 @@ class FilterRouter:
                 "Fan-out x%d table=%s queries=%s", dup_count, table, queries
             )
 
+            # Process fan-out - increment pending counter for each duplicate
+            self._pending_batches[key] += dup_count
             try:
-                self._pending_batches[key] += dup_count
-                for i in range(dup_count):
-                    new_queries = self._pol.get_new_batch_queries(
-                        table, queries, copy_number=i
-                    ) or list(queries)
-                    b = DataBatch()
-                    b.CopyFrom(batch)
-                    b.query_ids.clear()
-                    b.query_ids.extend(new_queries)
-                    self._handle_data(b)
+                self._persist_pending_batches()
             except Exception as e:
-                self._log.error("requeue_to_router failed: %s", e)
+                self._log.error("Failed to persist pending batches after fanout increment: %s", e)
+                raise
+            
+            for i in range(dup_count):
+                new_queries = self._pol.get_new_batch_queries(
+                    table, queries, copy_number=i
+                ) or list(queries)
+                b = DataBatch()
+                b.CopyFrom(batch)
+                b.query_ids.clear()
+                b.query_ids.extend(new_queries)
+                self._handle_data(b)  # If this fails, exception propagates and triggers NACK
 
+            # Decrement for the parent message
             self._pending_batches[key] = max(0, self._pending_batches[key] - 1)
             self._log.debug(
                 "pending-- (fanout parent) %s -> %d", key, self._pending_batches[key]
             )
+            try:
+                self._persist_pending_batches()
+            except Exception as e:
+                self._log.error("Failed to persist pending batches after fanout decrement: %s", e)
+                raise
             return
 
-        try:
-            self._send_to_some_aggregator(batch)
-        except Exception as e:
-            self._log.error("send_sharded failed: %s", e)
-
+        # Send to aggregator - if this fails, raise exception to trigger NACK
+        self._send_to_some_aggregator(batch)
+        
+        # Only decrement pending counter if send succeeded
         self._pending_batches[key] = max(0, self._pending_batches[key] - 1)
         self._log.debug("pending-- %s -> %d", key, self._pending_batches[key])
+        try:
+            self._persist_pending_batches()
+        except Exception as e:
+            self._log.error("Failed to persist pending batches after decrement: %s", e)
+            raise
         self._maybe_flush_pending_eof(key)
 
     def _send_to_some_aggregator(self, batch: DataBatch) -> None:
@@ -249,6 +368,11 @@ class FilterRouter:
         
         (recvd, _eof) = self._pending_eof.get(key, (0, eof))
         self._pending_eof[key] = (recvd + 1, eof)
+        try:
+            self._persist_pending_eof()
+        except Exception as e:
+            self._log.error("Failed to persist pending EOF: %s", e)
+            return (True, False)  # Still delay ACK but log error
         self._maybe_flush_pending_eof(key)
         
         # Return: should_ack=True (eventually), ack_now=False (delay until processed)
@@ -279,6 +403,13 @@ class FilterRouter:
         
         self._pending_eof.pop(key, None)
         self._pending_batches.pop(key, None)
+        
+        # Clean up persisted state for this key
+        try:
+            self._persist_pending_batches()
+            self._persist_pending_eof()
+        except Exception as e:
+            self._log.warning("Failed to clean up persisted state after EOF: %s", e)
     
     def _ack_eof(self, key: tuple[TableName, str]) -> None:
         """Acknowledge all EOF messages for this key after they have been fully processed."""
@@ -501,6 +632,8 @@ class RouterServer:
         table_cfg: TableConfig,
         stop_event: threading.Event,
         orch_workers: int,
+        persistence_dir: str = "/tmp/filter_router_state",
+        router_id: int = 0,
     ):
         self._producer = producer
         self._mw_in = router_in
@@ -509,6 +642,8 @@ class RouterServer:
             policy=policy,
             table_cfg=table_cfg,
             orch_workers=orch_workers,
+            persistence_dir=persistence_dir,
+            router_id=router_id,
         )
         self._log = logging.getLogger("filter-router-server")
         self._stop_event = stop_event
