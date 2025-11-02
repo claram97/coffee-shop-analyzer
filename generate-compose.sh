@@ -100,10 +100,12 @@ cat >> "$OUT_PATH" <<YAML
       - LOG_LEVEL=INFO
       - CONFIG_PATH=/config/config.ini
       - FILTER_ROUTER_INDEX=${i}
+      - FILTER_ROUTER_STATE_DIR=/tmp/filter_router_state
     networks:
       - testing_net
     volumes:
       - $INI_PATH:/config/config.ini:ro
+      - ./filter_router_state/router-${i}:/tmp/filter_router_state
     depends_on:
       rabbitmq:
         condition: service_healthy
@@ -206,6 +208,7 @@ cat >> "$OUT_PATH" <<YAML
       - testing_net
     volumes:
       - $INI_PATH:/config/config.ini:ro
+      - ./joiner_state/worker-${i}:/tmp/joiner_state
     depends_on:
       rabbitmq:
         condition: service_healthy
