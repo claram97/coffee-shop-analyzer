@@ -16,6 +16,7 @@ from common.network import MessageHandler, ResponseHandler, ServerManager
 from middleware.middleware_client import MessageMiddlewareExchange
 from protocol2.envelope_pb2 import Envelope, MessageType
 from protocol2.eof_message_pb2 import EOFMessage as PB_EOFMessage
+from protocol2.clean_up_message_pb2 import CleanUpMessage
 from protocol.constants import Opcodes
 from protocol.messages import Finished
 
@@ -108,6 +109,26 @@ class Orchestrator:
         with self._client_states_lock:
             if client_id and client_id in self._client_states:
                 self._client_states.pop(client_id)
+        
+        if client_id:
+            logging.info("action: client_disconnected_early | client_id: %s | sending_cleanup", client_id)
+            try:
+                cleanup_msg = CleanUpMessage()
+                cleanup_msg.client_id = client_id
+                
+                env = Envelope()
+                env.type = MessageType.CLEAN_UP_MESSAGE
+                env.clean_up.CopyFrom(cleanup_msg)
+                
+                payload = env.SerializeToString()
+                
+                for pid in range(self._num_routers):
+                    rk = self._fr_rk_fmt.format(pid=pid)
+                    self._publisher_for_rk(rk).send(payload)
+                
+                logging.info("action: client_cleanup_sent | result: success | client_id: %s | routers: %d", client_id, self._num_routers)
+            except Exception as e:
+                logging.error("action: client_cleanup_send | result: fail | client_id: %s | error: %s", client_id, e)
 
     def _publisher_for_rk(self, rk: str) -> MessageMiddlewareExchange:
         pub = self._publishers.get(rk)
