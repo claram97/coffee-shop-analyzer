@@ -11,6 +11,7 @@ from middleware.middleware_client import MessageMiddleware
 from protocol2.databatch_pb2 import DataBatch, Query
 from protocol2.envelope_pb2 import Envelope, MessageType
 from protocol2.eof_message_pb2 import EOFMessage
+from protocol2.clean_up_message_pb2 import CleanUpMessage
 from protocol2.table_data_pb2 import Row, TableData, TableName, TableSchema
 from protocol2.table_data_utils import iterate_rows_as_dicts
 
@@ -239,6 +240,61 @@ class JoinerWorker:
                     self._log.debug("Cleaned up: %s", filename)
                 except Exception as e:
                     self._log.warning("Failed to cleanup %s: %s", filename, e)
+    
+    def _handle_cleanup(self, cleanup_msg: CleanUpMessage, raw: bytes, channel=None, delivery_tag=None) -> bool:
+        """
+        Handle cleanup message. Cleans all state for the client, forwards to results router, then ACKs.
+        Returns False to delay ACK until after forwarding.
+        """
+        client_id = cleanup_msg.client_id
+        self._log.info("CLEANUP received for client_id=%s, shard=%d", client_id, self._shard)
+        
+        # Clean in-memory state
+        with self._lock:
+            # Clean EOF state
+            eof_keys_to_remove = [(table, cid) for (table, cid) in self._eof if cid == client_id]
+            for key in eof_keys_to_remove:
+                self._eof.discard(key)
+                self._log.debug("Removed EOF state for key=%s", key)
+            
+            # Clean pending EOFs
+            pending_eof_keys = [key for key in self._pending_eofs.keys() if key[1] == client_id]
+            for key in pending_eof_keys:
+                self._pending_eofs.pop(key, None)
+                self._log.debug("Removed pending EOF state for key=%s", key)
+            
+            # Clean light table caches
+            if client_id in self._cache_menu:
+                del self._cache_menu[client_id]
+                self._log.debug("Removed menu cache for client_id=%s", client_id)
+            if client_id in self._cache_stores:
+                del self._cache_stores[client_id]
+                self._log.debug("Removed stores cache for client_id=%s", client_id)
+        
+        # Clean persisted state (EOFs, light tables, pending batches)
+        self._cleanup_persisted_client(client_id)
+        
+        self._log.info("Cleaned up all state for client_id=%s, forwarding to results router", client_id)
+        
+        # Forward cleanup to results router
+        try:
+            with self._out_lock:
+                self._out.send(raw)
+            self._log.info("Forwarded CLEANUP to results router for client_id=%s", client_id)
+        except Exception as e:
+            self._log.error("Failed to forward cleanup for client_id=%s: %s", client_id, e)
+            # Don't ACK if forwarding failed
+            return False
+        
+        # ACK after successful cleanup and forwarding
+        if channel is not None and delivery_tag is not None:
+            try:
+                channel.basic_ack(delivery_tag=delivery_tag)
+                self._log.info("ACKed CLEANUP message for client_id=%s", client_id)
+            except Exception as e:
+                self._log.error("Failed to ACK cleanup for client_id=%s: %s", client_id, e)
+        
+        return False  # Already acked manually
 
     def _log_db(self, where: str, db: DataBatch):
         try:
@@ -340,6 +396,8 @@ class JoinerWorker:
                 delivery_tag,
                 redelivered,
             )
+        if envelope.type == MessageType.CLEAN_UP_MESSAGE:
+            return self._handle_cleanup(envelope.clean_up, raw, channel, delivery_tag)
         if envelope.type == MessageType.DATA_BATCH:
             db: DataBatch = envelope.data_batch
         else:
@@ -385,6 +443,8 @@ class JoinerWorker:
                 delivery_tag,
                 redelivered,
             )
+        if envelope.type == MessageType.CLEAN_UP_MESSAGE:
+            return self._handle_cleanup(envelope.clean_up, raw, channel, delivery_tag)
         if envelope.type == MessageType.DATA_BATCH:
             db: DataBatch = envelope.data_batch
         else:
@@ -430,6 +490,8 @@ class JoinerWorker:
                 delivery_tag,
                 redelivered,
             )
+        if envelope.type == MessageType.CLEAN_UP_MESSAGE:
+            return self._handle_cleanup(envelope.clean_up, raw, channel, delivery_tag)
         if envelope.type == MessageType.DATA_BATCH:
             db: DataBatch = envelope.data_batch
         else:
@@ -524,6 +586,8 @@ class JoinerWorker:
                 delivery_tag,
                 redelivered,
             )
+        if envelope.type == MessageType.CLEAN_UP_MESSAGE:
+            return self._handle_cleanup(envelope.clean_up, raw, channel, delivery_tag)
         if envelope.type == MessageType.DATA_BATCH:
             db: DataBatch = envelope.data_batch
         else:
@@ -630,6 +694,8 @@ class JoinerWorker:
                 delivery_tag,
                 redelivered,
             )
+        if envelope.type == MessageType.CLEAN_UP_MESSAGE:
+            return self._handle_cleanup(envelope.clean_up, raw, channel, delivery_tag)
         if envelope.type == MessageType.DATA_BATCH:
             db: DataBatch = envelope.data_batch
         else:
