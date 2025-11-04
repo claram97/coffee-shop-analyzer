@@ -15,6 +15,7 @@ from middleware.middleware_client import (
 from protocol2.databatch_pb2 import DataBatch, Query, ShardInfo
 from protocol2.envelope_pb2 import Envelope, MessageType
 from protocol2.eof_message_pb2 import EOFMessage
+from protocol2.clean_up_message_pb2 import CleanUpMessage
 from protocol2.table_data_pb2 import Row, TableName
 from protocol2.table_data_utils import iterate_rows_as_dicts
 
@@ -151,6 +152,9 @@ class JoinerRouter:
         # Store unacked EOF messages: key=(table, client_id) -> list of (channel, delivery_tag)
         self._unacked_eofs: Dict[tuple[TableName, str], list] = {}
         self._eof_ack_lock = threading.Lock()
+        # Store unacked cleanup messages: client_id -> list of (channel, delivery_tag)
+        self._unacked_cleanups: Dict[str, list] = {}
+        self._cleanup_ack_lock = threading.Lock()
         log.info(
             "JoinerRouter init: tables=%s",
             {
@@ -188,6 +192,9 @@ class JoinerRouter:
 
         if envelope.type == MessageType.EOF_MESSAGE:
             return self._handle_partition_eof_like(envelope.eof, raw, channel, delivery_tag, redelivered)
+        
+        if envelope.type == MessageType.CLEAN_UP_MESSAGE:
+            return self._handle_cleanup(envelope.clean_up, raw, channel, delivery_tag)
 
         if envelope.type == MessageType.DATA_BATCH:
             db = envelope.data_batch
@@ -357,6 +364,80 @@ class JoinerRouter:
                     log.warning("Failed to ACK %d/%d EOF messages for key=%s - they will be redelivered", failed_count, len(ack_list), key)
                 
                 del self._unacked_eofs[key]
+    
+    def _handle_cleanup(self, cleanup_msg: CleanUpMessage, raw: bytes, channel=None, delivery_tag=None) -> bool:
+        """
+        Handle cleanup message. Returns whether to ACK immediately.
+        - Returns False: Delay ACK until cleanup state is removed and message is broadcasted (if router_id == 0)
+        """
+        client_id = cleanup_msg.client_id
+        log.info("CLEANUP received for client_id=%s, router_id=%d", client_id, self._router_id)
+        
+        # Store the channel and delivery_tag for later acking
+        with self._cleanup_ack_lock:
+            if channel is not None and delivery_tag is not None:
+                if client_id not in self._unacked_cleanups:
+                    self._unacked_cleanups[client_id] = []
+                self._unacked_cleanups[client_id].append((channel, delivery_tag))
+        
+        # Clean up all state related to this client
+        self._cleanup_client_state(client_id)
+        
+        # Only router 0 broadcasts cleanup to joiner workers
+        if self._router_id == 0:
+            # Broadcast cleanup to all joiner workers (across all tables)
+            # Use menu_items table config as representative
+            menu_items_cfg = self._cfg.get(TableName.MENU_ITEMS)
+            if menu_items_cfg:
+                log.info("Router 0: Broadcasting CLEANUP to %d joiner workers for client_id=%s", 
+                        menu_items_cfg.joiner_shards, client_id)
+                self._broadcast(menu_items_cfg, raw, shards=menu_items_cfg.joiner_shards)
+            else:
+                log.error("No menu_items config found, cannot broadcast cleanup")
+        else:
+            log.info("Router %d: Skipping broadcast, only cleaning local state for client_id=%s", 
+                    self._router_id, client_id)
+        
+        # ACK the cleanup message after processing
+        self._ack_cleanup(client_id)
+        
+        # Return False to delay ACK (already acked manually above)
+        return False
+    
+    def _cleanup_client_state(self, client_id: str) -> None:
+        """Clean up all state related to a client."""
+        log.info("Cleaning up state for client_id=%s", client_id)
+        
+        # Clean pending EOFs for this client (all tables)
+        keys_to_remove = [key for key in self._pending_eofs.keys() if key[1] == client_id]
+        for key in keys_to_remove:
+            self._pending_eofs.pop(key, None)
+            self._part_counter.pop(key, None)
+            log.debug("Removed pending EOF state for key=%s", key)
+        
+        # Clean unacked EOFs for this client
+        with self._eof_ack_lock:
+            eof_keys_to_remove = [key for key in self._unacked_eofs.keys() if key[1] == client_id]
+            for key in eof_keys_to_remove:
+                self._unacked_eofs.pop(key, None)
+                log.debug("Removed unacked EOF state for key=%s", key)
+        
+        log.info("Cleaned up state for client_id=%s: %d EOF entries, %d unacked EOF entries", 
+                client_id, len(keys_to_remove), len(eof_keys_to_remove))
+    
+    def _ack_cleanup(self, client_id: str) -> None:
+        """Acknowledge all cleanup messages for this client after processing."""
+        with self._cleanup_ack_lock:
+            ack_list = self._unacked_cleanups.get(client_id, [])
+            if ack_list:
+                log.info("ACKing %d CLEANUP messages: client_id=%s", len(ack_list), client_id)
+                for channel, delivery_tag in ack_list:
+                    try:
+                        channel.basic_ack(delivery_tag=delivery_tag)
+                    except Exception as e:
+                        log.error("Failed to ACK cleanup client_id=%s delivery_tag=%s: %s", 
+                                client_id, delivery_tag, e)
+                del self._unacked_cleanups[client_id]
 
     def _rk(self, cfg: TableRouteCfg, shard: int) -> str:
         return cfg.key_pattern.format(shard=int(shard))
