@@ -15,6 +15,7 @@ from middleware.middleware_client import (MessageMiddlewareExchange,
 from protocol2.databatch_pb2 import DataBatch, Query
 from protocol2.envelope_pb2 import Envelope, MessageType
 from protocol2.eof_message_pb2 import EOFMessage
+from protocol2.clean_up_message_pb2 import CleanUpMessage
 from protocol2.table_data_pb2 import (Row, TableData, TableName, TableSchema,
                                       TableStatus)
 from protocol2.table_data_utils import iterate_rows_as_dicts
@@ -116,6 +117,9 @@ class FilterRouter:
         # Store unacked EOF messages: key=(table, client_id) -> list of (channel, delivery_tag)
         self._unacked_eofs: Dict[tuple[TableName, str], list] = {}
         self._eof_ack_lock = threading.Lock()
+        # Track clients marked for cleanup: client_id -> set of tables with pending batches
+        self._clients_to_cleanup: Dict[str, set[TableName]] = {}
+        self._cleanup_lock = threading.Lock()
         
         # Persistence
         self._persistence_dir = persistence_dir
@@ -133,6 +137,10 @@ class FilterRouter:
     def _get_pending_eof_path(self) -> str:
         """Get file path for pending EOF state."""
         return os.path.join(self._persistence_dir, f"router_{self._router_id}_pending_eof.json")
+    
+    def _get_clients_to_cleanup_path(self) -> str:
+        """Get file path for clients marked for cleanup."""
+        return os.path.join(self._persistence_dir, f"router_{self._router_id}_clients_to_cleanup.json")
     
     def _persist_pending_batches(self) -> None:
         """Persist pending batches counter to disk."""
@@ -177,6 +185,24 @@ class FilterRouter:
                     os.remove(temp_path)
                 raise
     
+    def _persist_clients_to_cleanup(self) -> None:
+        """Persist clients marked for cleanup to disk."""
+        with self._persistence_lock:
+            path = self._get_clients_to_cleanup_path()
+            temp_path = path + ".tmp"
+            try:
+                # Convert sets to lists for JSON serialization
+                data = {client_id: list(tables) for client_id, tables in self._clients_to_cleanup.items()}
+                with open(temp_path, "w") as f:
+                    json.dump(data, f)
+                os.rename(temp_path, path)
+                self._log.debug("Persisted clients_to_cleanup: %d entries", len(data))
+            except Exception as e:
+                self._log.error("Failed to persist clients_to_cleanup: %s", e)
+                if os.path.exists(temp_path):
+                    os.remove(temp_path)
+                raise
+    
     def _restore_state(self) -> None:
         """Restore state from disk on startup."""
         if not os.path.exists(self._persistence_dir):
@@ -213,6 +239,21 @@ class FilterRouter:
             except Exception as e:
                 self._log.warning("Failed to restore pending EOFs: %s", e)
         
+        # Restore clients to cleanup
+        cleanup_path = self._get_clients_to_cleanup_path()
+        if os.path.exists(cleanup_path):
+            try:
+                with open(cleanup_path, "r") as f:
+                    data = json.load(f)
+                for client_id, tables_list in data.items():
+                    self._clients_to_cleanup[client_id] = set(tables_list)
+                self._log.info("Restored %d clients marked for cleanup", len(self._clients_to_cleanup))
+                # Process any pending cleanups after restoration
+                for client_id in list(self._clients_to_cleanup.keys()):
+                    self._check_and_cleanup_client(client_id)
+            except Exception as e:
+                self._log.warning("Failed to restore clients_to_cleanup: %s", e)
+        
         self._log.info("Filter router state restoration complete")
 
     def process_message(self, msg: Envelope, channel=None, delivery_tag=None, redelivered=False) -> tuple[bool, bool]:
@@ -223,11 +264,20 @@ class FilterRouter:
         """
         self._log.debug("Processing message: %r, message type: %r, redelivered: %r", msg, msg.type, redelivered)
         if msg.type == MessageType.DATA_BATCH:
+            should_discard = self._should_discard_batch(msg.data_batch)
+            if should_discard:
+                self._log.info("Discarding batch for client marked for cleanup: client_id=%s table=%s", 
+                              msg.data_batch.client_id, msg.data_batch.payload.name)
+                self._handle_discarded_batch(msg.data_batch)
+                return (True, True)
             self._handle_data(msg.data_batch)
             return (True, True)  # Regular messages: ack immediately
         elif msg.type == MessageType.EOF_MESSAGE:
             # EOF messages: delay ack until fully processed
             return self._handle_table_eof(msg.eof, channel, delivery_tag, redelivered)
+        elif msg.type == MessageType.CLEAN_UP_MESSAGE:
+            # Cleanup messages: delay ack until cleanup state is persisted
+            return self._handle_cleanup(msg.clean_up, channel, delivery_tag)
         else:
             self._log.warning("Unknown message type: %r", type(msg))
             return (True, True)
@@ -322,6 +372,7 @@ class FilterRouter:
             except Exception as e:
                 self._log.error("Failed to persist pending batches after fanout decrement: %s", e)
                 raise
+            self._check_and_cleanup_client(cid)
             return
 
         # Send to aggregator - if this fails, raise exception to trigger NACK
@@ -336,6 +387,7 @@ class FilterRouter:
             self._log.error("Failed to persist pending batches after decrement: %s", e)
             raise
         self._maybe_flush_pending_eof(key)
+        self._check_and_cleanup_client(cid)
 
     def _send_to_some_aggregator(self, batch: DataBatch) -> None:
         if batch.payload.name in [TableName.MENU_ITEMS, TableName.STORES]:
@@ -423,6 +475,133 @@ class FilterRouter:
                     except Exception as e:
                         self._log.error("Failed to ACK EOF key=%s delivery_tag=%s: %s", key, delivery_tag, e)
                 del self._unacked_eofs[key]
+    
+    def _should_discard_batch(self, batch: DataBatch) -> bool:
+        """Check if batch should be discarded because client is marked for cleanup."""
+        client_id = batch.client_id
+        with self._cleanup_lock:
+            return client_id in self._clients_to_cleanup
+    
+    def _handle_discarded_batch(self, batch: DataBatch) -> None:
+        """Handle a batch that is being discarded due to client cleanup."""
+        client_id = batch.client_id
+        table = batch.payload.name
+        key = (client_id, table)
+        
+        # Decrement pending counter for discarded batch
+        self._pending_batches[key] = max(0, self._pending_batches[key] - 1)
+        self._log.debug("pending-- (discarded) %s -> %d", key, self._pending_batches[key])
+        
+        try:
+            self._persist_pending_batches()
+        except Exception as e:
+            self._log.error("Failed to persist pending batches after discard: %s", e)
+        
+        # Check if we can now complete the cleanup
+        self._check_and_cleanup_client(client_id)
+    
+    def _handle_cleanup(self, cleanup_msg: CleanUpMessage, channel=None, delivery_tag=None) -> tuple[bool, bool]:
+        """Handle client cleanup message. Returns (should_ack, ack_now)."""
+        client_id = cleanup_msg.client_id
+        self._log.info("CLEANUP received for client_id=%s", client_id)
+        
+        with self._cleanup_lock:
+            # Find all tables with pending batches for this client
+            tables_with_pending = set()
+            for (table, cid) in self._pending_batches.keys():
+                if cid == client_id and self._pending_batches[(table, cid)] > 0:
+                    tables_with_pending.add(table)
+            
+            if tables_with_pending:
+                self._log.info("Client %s has pending batches in tables: %s", client_id, tables_with_pending)
+                self._clients_to_cleanup[client_id] = tables_with_pending
+            else:
+                self._log.info("Client %s has no pending batches, cleaning immediately", client_id)
+                self._clients_to_cleanup[client_id] = set()
+        
+        # Persist the cleanup state
+        try:
+            self._persist_clients_to_cleanup()
+        except Exception as e:
+            self._log.error("Failed to persist cleanup state for client %s: %s", client_id, e)
+            # Don't ack if we can't persist
+            return (True, False)
+        
+        # Forward cleanup to a random aggregator (aggregator is stateless and will broadcast)
+        try:
+            self._p.send_cleanup_to_aggregator(client_id)
+        except Exception as e:
+            self._log.error(
+                "send_cleanup_to_aggregator failed client_id=%s: %s",
+                client_id,
+                e,
+            )
+            # Don't ack if forwarding failed
+            return (True, False)
+        
+        # If no pending batches, clean immediately
+        self._check_and_cleanup_client(client_id)
+        
+        # Ack immediately after successfully forwarding to aggregator
+        if channel is not None and delivery_tag is not None:
+            try:
+                channel.basic_ack(delivery_tag=delivery_tag)
+                self._log.info("ACKed CLEANUP message for client_id=%s", client_id)
+            except Exception as e:
+                self._log.error("Failed to ACK cleanup message for client %s: %s", client_id, e)
+        
+        return (True, True)
+    
+    def _check_and_cleanup_client(self, client_id: str) -> None:
+        """Check if client can be cleaned up and do so if all pending batches are done."""
+        with self._cleanup_lock:
+            if client_id not in self._clients_to_cleanup:
+                return
+            
+            # Check if there are any pending batches for this client
+            has_pending = False
+            keys_to_clean = []
+            for (table, cid) in list(self._pending_batches.keys()):
+                if cid == client_id:
+                    pending_count = self._pending_batches[(table, cid)]
+                    if pending_count > 0:
+                        has_pending = True
+                    else:
+                        keys_to_clean.append((table, cid))
+            
+            if has_pending:
+                self._log.debug("Client %s still has pending batches, cleanup deferred", client_id)
+                return
+            
+            # No pending batches, perform cleanup
+            self._log.info("Cleaning up all state for client_id=%s", client_id)
+            
+            # Clean pending_batches
+            for key in keys_to_clean:
+                self._pending_batches.pop(key, None)
+            
+            # Clean pending_eof
+            eof_keys_to_clean = [(table, cid) for (table, cid) in list(self._pending_eof.keys()) if cid == client_id]
+            for key in eof_keys_to_clean:
+                self._pending_eof.pop(key, None)
+            
+            # Clean unacked EOFs
+            with self._eof_ack_lock:
+                unacked_keys = [(table, cid) for (table, cid) in list(self._unacked_eofs.keys()) if cid == client_id]
+                for key in unacked_keys:
+                    self._unacked_eofs.pop(key, None)
+            
+            # Remove from cleanup list
+            self._clients_to_cleanup.pop(client_id, None)
+            
+            # Persist all changes
+            try:
+                self._persist_pending_batches()
+                self._persist_pending_eof()
+                self._persist_clients_to_cleanup()
+                self._log.info("Successfully cleaned up and persisted state for client_id=%s", client_id)
+            except Exception as e:
+                self._log.error("Failed to persist cleanup for client %s: %s", client_id, e)
 
 
 class ExchangeBusProducer:
@@ -620,6 +799,26 @@ class ExchangeBusProducer:
                 int(partition_id),
                 e,
             )
+    
+    def send_cleanup_to_aggregator(self, client_id: str) -> None:
+        """Send cleanup message to a random aggregator (will forward to joiners)."""
+        try:
+            cleanup = CleanUpMessage(client_id=client_id)
+            env = Envelope(type=MessageType.CLEAN_UP_MESSAGE, clean_up=cleanup)
+            payload = env.SerializeToString()
+            # Use MENU_ITEMS as representative table, partition 0
+            k = self._key_for(TableName.MENU_ITEMS, 0)
+            self._log.info(
+                "publish CLEANUP → aggregator client_id=%s", client_id
+            )
+            self._send_with_retry(k, payload)
+        except Exception as e:
+            self._log.error(
+                "aggregator CLEANUP send failed client_id=%s: %s",
+                client_id,
+                e,
+            )
+            raise
 
 
 class RouterServer:
