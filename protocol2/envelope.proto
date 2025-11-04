@@ -6,6 +6,7 @@ import "databatch.proto";
 import "eof_message.proto";
 import "table_data.proto";
 import "query_result.proto";
+import "clean_up_message.proto";
 
 enum MessageType {
   UNKNOWN = 0;
@@ -13,6 +14,7 @@ enum MessageType {
   EOF_MESSAGE = 2;
   TABLE_DATA = 3;
   QUERY_RESULT = 4;
+  CLEAN_UP_MESSAGE = 5;
 }
 
 
@@ -24,5 +26,6 @@ message Envelope {
     EOFMessage eof = 3;
     TableData table = 4;
     QueryResult query_result = 5;
+    CleanUpMessage clean_up = 6;
   }
 }

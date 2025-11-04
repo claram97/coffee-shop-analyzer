@@ -26,17 +26,18 @@ import databatch_pb2 as databatch__pb2
 import eof_message_pb2 as eof__message__pb2
 import table_data_pb2 as table__data__pb2
 import query_result_pb2 as query__result__pb2
+import clean_up_message_pb2 as clean__up__message__pb2
 
 
-DESCRIPTOR = _descriptor_pool.Default().AddSerializedFile(b'\n\x0e\x65nvelope.proto\x12\x08protocol\x1a\x0f\x64\x61tabatch.proto\x1a\x11\x65of_message.proto\x1a\x10table_data.proto\x1a\x12query_result.proto\"\xdf\x01\n\x08\x45nvelope\x12#\n\x04type\x18\x01 \x01(\x0e\x32\x15.protocol.MessageType\x12)\n\ndata_batch\x18\x02 \x01(\x0b\x32\x13.protocol.DataBatchH\x00\x12#\n\x03\x65of\x18\x03 \x01(\x0b\x32\x14.protocol.EOFMessageH\x00\x12$\n\x05table\x18\x04 \x01(\x0b\x32\x13.protocol.TableDataH\x00\x12-\n\x0cquery_result\x18\x05 \x01(\x0b\x32\x15.protocol.QueryResultH\x00\x42\t\n\x07payload*]\n\x0bMessageType\x12\x0b\n\x07UNKNOWN\x10\x00\x12\x0e\n\nDATA_BATCH\x10\x01\x12\x0f\n\x0b\x45OF_MESSAGE\x10\x02\x12\x0e\n\nTABLE_DATA\x10\x03\x12\x10\n\x0cQUERY_RESULT\x10\x04\x62\x06proto3')
+DESCRIPTOR = _descriptor_pool.Default().AddSerializedFile(b'\n\x0e\x65nvelope.proto\x12\x08protocol\x1a\x0f\x64\x61tabatch.proto\x1a\x11\x65of_message.proto\x1a\x10table_data.proto\x1a\x12query_result.proto\x1a\x16\x63lean_up_message.proto\"\x8d\x02\n\x08\x45nvelope\x12#\n\x04type\x18\x01 \x01(\x0e\x32\x15.protocol.MessageType\x12)\n\ndata_batch\x18\x02 \x01(\x0b\x32\x13.protocol.DataBatchH\x00\x12#\n\x03\x65of\x18\x03 \x01(\x0b\x32\x14.protocol.EOFMessageH\x00\x12$\n\x05table\x18\x04 \x01(\x0b\x32\x13.protocol.TableDataH\x00\x12-\n\x0cquery_result\x18\x05 \x01(\x0b\x32\x15.protocol.QueryResultH\x00\x12,\n\x08\x63lean_up\x18\x06 \x01(\x0b\x32\x18.protocol.CleanUpMessageH\x00\x42\t\n\x07payload*s\n\x0bMessageType\x12\x0b\n\x07UNKNOWN\x10\x00\x12\x0e\n\nDATA_BATCH\x10\x01\x12\x0f\n\x0b\x45OF_MESSAGE\x10\x02\x12\x0e\n\nTABLE_DATA\x10\x03\x12\x10\n\x0cQUERY_RESULT\x10\x04\x12\x14\n\x10\x43LEAN_UP_MESSAGE\x10\x05\x62\x06proto3')
 
 _globals = globals()
 _builder.BuildMessageAndEnumDescriptors(DESCRIPTOR, _globals)
 _builder.BuildTopDescriptorsAndMessages(DESCRIPTOR, 'envelope_pb2', _globals)
 if not _descriptor._USE_C_DESCRIPTORS:
   DESCRIPTOR._loaded_options = None
-  _globals['_MESSAGETYPE']._serialized_start=328
-  _globals['_MESSAGETYPE']._serialized_end=421
-  _globals['_ENVELOPE']._serialized_start=103
-  _globals['_ENVELOPE']._serialized_end=326
+  _globals['_MESSAGETYPE']._serialized_start=398
+  _globals['_MESSAGETYPE']._serialized_end=513
+  _globals['_ENVELOPE']._serialized_start=127
+  _globals['_ENVELOPE']._serialized_end=396
 # @@protoc_insertion_point(module_scope)
