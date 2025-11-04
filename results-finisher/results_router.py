@@ -11,6 +11,7 @@ from middleware.middleware_client import (
     MessageMiddlewareQueue,
 )
 from protocol2.envelope_pb2 import Envelope, MessageType
+from protocol2.clean_up_message_pb2 import CleanUpMessage
 
 logging.basicConfig(
     level=logging.INFO,
@@ -66,10 +67,26 @@ class ResultsRouter:
             return
 
         try:
-            # The primary responsibility is to route DataBatch messages.
             envelope = Envelope()
             envelope.ParseFromString(body)
 
+            # Handle cleanup messages - broadcast to all finishers
+            if envelope.type == MessageType.CLEAN_UP_MESSAGE:
+                cleanup_msg = envelope.clean_up
+                client_id = cleanup_msg.client_id
+                logger.info("Received CLEANUP message for client_id=%s, broadcasting to all finishers", client_id)
+                
+                for queue_name, client in self.output_clients.items():
+                    try:
+                        client.send(body)
+                        logger.debug("Broadcasted CLEANUP to finisher queue: %s", queue_name)
+                    except Exception as e:
+                        logger.error("Failed to broadcast CLEANUP to queue %s: %s", queue_name, e)
+                
+                logger.info("Broadcasted CLEANUP for client_id=%s to %d finishers", client_id, self.finisher_count)
+                return
+
+            # Handle data batch messages - route based on query_id
             if envelope.type != MessageType.DATA_BATCH:
                 logger.warning(
                     "Received envelope with unsupported type %s. Discarding.",
