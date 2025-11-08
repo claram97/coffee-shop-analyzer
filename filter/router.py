@@ -117,6 +117,9 @@ class FilterRouter:
         self._unacked_eofs: Dict[tuple[TableName, str], list] = {}
         self._eof_ack_lock = threading.Lock()
         
+        # Batch deduplication: track received batch numbers per (table, client_id)
+        self._received_batches: Dict[tuple[TableName, str], set[int]] = defaultdict(set)
+        
         # Persistence
         self._persistence_dir = persistence_dir
         self._router_id = router_id
@@ -133,6 +136,10 @@ class FilterRouter:
     def _get_pending_eof_path(self) -> str:
         """Get file path for pending EOF state."""
         return os.path.join(self._persistence_dir, f"router_{self._router_id}_pending_eof.json")
+    
+    def _get_received_batches_path(self) -> str:
+        """Get file path for received batches deduplication state."""
+        return os.path.join(self._persistence_dir, f"router_{self._router_id}_received_batches.json")
     
     def _persist_pending_batches(self) -> None:
         """Persist pending batches counter to disk."""
@@ -177,6 +184,25 @@ class FilterRouter:
                     os.remove(temp_path)
                 raise
     
+    def _persist_received_batches(self) -> None:
+        """Persist received batches for deduplication."""
+        with self._persistence_lock:
+            path = self._get_received_batches_path()
+            temp_path = path + ".tmp"
+            try:
+                # Convert to serializable format
+                data = {f"{table}:{client}": list(batches) 
+                        for (table, client), batches in self._received_batches.items()}
+                with open(temp_path, "w") as f:
+                    json.dump(data, f)
+                os.rename(temp_path, path)
+                self._log.debug("Persisted received batches: %d entries", len(data))
+            except Exception as e:
+                self._log.error("Failed to persist received batches: %s", e)
+                if os.path.exists(temp_path):
+                    os.remove(temp_path)
+                raise
+    
     def _restore_state(self) -> None:
         """Restore state from disk on startup."""
         if not os.path.exists(self._persistence_dir):
@@ -212,6 +238,20 @@ class FilterRouter:
                 self._log.info("Restored %d pending EOF entries", len(self._pending_eof))
             except Exception as e:
                 self._log.warning("Failed to restore pending EOFs: %s", e)
+        
+        # Restore received batches for deduplication
+        received_path = self._get_received_batches_path()
+        if os.path.exists(received_path):
+            try:
+                with open(received_path, "r") as f:
+                    data = json.load(f)
+                for key_str, batch_list in data.items():
+                    table_str, client = key_str.split(":", 1)
+                    table = int(table_str)
+                    self._received_batches[(table, client)] = set(batch_list)
+                self._log.info("Restored %d received batch sets for deduplication", len(self._received_batches))
+            except Exception as e:
+                self._log.warning("Failed to restore received batches: %s", e)
         
         self._log.info("Filter router state restoration complete")
 
@@ -253,6 +293,23 @@ class FilterRouter:
             cid,
         )
         key = (cid, table)
+        
+        # Check for duplicate batch - only for batches coming from filter workers (mask != 0)
+        if mask != 0:
+            dedup_key = (table, cid)
+            if bn in self._received_batches[dedup_key]:
+                self._log.warning(
+                    "DUPLICATE batch detected and discarded: table=%s bn=%s cid=%s mask=%s",
+                    table, bn, cid, bin(mask)
+                )
+                return
+            # Mark batch as received
+            self._received_batches[dedup_key].add(bn)
+            try:
+                self._persist_received_batches()
+            except Exception as e:
+                self._log.error("Failed to persist received batches after adding: %s", e)
+                raise
 
         if mask == 0:
             self._pending_batches[key] += 1
@@ -403,11 +460,13 @@ class FilterRouter:
         
         self._pending_eof.pop(key, None)
         self._pending_batches.pop(key, None)
+        self._received_batches.pop(key, None)  # Clean up deduplication set
         
         # Clean up persisted state for this key
         try:
             self._persist_pending_batches()
             self._persist_pending_eof()
+            self._persist_received_batches()
         except Exception as e:
             self._log.warning("Failed to clean up persisted state after EOF: %s", e)
     
