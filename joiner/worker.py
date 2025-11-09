@@ -453,21 +453,10 @@ class JoinerWorker:
             cid,
         )
 
-        new_items = index_by_attr(db.payload, "item_id")
-        # Merge new batch into existing cache (light tables can span multiple batches)
-        if cid not in self._cache_menu:
-            self._cache_menu[cid] = {}
-        self._cache_menu[cid].update(new_items)
-        self._log.debug("Cache menu_items batch_items=%d total_items=%d", 
-                       len(new_items), len(self._cache_menu[cid]))
-        
-        # Persist to disk
-        try:
-            self._persist_light_table(TableName.MENU_ITEMS, cid, idx)
-        except Exception as e:
-            self._log.error("Failed to persist menu cache: %s", e)
-
-        return True  # ACK immediately
+        # Use buffered processing for light table
+        return self._process_light_table_buffered(
+            db, cid, bn, TableName.MENU_ITEMS, "item_id", self._cache_menu
+        )
 
     def _on_raw_stores(
         self, raw: bytes, channel=None, delivery_tag=None, redelivered=False
@@ -506,21 +495,10 @@ class JoinerWorker:
             cid,
         )
 
-        new_stores = index_by_attr(db.payload, "store_id")
-        # Merge new batch into existing cache (light tables can span multiple batches)
-        if cid not in self._cache_stores:
-            self._cache_stores[cid] = {}
-        self._cache_stores[cid].update(new_stores)
-        self._log.debug("Cache stores batch_stores=%d total_stores=%d", 
-                       len(new_stores), len(self._cache_stores[cid]))
-
-        # Persist to disk
-        try:
-            self._persist_light_table(TableName.STORES, cid, idx)
-        except Exception as e:
-            self._log.error("Failed to persist stores cache: %s", e)
-
-        return True  # ACK immediately
+        # Use buffered processing for light table
+        return self._process_light_table_buffered(
+            db, cid, bn, TableName.STORES, "store_id", self._cache_stores
+        )
 
     def _on_raw_ti(
         self, raw: bytes, channel=None, delivery_tag=None, redelivered=False
@@ -663,6 +641,76 @@ class JoinerWorker:
             ["transaction_id", "store_name", "final_amount", "created_at", "user_id"],
             stores_idx, "store_id", "store_name"
         )
+
+    def _process_light_table_buffered(
+        self,
+        db: DataBatch,
+        cid: str,
+        bn: int,
+        table: TableName,
+        key_attr: str,
+        cache_dict: Dict[str, dict]
+    ) -> bool:
+        """
+        Process a light table batch with buffered writes.
+        Processes rows in chunks, persisting cache progress after each chunk.
+        On redelivery, resumes from where it left off.
+        """
+        tracking_key = (table, cid, bn)
+        written_rows = self._written_rows[tracking_key]
+        total_rows = len(db.payload.rows)
+        
+        self._log.info("Processing light table with buffering: table=%s client=%s bn=%s total_rows=%d already_written=%d buffer_size=%d",
+                      table, cid, bn, total_rows, len(written_rows), self._write_buffer_size)
+
+        # Initialize cache if needed
+        if cid not in cache_dict:
+            cache_dict[cid] = {}
+        
+        # Process rows in chunks
+        rows_processed = 0
+        rows_to_process = list(enumerate(iterate_rows_as_dicts(db.payload)))
+        
+        for row_idx, row_dict in rows_to_process:
+            # Skip already written rows (from previous delivery)
+            if row_idx in written_rows:
+                continue
+            
+            # Index the row by key attribute
+            key_val = norm(row_dict[key_attr])
+            if key_val:
+                cache_dict[cid][key_val] = row_dict
+            
+            written_rows.add(row_idx)
+            rows_processed += 1
+            
+            # Persist cache progress when buffer is full
+            if rows_processed >= self._write_buffer_size:
+                try:
+                    self._persist_light_table(table, cid, cache_dict[cid])
+                    self._persist_written_rows(table, cid, bn, written_rows)
+                except Exception as e:
+                    self._log.error("Failed to persist light table progress: %s", e)
+                    return False  # NACK to retry
+                rows_processed = 0
+        
+        # Final persistence for remaining rows
+        if rows_processed > 0 or len(written_rows) == total_rows:
+            try:
+                self._persist_light_table(table, cid, cache_dict[cid])
+            except Exception as e:
+                self._log.error("Failed to persist final light table state: %s", e)
+                return False  # NACK to retry
+        
+        # All rows processed successfully
+        self._log.info("Light table batch fully processed: table=%s client=%s bn=%s total_written=%d cache_size=%d",
+                      table, cid, bn, len(written_rows), len(cache_dict[cid]))
+        
+        # Cleanup tracking
+        del self._written_rows[tracking_key]
+        self._delete_written_rows_tracking(table, cid, bn)
+        
+        return True  # ACK
 
     def _process_batch_buffered(
         self, 
