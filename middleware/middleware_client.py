@@ -266,7 +266,7 @@ class MessageMiddlewareExchange(MessageMiddleware):
 
         self._connect()
         self._setup_exchange()
-        if consumer and queue_name:
+        if queue_name:
             try:
                 self._channel.queue_declare(queue=self.queue_name, durable=True)
                 for key in self.route_keys:
@@ -275,7 +275,8 @@ class MessageMiddlewareExchange(MessageMiddleware):
                         queue=self.queue_name,
                         routing_key=key,
                     )
-                self._channel.basic_qos(prefetch_count=100)
+                if consumer:
+                    self._channel.basic_qos(prefetch_count=100)
                 logging.debug(
                     f"[MMX] ensured binding ex={self.exchange_name} q={self.queue_name} rk={self.route_keys}"
                 )
