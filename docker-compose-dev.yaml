@@ -59,10 +59,12 @@ services:
       - LOG_LEVEL=INFO
       - CONFIG_PATH=/config/config.ini
       - FILTER_ROUTER_INDEX=0
+      - FILTER_ROUTER_STATE_DIR=/tmp/filter_router_state
     networks:
       - testing_net
     volumes:
       - ./app_config/config.ini:/config/config.ini:ro
+      - ./filter_router_state/router-0:/tmp/filter_router_state
     depends_on:
       rabbitmq:
         condition: service_healthy
@@ -78,10 +80,12 @@ services:
       - LOG_LEVEL=INFO
       - CONFIG_PATH=/config/config.ini
       - FILTER_ROUTER_INDEX=1
+      - FILTER_ROUTER_STATE_DIR=/tmp/filter_router_state
     networks:
       - testing_net
     volumes:
       - ./app_config/config.ini:/config/config.ini:ro
+      - ./filter_router_state/router-1:/tmp/filter_router_state
     depends_on:
       rabbitmq:
         condition: service_healthy
@@ -97,10 +101,12 @@ services:
       - LOG_LEVEL=INFO
       - CONFIG_PATH=/config/config.ini
       - FILTER_ROUTER_INDEX=2
+      - FILTER_ROUTER_STATE_DIR=/tmp/filter_router_state
     networks:
       - testing_net
     volumes:
       - ./app_config/config.ini:/config/config.ini:ro
+      - ./filter_router_state/router-2:/tmp/filter_router_state
     depends_on:
       rabbitmq:
         condition: service_healthy
@@ -116,10 +122,12 @@ services:
       - LOG_LEVEL=INFO
       - CONFIG_PATH=/config/config.ini
       - FILTER_ROUTER_INDEX=3
+      - FILTER_ROUTER_STATE_DIR=/tmp/filter_router_state
     networks:
       - testing_net
     volumes:
       - ./app_config/config.ini:/config/config.ini:ro
+      - ./filter_router_state/router-3:/tmp/filter_router_state
     depends_on:
       rabbitmq:
         condition: service_healthy
@@ -135,10 +143,12 @@ services:
       - LOG_LEVEL=INFO
       - CONFIG_PATH=/config/config.ini
       - FILTER_ROUTER_INDEX=4
+      - FILTER_ROUTER_STATE_DIR=/tmp/filter_router_state
     networks:
       - testing_net
     volumes:
       - ./app_config/config.ini:/config/config.ini:ro
+      - ./filter_router_state/router-4:/tmp/filter_router_state
     depends_on:
       rabbitmq:
         condition: service_healthy
@@ -154,10 +164,12 @@ services:
       - LOG_LEVEL=INFO
       - CONFIG_PATH=/config/config.ini
       - FILTER_ROUTER_INDEX=5
+      - FILTER_ROUTER_STATE_DIR=/tmp/filter_router_state
     networks:
       - testing_net
     volumes:
       - ./app_config/config.ini:/config/config.ini:ro
+      - ./filter_router_state/router-5:/tmp/filter_router_state
     depends_on:
       rabbitmq:
         condition: service_healthy
@@ -476,6 +488,7 @@ services:
       - testing_net
     volumes:
       - ./app_config/config.ini:/config/config.ini:ro
+      - ./joiner_state/worker-0:/tmp/joiner_state
     depends_on:
       rabbitmq:
         condition: service_healthy
@@ -496,6 +509,7 @@ services:
       - testing_net
     volumes:
       - ./app_config/config.ini:/config/config.ini:ro
+      - ./joiner_state/worker-1:/tmp/joiner_state
     depends_on:
       rabbitmq:
         condition: service_healthy
@@ -516,6 +530,7 @@ services:
       - testing_net
     volumes:
       - ./app_config/config.ini:/config/config.ini:ro
+      - ./joiner_state/worker-2:/tmp/joiner_state
     depends_on:
       rabbitmq:
         condition: service_healthy
@@ -536,6 +551,7 @@ services:
       - testing_net
     volumes:
       - ./app_config/config.ini:/config/config.ini:ro
+      - ./joiner_state/worker-3:/tmp/joiner_state
     depends_on:
       rabbitmq:
         condition: service_healthy

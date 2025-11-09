@@ -117,8 +117,13 @@ class FilterRouter:
         self._unacked_eofs: Dict[tuple[TableName, str], list] = {}
         self._eof_ack_lock = threading.Lock()
         
-        # Batch deduplication: track received batch numbers per (table, client_id)
-        self._received_batches: Dict[tuple[TableName, str], set[int]] = defaultdict(set)
+        # Batch deduplication: track received batch numbers per (table, client_id, query_ids_tuple)
+        self._received_batches: Dict[tuple[TableName, str, tuple], set[int]] = defaultdict(set)
+        
+        # Track pending increments: (table, client_id) -> set of batch_numbers that COMPLETED increment
+        # This makes pending increments idempotent on redelivery
+        # A batch is in this set ONLY if both mark and increment+persist succeeded
+        self._pending_increments: Dict[tuple[TableName, str], set[int]] = defaultdict(set)
         
         # Persistence
         self._persistence_dir = persistence_dir
@@ -140,6 +145,10 @@ class FilterRouter:
     def _get_received_batches_path(self) -> str:
         """Get file path for received batches deduplication state."""
         return os.path.join(self._persistence_dir, f"router_{self._router_id}_received_batches.json")
+    
+    def _get_pending_increments_path(self) -> str:
+        """Get file path for pending increments tracking."""
+        return os.path.join(self._persistence_dir, f"router_{self._router_id}_pending_increments.json")
     
     def _persist_pending_batches(self) -> None:
         """Persist pending batches counter to disk."""
@@ -191,14 +200,33 @@ class FilterRouter:
             temp_path = path + ".tmp"
             try:
                 # Convert to serializable format
-                data = {f"{table}:{client}": list(batches) 
-                        for (table, client), batches in self._received_batches.items()}
+                data = {f"{table}:{client}:{','.join(map(str, query_ids))}": list(batches) 
+                        for (table, client, query_ids), batches in self._received_batches.items()}
                 with open(temp_path, "w") as f:
                     json.dump(data, f)
                 os.rename(temp_path, path)
                 self._log.debug("Persisted received batches: %d entries", len(data))
             except Exception as e:
                 self._log.error("Failed to persist received batches: %s", e)
+                if os.path.exists(temp_path):
+                    os.remove(temp_path)
+                raise
+    
+    def _persist_pending_increments(self) -> None:
+        """Persist pending increments tracking."""
+        with self._persistence_lock:
+            path = self._get_pending_increments_path()
+            temp_path = path + ".tmp"
+            try:
+                # Convert to serializable format
+                data = {f"{table}:{client}": list(batches)
+                        for (table, client), batches in self._pending_increments.items()}
+                with open(temp_path, "w") as f:
+                    json.dump(data, f)
+                os.rename(temp_path, path)
+                self._log.debug("Persisted pending increments: %d entries", len(data))
+            except Exception as e:
+                self._log.error("Failed to persist pending increments: %s", e)
                 if os.path.exists(temp_path):
                     os.remove(temp_path)
                 raise
@@ -246,12 +274,28 @@ class FilterRouter:
                 with open(received_path, "r") as f:
                     data = json.load(f)
                 for key_str, batch_list in data.items():
-                    table_str, client = key_str.split(":", 1)
-                    table = int(table_str)
-                    self._received_batches[(table, client)] = set(batch_list)
+                    parts = key_str.split(":", 2)
+                    table = int(parts[0])
+                    client = parts[1]
+                    query_ids = tuple(map(int, parts[2].split(","))) if len(parts) > 2 and parts[2] else tuple()
+                    self._received_batches[(table, client, query_ids)] = set(batch_list)
                 self._log.info("Restored %d received batch sets for deduplication", len(self._received_batches))
             except Exception as e:
                 self._log.warning("Failed to restore received batches: %s", e)
+        
+        # Restore pending increments tracking
+        increments_path = self._get_pending_increments_path()
+        if os.path.exists(increments_path):
+            try:
+                with open(increments_path, "r") as f:
+                    data = json.load(f)
+                for key_str, batch_list in data.items():
+                    table_str, client = key_str.split(":", 1)
+                    table = int(table_str)
+                    self._pending_increments[(table, client)] = set(batch_list)
+                self._log.info("Restored %d pending increment sets", len(self._pending_increments))
+            except Exception as e:
+                self._log.warning("Failed to restore pending increments: %s", e)
         
         self._log.info("Filter router state restoration complete")
 
@@ -296,103 +340,159 @@ class FilterRouter:
         
         # Check for duplicate batch - only for batches coming from filter workers (mask != 0)
         if mask != 0:
-            dedup_key = (table, cid)
+            query_ids_tuple = tuple(sorted(queries))
+            dedup_key = (table, cid, query_ids_tuple)
             if bn in self._received_batches[dedup_key]:
                 self._log.warning(
-                    "DUPLICATE batch detected and discarded: table=%s bn=%s cid=%s mask=%s",
-                    table, bn, cid, bin(mask)
+                    "DUPLICATE batch detected: table=%s bn=%s cid=%s queries=%s mask=%s",
+                    table, bn, cid, queries, bin(mask)
                 )
+                # Check if this duplicate still needs pending decrement (crash recovery)
+                increment_key = (table, cid)
+                if bn in self._pending_increments[increment_key]:
+                    self._log.info("Duplicate batch needs pending decrement (crash recovery): bn=%d", bn)
+                    self._pending_batches[key] = max(0, self._pending_batches[key] - 1)
+                    self._pending_increments[increment_key].discard(bn)
+                    try:
+                        self._persist_pending_batches()
+                        self._persist_pending_increments()
+                        self._maybe_flush_pending_eof(key)
+                    except Exception as e:
+                        self._log.error("Failed to persist after duplicate decrement: %s", e)
+                        # Don't raise - we already processed this batch, just log the error
                 return
-            # Mark batch as received
-            self._received_batches[dedup_key].add(bn)
+            # Mark batch as received - persist FIRST to avoid false duplicates on crash
             try:
+                self._received_batches[dedup_key].add(bn)
                 self._persist_received_batches()
             except Exception as e:
                 self._log.error("Failed to persist received batches after adding: %s", e)
+                # Remove from in-memory to keep consistency
+                self._received_batches[dedup_key].discard(bn)
                 raise
 
+        # Increment pending counter for fresh batches from orchestrator
+        # Make this idempotent: only increment if not already completed for this batch
+        increment_done = False
         if mask == 0:
-            self._pending_batches[key] += 1
-            self._log.debug("pending++ %s -> %d", key, self._pending_batches[key])
-            try:
-                self._persist_pending_batches()
-            except Exception as e:
-                self._log.error("Failed to persist pending batches after increment: %s", e)
-                raise
+            increment_key = (table, cid)
+            if bn not in self._pending_increments[increment_key]:
+                # Atomically: increment, mark as complete, persist both
+                self._pending_batches[key] += 1
+                self._pending_increments[increment_key].add(bn)
+                self._log.debug("pending++ %s bn=%d -> %d", key, bn, self._pending_batches[key])
+                try:
+                    # Persist both together - if this fails, rollback both
+                    self._persist_pending_batches()
+                    self._persist_pending_increments()
+                    increment_done = True
+                except Exception as e:
+                    self._log.error("Failed to persist after increment: %s", e)
+                    # Rollback both in-memory changes
+                    self._pending_batches[key] = max(0, self._pending_batches[key] - 1)
+                    self._pending_increments[increment_key].discard(bn)
+                    raise
+            else:
+                # Batch already completed increment (redelivery after successful increment+persist)
+                self._log.info("Batch already incremented pending (redelivery): table=%s bn=%d cid=%s", 
+                              table, bn, cid)
+                increment_done = True  # Increment was completed, so we should decrement later
 
-        total_steps = self._pol.total_steps(table, queries)
-        next_step = first_zero_bit(mask, total_steps)
-        if next_step is not None and self._pol.steps_remaining(
-            table, queries, steps_done=next_step
-        ):
-            # DataBatch protobuf (protocol2) does not have `reserved_u16`.
-            # Use the existing `filter_steps` field to store the updated mask.
-            new_mask = set_bit(mask, next_step)
-            try:
-                batch.filter_steps = new_mask
-            except Exception:
-                # If assignment to filter_steps fails for any reason, fall back
-                # to setting an attribute on the Python object (legacy-like).
-                setattr(batch, "filter_steps", new_mask)
-
-            self._log.debug(
-                "→ filters step=%d table=%s new_mask=%s",
-                next_step,
-                table,
-                bin(new_mask),
-            )
-            # Send to filters - if this fails, raise exception to trigger NACK
-            self._p.send_to_filters_pool(batch)
-            return
-
-        dup_count = int(self._pol.get_duplication_count(queries) or 1)
-        if dup_count > 1:
-            self._log.debug(
-                "Fan-out x%d table=%s queries=%s", dup_count, table, queries
-            )
-
-            # Process fan-out - increment pending counter for each duplicate
-            self._pending_batches[key] += dup_count
-            try:
-                self._persist_pending_batches()
-            except Exception as e:
-                self._log.error("Failed to persist pending batches after fanout increment: %s", e)
-                raise
-            
-            for i in range(dup_count):
-                new_queries = self._pol.get_new_batch_queries(
-                    table, queries, copy_number=i
-                ) or list(queries)
-                b = DataBatch()
-                b.CopyFrom(batch)
-                b.query_ids.clear()
-                b.query_ids.extend(new_queries)
-                self._handle_data(b)  # If this fails, exception propagates and triggers NACK
-
-            # Decrement for the parent message
-            self._pending_batches[key] = max(0, self._pending_batches[key] - 1)
-            self._log.debug(
-                "pending-- (fanout parent) %s -> %d", key, self._pending_batches[key]
-            )
-            try:
-                self._persist_pending_batches()
-            except Exception as e:
-                self._log.error("Failed to persist pending batches after fanout decrement: %s", e)
-                raise
-            return
-
-        # Send to aggregator - if this fails, raise exception to trigger NACK
-        self._send_to_some_aggregator(batch)
-        
-        # Only decrement pending counter if send succeeded
-        self._pending_batches[key] = max(0, self._pending_batches[key] - 1)
-        self._log.debug("pending-- %s -> %d", key, self._pending_batches[key])
+        # Wrap processing to rollback pending increment on failure
         try:
-            self._persist_pending_batches()
-        except Exception as e:
-            self._log.error("Failed to persist pending batches after decrement: %s", e)
+            total_steps = self._pol.total_steps(table, queries)
+            next_step = first_zero_bit(mask, total_steps)
+            if next_step is not None and self._pol.steps_remaining(
+                table, queries, steps_done=next_step
+            ):
+                # DataBatch protobuf (protocol2) does not have `reserved_u16`.
+                # Use the existing `filter_steps` field to store the updated mask.
+                new_mask = set_bit(mask, next_step)
+                try:
+                    batch.filter_steps = new_mask
+                except Exception:
+                    # If assignment to filter_steps fails for any reason, fall back
+                    # to setting an attribute on the Python object (legacy-like).
+                    setattr(batch, "filter_steps", new_mask)
+
+                self._log.debug(
+                    "→ filters step=%d table=%s new_mask=%s",
+                    next_step,
+                    table,
+                    bin(new_mask),
+                )
+                # Send to filters - if this fails, raise exception to trigger NACK
+                self._p.send_to_filters_pool(batch)
+                return
+
+            dup_count = int(self._pol.get_duplication_count(queries) or 1)
+            if dup_count > 1:
+                self._log.debug(
+                    "Fan-out x%d table=%s queries=%s", dup_count, table, queries
+                )
+
+                # Process fan-out: children inherit parent's mask (via CopyFrom)
+                # Since fanout only happens after all filter steps, mask != 0
+                # Children will skip increment logic (line 364 checks mask==0)
+                # Only the parent batch (which had mask=0 initially) incremented pending
+                fanout_batches = []
+                for i in range(dup_count):
+                    new_queries = self._pol.get_new_batch_queries(
+                        table, queries, copy_number=i
+                    ) or list(queries)
+                    b = DataBatch()
+                    b.CopyFrom(batch)
+                    b.query_ids.clear()
+                    b.query_ids.extend(new_queries)
+                    fanout_batches.append(b)
+                
+                # Process all fanout batches - if any fails, exception propagates
+                for b in fanout_batches:
+                    self._handle_data(b)  # Each child handles its own pending counter
+                
+                # The parent batch is now fully processed (replaced by children)
+                # Decrement if this batch was previously incremented
+                increment_key = (table, cid)
+                if increment_done or (bn in self._pending_increments[increment_key]):
+                    self._pending_batches[key] = max(0, self._pending_batches[key] - 1)
+                    self._pending_increments[increment_key].discard(bn)  # Remove from tracking
+                    self._log.debug(
+                        "pending-- (fanout parent consumed) %s bn=%d -> %d", key, bn, self._pending_batches[key]
+                    )
+                    try:
+                        self._persist_pending_batches()
+                        self._persist_pending_increments()
+                    except Exception as e:
+                        self._log.error("Failed to persist pending batches after fanout: %s", e)
+                        raise
+                return
+
+            # Send to aggregator - if this fails, raise exception to trigger NACK
+            self._send_to_some_aggregator(batch)
+            
+            # Decrement pending counter if this batch was previously incremented
+            # Check _pending_increments to handle case where batch went through filters and came back
+            increment_key = (table, cid)
+            if increment_done or (bn in self._pending_increments[increment_key]):
+                self._pending_batches[key] = max(0, self._pending_batches[key] - 1)
+                self._pending_increments[increment_key].discard(bn)  # Remove from tracking
+                self._log.debug("pending-- %s bn=%d -> %d", key, bn, self._pending_batches[key])
+                try:
+                    self._persist_pending_batches()
+                    self._persist_pending_increments()
+                except Exception as e:
+                    self._log.error("Failed to persist pending batches after decrement: %s", e)
+                    raise
+                self._maybe_flush_pending_eof(key)
+        except Exception:
+            # Rollback pending increment if processing failed
+            if increment_done:
+                self._pending_batches[key] = max(0, self._pending_batches[key] - 1)
+                try:
+                    self._persist_pending_batches()
+                except Exception as persist_err:
+                    self._log.error("Failed to rollback pending batches after error: %s", persist_err)
             raise
-        self._maybe_flush_pending_eof(key)
 
     def _send_to_some_aggregator(self, batch: DataBatch) -> None:
         if batch.payload.name in [TableName.MENU_ITEMS, TableName.STORES]:
@@ -460,13 +560,19 @@ class FilterRouter:
         
         self._pending_eof.pop(key, None)
         self._pending_batches.pop(key, None)
-        self._received_batches.pop(key, None)  # Clean up deduplication set
+        # Clean up all deduplication sets for this table and client (regardless of query_ids)
+        keys_to_remove = [k for k in self._received_batches.keys() if k[0] == key[0] and k[1] == key[1]]
+        for k in keys_to_remove:
+            self._received_batches.pop(k, None)
+        # Clean up pending increments tracking
+        self._pending_increments.pop(key, None)
         
         # Clean up persisted state for this key
         try:
             self._persist_pending_batches()
             self._persist_pending_eof()
             self._persist_received_batches()
+            self._persist_pending_increments()
         except Exception as e:
             self._log.warning("Failed to clean up persisted state after EOF: %s", e)
     
@@ -626,6 +732,7 @@ class ExchangeBusProducer:
             self._filters_pub.send(raw)
         except Exception as e:
             self._log.error("filters_pool send failed: %s", e)
+            raise
 
     def send_to_aggregator_partition(self, partition_id: int, batch: DataBatch) -> None:
         table = batch.payload.name
@@ -724,7 +831,7 @@ class RouterServer:
                 return ack_now  # Return whether to ack immediately
             except Exception as e:
                 self._log.exception("Error in router callback: %s", e)
-                return True  # Ack on error to avoid infinite redelivery loop
+                return False  # NACK to trigger redelivery on transient errors
 
         try:
             self._mw_in.start_consuming(_cb)

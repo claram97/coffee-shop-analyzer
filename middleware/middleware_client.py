@@ -308,9 +308,13 @@ class MessageMiddlewareExchange(MessageMiddleware):
             if self._consuming_thread and self._consuming_thread.is_alive():
                 return
 
+            # Declare queue - either named (durable) or anonymous (exclusive)
             if not self.queue_name:
                 result = self._channel.queue_declare(queue="", exclusive=True)
                 self.queue_name = result.method.queue
+            else:
+                # Declare named queue as durable
+                self._channel.queue_declare(queue=self.queue_name, durable=True)
 
             for key in self.route_keys:
                 try:

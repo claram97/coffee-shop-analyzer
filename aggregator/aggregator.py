@@ -8,6 +8,7 @@ processing and analyzing coffee shop data from multiple clients.
 import logging
 import os
 import random
+from collections import defaultdict
 
 from processing import (
     process_query_2,
@@ -110,6 +111,36 @@ class Aggregator:
                 self._out_queues[(table, replica)] = MessageMiddlewareQueue(
                     host=self.host, queue_name=out_q
                 )
+        
+        # In-memory batch deduplication: track received batches per (table, client_id, query_ids_tuple)
+        self._received_batches = defaultdict(set)
+
+    def _is_duplicate_batch(self, data_batch: DataBatch) -> bool:
+        """
+        Check if a batch is a duplicate. Returns True if duplicate, False otherwise.
+        Tracks batches by (table, client_id, query_ids_tuple, batch_number).
+        """
+        table = data_batch.payload.name
+        client_id = data_batch.client_id
+        batch_number = data_batch.payload.batch_number
+        query_ids_tuple = tuple(sorted(data_batch.query_ids))
+        
+        dedup_key = (table, client_id, query_ids_tuple)
+        
+        if batch_number in self._received_batches[dedup_key]:
+            logging.warning(
+                "DUPLICATE batch detected and discarded in aggregator: table=%s bn=%s client=%s queries=%s",
+                table, batch_number, client_id, data_batch.query_ids
+            )
+            return True
+        
+        # Mark batch as received
+        self._received_batches[dedup_key].add(batch_number)
+        logging.debug(
+            "Batch marked as received: table=%s bn=%s client=%s queries=%s",
+            table, batch_number, client_id, data_batch.query_ids
+        )
+        return False
 
     def _send_to_joiner_by_table(self, table: str, raw_bytes: bytes):
         logging.info("Sending to joiner by table=%s", table)
@@ -141,24 +172,24 @@ class Aggregator:
 
     def _forward_eof(self, raw: bytes, table_name: str):
         logging.info("Forwarding EOF message")
-        """Parse EOF and broadcast to ALL joiner routers so workers can track completion."""
+        """Parse EOF, update trace with aggregator ID, and forward to joiner routers."""
         try:
             envelope = Envelope()
             envelope.ParseFromString(raw)
             eof = envelope.eof
             
+            # Update trace: append aggregator_id to existing trace
+            # Expected format: "filter_router_id:aggregator_id"
+            # The filter already set this, so we keep it as-is
             original_trace = eof.trace if eof.trace else ""
-            client_id = eof.client_id if eof.client_id else ""
-            logging.info("Forwarding EOF for table=%s client_id=%s trace=%s", table_name, client_id, original_trace)
+            logging.info("Forwarding EOF for table=%s with trace=%s", table_name, original_trace)
             
-            # Broadcast EOF to ALL joiner router replicas
-            # Workers expect to receive EOF from all routers before marking table complete
             for replica in range(0, self._jr_replicas):
                 q = self._out_queues.get((table_name, replica))
                 if not q:
                     raise Exception(f"No out queue configured for table={table_name}, replica={replica}")
                 q.send(raw)
-                logging.debug(f"Forwarded EOF to joiner_router replica={replica} table={table_name} client_id={client_id} trace={original_trace}")
+                logging.debug(f"Forwarded EOF to joiner_router replica={replica} table={table_name} trace={original_trace}")
         except Exception:
             logging.exception("Failed to forward EOF")
             raise
@@ -193,184 +224,234 @@ class Aggregator:
 
     def _handle_menu_item(self, message: bytes, channel=None, delivery_tag=None, redelivered=None) -> bool:
         logging.info("Handling menu item message")
-        if not message:
-            raise ValueError("Empty message")
-        
-        envelope = Envelope()
-        envelope.ParseFromString(message)
-        
-        if envelope.type == MessageType.EOF_MESSAGE:
-            eof_msg = envelope.eof
-            table_name = TID_TO_NAME[eof_msg.table]
-            self._forward_eof(message, table_name)
-        elif envelope.type == MessageType.DATA_BATCH:
-            data_batch = envelope.data_batch
-            table_name = TID_TO_NAME[data_batch.payload.name]
-            self._forward_databatch_by_table(message, table_name)
-        else:
-            logging.warning("Unknown message type: %s", envelope.type)
-        
-        # Return True to let middleware ACK after successful forwarding
-        return True
+        try:
+            if not message:
+                return False
+            envelope = Envelope()
+            envelope.ParseFromString(message)
+            if envelope.type == MessageType.EOF_MESSAGE:
+                eof_msg = envelope.eof
+                table_name = TID_TO_NAME[eof_msg.table]
+                self._forward_eof(message, table_name)
+            elif envelope.type == MessageType.DATA_BATCH:
+                data_batch = envelope.data_batch
+                if self._is_duplicate_batch(data_batch):
+                    if channel and delivery_tag is not None:
+                        channel.basic_ack(delivery_tag=delivery_tag)
+                    return False
+                table_name = TID_TO_NAME[data_batch.payload.name]
+                self._forward_databatch_by_table(message, table_name)
+            else:
+                logging.warning("Unknown message type: %s", envelope.type)
+            
+            if channel and delivery_tag is not None:
+                channel.basic_ack(delivery_tag=delivery_tag)
+                logging.debug(f"Manually ACKed menu item message, delivery_tag: {delivery_tag}")
+            return False
+        except Exception:
+            logging.exception("Failed to handle menu item")
+            return False
 
     def _handle_store(self, message: bytes, channel=None, delivery_tag=None, redelivered=None) -> bool:
         logging.info("Handling store message")
-        if not message:
-            raise ValueError("Empty message")
-        
-        envelope = Envelope()
-        envelope.ParseFromString(message)
-        
-        if envelope.type == MessageType.EOF_MESSAGE:
-            eof_msg = envelope.eof
-            table_name = TID_TO_NAME[eof_msg.table]
-            self._forward_eof(message, table_name)
-        elif envelope.type == MessageType.DATA_BATCH:
-            data_batch = envelope.data_batch
-            table_name = TID_TO_NAME[data_batch.payload.name]
-            self._forward_databatch_by_table(message, table_name)
-        else:
-            logging.warning("Unknown message type: %s", envelope.type)
-        
-        # Return True to let middleware ACK after successful forwarding
-        return True
+        try:
+            if not message:
+                return False
+            envelope = Envelope()
+            envelope.ParseFromString(message)
+            if envelope.type == MessageType.EOF_MESSAGE:
+                eof_msg = envelope.eof
+                table_name = TID_TO_NAME[eof_msg.table]
+                self._forward_eof(message, table_name)
+            elif envelope.type == MessageType.DATA_BATCH:
+                data_batch = envelope.data_batch
+                if self._is_duplicate_batch(data_batch):
+                    if channel and delivery_tag is not None:
+                        channel.basic_ack(delivery_tag=delivery_tag)
+                    return False
+                table_name = TID_TO_NAME[data_batch.payload.name]
+                self._forward_databatch_by_table(message, table_name)
+            else:
+                logging.warning("Unknown message type: %s", envelope.type)
+            
+            if channel and delivery_tag is not None:
+                channel.basic_ack(delivery_tag=delivery_tag)
+                logging.debug(f"Manually ACKed store message, delivery_tag: {delivery_tag}")
+            return False
+        except Exception:
+            logging.exception("Failed to handle store")
+            return False
 
     def _handle_transaction(self, message: bytes, channel=None, delivery_tag=None, redelivered=None):
         logging.info("Handling transaction message")
-        if not message:
-            raise ValueError("Empty message")
+        try:
+            if not message:
+                return False
+    
+            envelope = Envelope()
+            envelope.ParseFromString(message)
 
-        envelope = Envelope()
-        envelope.ParseFromString(message)
+            if envelope.type == MessageType.EOF_MESSAGE:
+                eof_msg = envelope.eof
+                table_name = TID_TO_NAME[eof_msg.table]
+                self._forward_eof(message, table_name)
 
-        if envelope.type == MessageType.EOF_MESSAGE:
-            eof_msg = envelope.eof
-            table_name = TID_TO_NAME[eof_msg.table]
-            self._forward_eof(message, table_name)
+            elif envelope.type == MessageType.DATA_BATCH:
+                data_batch = envelope.data_batch
+                if self._is_duplicate_batch(data_batch):
+                    if channel and delivery_tag is not None:
+                        channel.basic_ack(delivery_tag=delivery_tag)
+                    return False
+                table_data = data_batch.payload
+                rows = list(iterate_rows_as_dicts(table_data))
+                query_id = data_batch.query_ids[0] if data_batch.query_ids else None
 
-        elif envelope.type == MessageType.DATA_BATCH:
-            data_batch = envelope.data_batch
-            table_data = data_batch.payload
-            rows = list(iterate_rows_as_dicts(table_data))
-            query_id = data_batch.query_ids[0] if data_batch.query_ids else None
-
-            if query_id == 0 or query_id is None:
-                self._forward_databatch_by_table(message, "transactions")
-            elif query_id == 2:
-                processed = process_query_3(rows)
-                out = serialize_query3_results(processed)
-                columns = ['transaction_id', 'store_id', 'payment_method_id', 'user_id', 'original_amount', 'discount_applied', 'final_amount', 'created_at']
-                row_values = [[str(row.get(col, '')) for col in columns] for row in out]
-                new_table_data = build_table_data(
-                    table_name=TableName.TRANSACTIONS,
-                    columns=columns,
-                    rows=row_values,
-                    batch_number=table_data.batch_number,
-                    status=table_data.status
-                )
-                new_data_batch = DataBatch()
-                new_data_batch.CopyFrom(data_batch)
-                new_data_batch.payload.CopyFrom(new_table_data)
-                new_envelope = Envelope(type=MessageType.DATA_BATCH, data_batch=new_data_batch)
-                new_message = new_envelope.SerializeToString()
-                self._forward_databatch_by_table(new_message, "transactions")
-            elif query_id == 3:
-                processed = process_query_4_transactions(rows)
-                out = serialize_query4_transaction_results(processed)
-                columns = ['transaction_id', 'store_id', 'payment_method_id', 'voucher_id', 'user_id', 'original_amount', 'discount_applied', 'final_amount', 'created_at']
-                row_values = [[str(row.get(col, '')) for col in columns] for row in out]
-                new_table_data = build_table_data(
-                    table_name=TableName.TRANSACTIONS,
-                    columns=columns,
-                    rows=row_values,
-                    batch_number=table_data.batch_number,
-                    status=table_data.status
-                )
-                new_data_batch = DataBatch()
-                new_data_batch.CopyFrom(data_batch)
-                new_data_batch.payload.CopyFrom(new_table_data)
-                new_envelope = Envelope(type=MessageType.DATA_BATCH, data_batch=new_data_batch)
-                new_message = new_envelope.SerializeToString()
-                self._forward_databatch_by_table(new_message, "transactions")
+                if query_id == 0 or query_id is None:
+                    self._forward_databatch_by_table(message, "transactions")
+                elif query_id == 2:
+                    processed = process_query_3(rows)
+                    out = serialize_query3_results(processed)
+                    # TODO: Convert out to new protobuf format
+                    # For now, assume out is list of dicts
+                    columns = ['transaction_id', 'store_id', 'payment_method_id', 'user_id', 'original_amount', 'discount_applied', 'final_amount', 'created_at']
+                    row_values = [[str(row.get(col, '')) for col in columns] for row in out]
+                    new_table_data = build_table_data(
+                        table_name=TableName.TRANSACTIONS,
+                        columns=columns,
+                        rows=row_values,
+                        batch_number=table_data.batch_number,
+                        status=table_data.status
+                    )
+                    new_data_batch = DataBatch()
+                    new_data_batch.CopyFrom(data_batch)
+                    new_data_batch.payload.CopyFrom(new_table_data)
+                    new_envelope = Envelope(type=MessageType.DATA_BATCH, data_batch=new_data_batch)
+                    new_message = new_envelope.SerializeToString()
+                    self._forward_databatch_by_table(new_message, "transactions")
+                elif query_id == 3:
+                    processed = process_query_4_transactions(rows)
+                    out = serialize_query4_transaction_results(processed)
+                    columns = ['transaction_id', 'store_id', 'payment_method_id', 'voucher_id', 'user_id', 'original_amount', 'discount_applied', 'final_amount', 'created_at']
+                    row_values = [[str(row.get(col, '')) for col in columns] for row in out]
+                    new_table_data = build_table_data(
+                        table_name=TableName.TRANSACTIONS,
+                        columns=columns,
+                        rows=row_values,
+                        batch_number=table_data.batch_number,
+                        status=table_data.status
+                    )
+                    new_data_batch = DataBatch()
+                    new_data_batch.CopyFrom(data_batch)
+                    new_data_batch.payload.CopyFrom(new_table_data)
+                    new_envelope = Envelope(type=MessageType.DATA_BATCH, data_batch=new_data_batch)
+                    new_message = new_envelope.SerializeToString()
+                    self._forward_databatch_by_table(new_message, "transactions")
+                else:
+                    logging.error("Unexpected query_id=%s for transaction table", query_id)
+                    return False
             else:
-                logging.error("Unexpected query_id=%s for transaction table", query_id)
-                raise ValueError(f"Unexpected query_id={query_id}")
-        else:
-            logging.warning("Unknown message type: %s", envelope.type)
-        
-        # Return True to let middleware ACK after successful forwarding
-        return True
+                logging.warning("Unknown message type: %s", envelope.type)
+            
+            if channel and delivery_tag is not None:
+                channel.basic_ack(delivery_tag=delivery_tag)
+                logging.debug(f"Manually ACKed transaction message, delivery_tag: {delivery_tag}")
+            return False
+        except Exception:
+            logging.exception("Failed to handle transaction")
+            return False
 
     def _handle_transaction_item(self, message: bytes, channel=None, delivery_tag=None, redelivered=None):
         logging.info("Handling transaction item message")
-        if not message:
-            raise ValueError("Empty message")
+        try:
+            if not message:
+                return False
 
-        envelope = Envelope()
-        envelope.ParseFromString(message)
+            envelope = Envelope()
+            envelope.ParseFromString(message)
 
-        if envelope.type == MessageType.EOF_MESSAGE:
-            eof_msg = envelope.eof
-            table_name = TID_TO_NAME[eof_msg.table]
-            self._forward_eof(message, table_name)
+            if envelope.type == MessageType.EOF_MESSAGE:
+                eof_msg = envelope.eof
+                table_name = TID_TO_NAME[eof_msg.table]
+                self._forward_eof(message, table_name)
 
-        elif envelope.type == MessageType.DATA_BATCH:
-            data_batch = envelope.data_batch
-            table_data = data_batch.payload
-            rows = list(iterate_rows_as_dicts(table_data))
-            query_id = data_batch.query_ids[0] if data_batch.query_ids else None
+            elif envelope.type == MessageType.DATA_BATCH:
+                data_batch = envelope.data_batch
+                if self._is_duplicate_batch(data_batch):
+                    if channel and delivery_tag is not None:
+                        channel.basic_ack(delivery_tag=delivery_tag)
+                    return False
+                table_data = data_batch.payload
+                rows = list(iterate_rows_as_dicts(table_data))
+                query_id = data_batch.query_ids[0] if data_batch.query_ids else None
 
-            if int(query_id) == 1:
-                logging.debug("Processing transaction item with query 2")
-                processed = process_query_2(rows)
-                out = serialize_query2_results(processed)
-                columns = ['transaction_item_id', 'transaction_id', 'item_id', 'quantity', 'subtotal', 'created_at']
-                row_values = [[str(row.get(col, '')) for col in columns] for row in out]
-                status = table_data.status
-                new_table_data = build_table_data(
-                    table_name=TableName.TRANSACTION_ITEMS,
-                    columns=columns,
-                    rows=row_values,
-                    batch_number=table_data.batch_number,
-                    status=status
-                )
-                new_data_batch = DataBatch(
-                    query_ids=data_batch.query_ids,
-                    filter_steps=data_batch.filter_steps,
-                    shards_info=data_batch.shards_info,
-                    client_id=data_batch.client_id,
-                    payload=new_table_data
-                )
-                new_envelope = Envelope(type=MessageType.DATA_BATCH, data_batch=new_data_batch)
-                new_message = new_envelope.SerializeToString()
-                self._forward_databatch_by_table(new_message, "transaction_items")
+                if int(query_id) == 1:
+                    logging.debug("Processing transaction item with query 2")
+                    processed = process_query_2(rows)
+                    out = serialize_query2_results(processed)
+                    # TODO: Convert out to protobuf
+                    columns = ['transaction_item_id', 'transaction_id', 'item_id', 'quantity', 'subtotal', 'created_at']
+                    row_values = [[str(row.get(col, '')) for col in columns] for row in out]
+                    status = table_data.status
+                    new_table_data = build_table_data(
+                        table_name=TableName.TRANSACTION_ITEMS,
+                        columns=columns,
+                        rows=row_values,
+                        batch_number=table_data.batch_number,
+                        status=status
+                    )
+                    new_data_batch = DataBatch(
+                        query_ids=data_batch.query_ids,
+                        filter_steps=data_batch.filter_steps,
+                        shards_info=data_batch.shards_info,
+                        client_id=data_batch.client_id,
+                        payload=new_table_data
+                    )
+                    new_envelope = Envelope(type=MessageType.DATA_BATCH, data_batch=new_data_batch)
+                    new_message = new_envelope.SerializeToString()
+                    self._forward_databatch_by_table(new_message, "transaction_items")
+                else:
+                    logging.error(
+                        "Transaction item with query distinct from 1: %s", query_id
+                    )
+                    return False
             else:
-                logging.error("Transaction item with query distinct from 1: %s", query_id)
-                raise ValueError(f"Unexpected query_id={query_id}")
-        else:
-            logging.warning("Unknown message type: %s", envelope.type)
-        
-        # Return True to let middleware ACK after successful forwarding
-        return True
+                logging.warning("Unknown message type: %s", envelope.type)
+            
+            if channel and delivery_tag is not None:
+                channel.basic_ack(delivery_tag=delivery_tag)
+                logging.debug(f"Manually ACKed transaction item message, delivery_tag: {delivery_tag}")
+            return False
+        except Exception:
+            logging.exception("Failed to handle transaction item")
+            return False
 
     def _handle_user(self, message: bytes, channel=None, delivery_tag=None, redelivered=None) -> bool:
         logging.info("Handling user message")
-        if not message:
-            raise ValueError("Empty message")
-        
-        envelope = Envelope()
-        envelope.ParseFromString(message)
-        
-        if envelope.type == MessageType.EOF_MESSAGE:
-            eof_msg = envelope.eof
-            table_name = TID_TO_NAME[eof_msg.table]
-            self._forward_eof(message, table_name)
-        elif envelope.type == MessageType.DATA_BATCH:
-            data_batch = envelope.data_batch
-            table_name = TID_TO_NAME[data_batch.payload.name]
-            self._forward_databatch_by_table(message, table_name)
-        else:
-            logging.warning("Unknown message type: %s", envelope.type)
-        
-        # Return True to let middleware ACK after successful forwarding
-        return True
+        try:
+            if not message:
+                logging.error("Empty message received in user handler")
+                return False
+            envelope = Envelope()
+            envelope.ParseFromString(message)
+            if envelope.type == MessageType.EOF_MESSAGE:
+                eof_msg = envelope.eof
+                table_name = TID_TO_NAME[eof_msg.table]
+                self._forward_eof(message, table_name)
+            elif envelope.type == MessageType.DATA_BATCH:
+                data_batch = envelope.data_batch
+                if self._is_duplicate_batch(data_batch):
+                    if channel and delivery_tag is not None:
+                        channel.basic_ack(delivery_tag=delivery_tag)
+                    return False
+                table_name = TID_TO_NAME[data_batch.payload.name]
+                self._forward_databatch_by_table(message, table_name)
+            else:
+                logging.warning("Unknown message type: %s", envelope.type)
+            
+            if channel and delivery_tag is not None:
+                channel.basic_ack(delivery_tag=delivery_tag)
+                logging.debug(f"Manually ACKed user message, delivery_tag: {delivery_tag}")
+            return False
+        except Exception:
+            logging.exception("Failed to handle user")
+            return False
