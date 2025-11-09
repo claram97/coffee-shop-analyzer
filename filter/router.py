@@ -157,7 +157,8 @@ class FilterRouter:
             temp_path = path + ".tmp"
             try:
                 # Convert tuple keys to strings for JSON serialization
-                data = {f"{table}:{client}": count for (table, client), count in self._pending_batches.items()}
+                # Key format is (client_id, table)
+                data = {f"{client}:{table}": count for (client, table), count in self._pending_batches.items()}
                 with open(temp_path, "w") as f:
                     json.dump(data, f)
                 os.rename(temp_path, path)
@@ -219,6 +220,7 @@ class FilterRouter:
             temp_path = path + ".tmp"
             try:
                 # Convert to serializable format
+                # Key format is (table, client_id)
                 data = {f"{table}:{client}": list(batches)
                         for (table, client), batches in self._pending_increments.items()}
                 with open(temp_path, "w") as f:
@@ -245,9 +247,10 @@ class FilterRouter:
                 with open(batches_path, "r") as f:
                     data = json.load(f)
                 for key_str, count in data.items():
-                    table_str, client = key_str.split(":", 1)
+                    # Key format is "client_id:table"
+                    client, table_str = key_str.split(":", 1)
                     table = int(table_str)
-                    self._pending_batches[(table, client)] = count
+                    self._pending_batches[(client, table)] = count
                 self._log.info("Restored %d pending batch counters", len(self._pending_batches))
             except Exception as e:
                 self._log.warning("Failed to restore pending batches: %s", e)
