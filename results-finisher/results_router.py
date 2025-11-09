@@ -44,6 +44,12 @@ class ResultsRouter:
         self.output_queue_names = sorted(output_clients.keys())
         self.finisher_count = len(self.output_queue_names)
 
+        # In-memory batch deduplication: track received batches per (table, client_id, query_ids_tuple)
+        # This mitigates duplicate batch propagation from joiner workers (no persistence needed)
+        from collections import defaultdict
+        from protocol2.table_data_pb2 import TableName
+        self._received_batches: Dict[tuple[int, str, tuple], set[int]] = defaultdict(set)
+
         logger.info(
             f"Router initialized. Distributing to {self.finisher_count} finisher queues: "
             f"{self.output_queue_names}"
@@ -54,6 +60,34 @@ class ResultsRouter:
         hash_value = _calculate_route_hash(routing_key)
         target_index = hash_value % self.finisher_count
         return self.output_queue_names[target_index]
+
+    def _is_duplicate_batch(self, data_batch) -> bool:
+        """
+        Check if a batch is a duplicate. Returns True if duplicate, False otherwise.
+        Tracks batches by (table, client_id, query_ids_tuple, batch_number).
+        In-memory only - no persistence (loss on restart is acceptable).
+        """
+        table = data_batch.payload.name
+        client_id = data_batch.client_id
+        batch_number = data_batch.payload.batch_number
+        query_ids_tuple = tuple(sorted(data_batch.query_ids))
+        
+        dedup_key = (table, client_id, query_ids_tuple)
+        
+        if batch_number in self._received_batches[dedup_key]:
+            logger.warning(
+                "DUPLICATE batch detected and discarded in results router: table=%s bn=%s client=%s queries=%s",
+                table, batch_number, client_id, list(data_batch.query_ids)
+            )
+            return True
+        
+        # Mark batch as received
+        self._received_batches[dedup_key].add(batch_number)
+        logger.debug(
+            "Batch marked as received: table=%s bn=%s client=%s queries=%s",
+            table, batch_number, client_id, list(data_batch.query_ids)
+        )
+        return False
 
     def _process_message(self, body: bytes):
         # logger.info("Processing message")
@@ -78,6 +112,10 @@ class ResultsRouter:
                 return
 
             message = envelope.data_batch
+
+            # Check for duplicate batch and discard if already processed
+            if self._is_duplicate_batch(message):
+                return  # Discard duplicate
 
             if not message.query_ids:
                 logger.warning("DataBatch contains no query_ids for routing. Discarding.")
