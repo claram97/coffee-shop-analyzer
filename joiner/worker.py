@@ -394,9 +394,13 @@ class JoinerWorker:
             cid,
         )
 
-        idx = index_by_attr(db.payload, "item_id")
-        self._cache_menu[cid] = idx
-        self._log.debug("Cache menu_items idx_size=%d", len(idx))
+        new_items = index_by_attr(db.payload, "item_id")
+        # Merge new batch into existing cache (light tables can span multiple batches)
+        if cid not in self._cache_menu:
+            self._cache_menu[cid] = {}
+        self._cache_menu[cid].update(new_items)
+        self._log.debug("Cache menu_items batch_items=%d total_items=%d", 
+                       len(new_items), len(self._cache_menu[cid]))
         
         # Persist to disk
         try:
@@ -443,9 +447,13 @@ class JoinerWorker:
             cid,
         )
 
-        idx = index_by_attr(db.payload, "store_id")
-        self._cache_stores[cid] = idx
-        self._log.debug("Cache stores idx_size=%d", len(idx))
+        new_stores = index_by_attr(db.payload, "store_id")
+        # Merge new batch into existing cache (light tables can span multiple batches)
+        if cid not in self._cache_stores:
+            self._cache_stores[cid] = {}
+        self._cache_stores[cid].update(new_stores)
+        self._log.debug("Cache stores batch_stores=%d total_stores=%d", 
+                       len(new_stores), len(self._cache_stores[cid]))
 
         # Persist to disk
         try:
