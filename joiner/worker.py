@@ -51,6 +51,7 @@ class JoinerWorker:
         shard_index: int = 0,
         out_factory: Optional[Callable[[], MessageMiddleware]] = None,
         persistence_dir: str = "/tmp/joiner_state",
+        write_buffer_size: int = 100,
     ):
         self._in = in_mw
         self._out = out_results_mw
@@ -82,6 +83,11 @@ class JoinerWorker:
         from collections import defaultdict
         self._received_batches: Dict[tuple[TableName, str, tuple], set[int]] = defaultdict(set)
 
+        # Buffered disk writes configuration
+        self._write_buffer_size = write_buffer_size
+        # Track which rows have been written per batch: (table, client, batch_number) -> set of row indices
+        self._written_rows: Dict[tuple[TableName, str, int], set[int]] = defaultdict(set)
+
         # Restore state from disk
         self._restore_state()
 
@@ -100,6 +106,12 @@ class JoinerWorker:
     def _get_eof_path(self, table_name: TableName, client_id: str) -> str:
         """Get file path for EOF metadata."""
         return os.path.join(self._persistence_dir, f"eof_{table_name}_{client_id}.json")
+
+    def _get_written_rows_path(self, table_name: TableName, client_id: str, batch_number: int) -> str:
+        """Get file path for written rows tracking."""
+        return os.path.join(
+            self._persistence_dir, f"written_rows_{table_name}_{client_id}_{batch_number}.json"
+        )
 
     def _save_pending_batch(self, table_name: TableName, client_id: str, batch_number: int, raw_data: bytes) -> None:
         """Save a pending batch to disk."""
@@ -180,6 +192,33 @@ class JoinerWorker:
                 os.remove(temp_path)
             raise
 
+    def _persist_written_rows(self, table_name: TableName, client_id: str, batch_number: int, written_rows: set[int]) -> None:
+        """Persist written rows tracking to disk."""
+        path = self._get_written_rows_path(table_name, client_id, batch_number)
+        temp_path = path + ".tmp"
+        try:
+            with open(temp_path, "w") as f:
+                json.dump({"written_rows": list(written_rows)}, f)
+            os.rename(temp_path, path)
+            self._log.debug("Persisted written rows: table=%s client=%s bn=%s count=%d",
+                          table_name, client_id, batch_number, len(written_rows))
+        except Exception as e:
+            self._log.error("Failed to persist written rows: %s", e)
+            if os.path.exists(temp_path):
+                os.remove(temp_path)
+            raise
+
+    def _delete_written_rows_tracking(self, table_name: TableName, client_id: str, batch_number: int) -> None:
+        """Delete written rows tracking file after batch is fully processed."""
+        path = self._get_written_rows_path(table_name, client_id, batch_number)
+        try:
+            if os.path.exists(path):
+                os.remove(path)
+                self._log.debug("Deleted written rows tracking: table=%s client=%s bn=%s",
+                              table_name, client_id, batch_number)
+        except Exception as e:
+            self._log.warning("Failed to delete written rows tracking %s: %s", path, e)
+
     def _restore_state(self) -> None:
         """Restore state from disk on startup."""
         if not os.path.exists(self._persistence_dir):
@@ -232,6 +271,26 @@ class JoinerWorker:
                                       table_name, client_id)
                 except Exception as e:
                     self._log.warning("Failed to restore EOF from %s: %s", filename, e)
+
+            elif filename.startswith("written_rows_") and filename.endswith(".json"):
+                try:
+                    # Parse: written_rows_{table}_{client}_{batch}.json
+                    parts = filename[13:-5].split("_", 2)
+                    table_name = int(parts[0])
+                    client_id = parts[1]
+                    batch_number = int(parts[2])
+
+                    path = os.path.join(self._persistence_dir, filename)
+                    with open(path, "r") as f:
+                        data = json.load(f)
+
+                    key = (table_name, client_id, batch_number)
+                    written_rows = set(data.get("written_rows", []))
+                    self._written_rows[key] = written_rows
+                    self._log.info("Restored written rows for table=%s client=%s bn=%s count=%d",
+                                  table_name, client_id, batch_number, len(written_rows))
+                except Exception as e:
+                    self._log.warning("Failed to restore written rows from %s: %s", filename, e)
 
         self._log.info("State restoration complete")
 
@@ -511,7 +570,7 @@ class JoinerWorker:
         return self._process_ti_batch(raw, cid, bn)
 
     def _process_ti_batch(self, raw: bytes, cid: str, bn: int) -> bool:
-        """Process a transaction_items batch (either fresh or from disk)."""
+        """Process a transaction_items batch with buffered writes (either fresh or from disk)."""
         envelope = Envelope()
         envelope.ParseFromString(raw)
         db: DataBatch = envelope.data_batch
@@ -527,39 +586,12 @@ class JoinerWorker:
             self._log.warning("Menu cache no disponible; cannot process batch=%d", bn)
             return False
 
-        out_cols = ["transaction_id", "name", "quantity", "subtotal", "created_at"]
-        out_schema = TableSchema(columns=out_cols)
-        out_rows: List[Row] = []
-
-        for r in iterate_rows_as_dicts(db.payload):
-            item_id = norm(r["item_id"])
-            mi = menu_idx.get(item_id)
-            if not mi:
-                continue
-            joined_item_values = []
-            for col in out_cols:
-                if col == "name":
-                    joined_item_values.append(mi[col])
-                else:
-                    joined_item_values.append(r[col])
-            out_rows.append(Row(values=joined_item_values))
-
-        self._log.debug(
-            "JOIN Q2: in=%d matched=%d", len(db.payload.rows), len(out_rows)
+        # Use buffered write for Q2 join
+        return self._process_batch_buffered(
+            db, cid, bn, TableName.TRANSACTION_ITEMS, TableName.TRANSACTION_ITEMS_MENU_ITEMS,
+            ["transaction_id", "name", "quantity", "subtotal", "created_at"],
+            menu_idx, "item_id", "name"
         )
-        joined_table = TableData(
-            name=TableName.TRANSACTION_ITEMS_MENU_ITEMS,
-            schema=out_schema,
-            rows=out_rows,
-            batch_number=db.payload.batch_number,
-            status=db.payload.status,
-        )
-        db.payload.CopyFrom(joined_table)
-        self._log.debug("Q2 preserving TI batch_status=%d", db.payload.status)
-        raw = Envelope(type=MessageType.DATA_BATCH, data_batch=db).SerializeToString()
-        self._safe_send(raw)
-        self._delete_pending_batch(TableName.TRANSACTION_ITEMS, cid, bn)
-        return True
 
     def _on_raw_tx(
         self, raw: bytes, channel=None, delivery_tag=None, redelivered=False
@@ -609,7 +641,7 @@ class JoinerWorker:
         return self._process_tx_batch(raw, cid, bn)
 
     def _process_tx_batch(self, raw: bytes, cid: str, bn: int) -> bool:
-        """Process a transactions batch (either fresh or from disk)."""
+        """Process a transactions batch with buffered writes (either fresh or from disk)."""
         envelope = Envelope()
         envelope.ParseFromString(raw)
         db: DataBatch = envelope.data_batch
@@ -625,51 +657,114 @@ class JoinerWorker:
             self._log.warning("Stores cache no disponible; cannot process batch=%d", bn)
             return False
 
-        out_cols = [
-            "transaction_id",
-            "store_name",
-            "final_amount",
-            "created_at",
-            "user_id",
-        ]
+        # Use buffered write for Q3 join
+        return self._process_batch_buffered(
+            db, cid, bn, TableName.TRANSACTIONS, TableName.TRANSACTION_STORES,
+            ["transaction_id", "store_name", "final_amount", "created_at", "user_id"],
+            stores_idx, "store_id", "store_name"
+        )
+
+    def _process_batch_buffered(
+        self, 
+        db: DataBatch, 
+        cid: str, 
+        bn: int, 
+        source_table: TableName,
+        result_table: TableName,
+        out_cols: List[str],
+        join_index: Dict[str, dict],
+        join_key: str,
+        join_col: str
+    ) -> bool:
+        """
+        Process a batch with buffered writes.
+        Processes rows in chunks, persisting progress after each chunk.
+        On redelivery, resumes from where it left off.
+        """
+        tracking_key = (source_table, cid, bn)
+        written_rows = self._written_rows[tracking_key]
+        total_rows = len(db.payload.rows)
+        
+        self._log.info("Processing batch with buffering: table=%s client=%s bn=%s total_rows=%d already_written=%d buffer_size=%d",
+                      source_table, cid, bn, total_rows, len(written_rows), self._write_buffer_size)
+
         out_schema = TableSchema(columns=out_cols)
-        out_rows: List[Row] = []
-
-        for r in iterate_rows_as_dicts(db.payload):
-            sid = norm(r["store_id"])
-            st = stores_idx.get(sid)
-            if not st:
-                self._log.warning("no store index for store_id %s", sid)
+        
+        # Process rows in chunks
+        current_buffer: List[Row] = []
+        rows_to_process = list(enumerate(iterate_rows_as_dicts(db.payload)))
+        
+        for row_idx, r in rows_to_process:
+            # Skip already written rows (from previous delivery)
+            if row_idx in written_rows:
                 continue
-            joined_item_values = []
+                
+            # Join logic
+            key_val = norm(r[join_key])
+            joined_item = join_index.get(key_val)
+            if not joined_item:
+                self._log.warning("No join match for %s=%s", join_key, key_val)
+                # Mark as written even if no match (to skip on redelivery)
+                written_rows.add(row_idx)
+                continue
+                
+            joined_values = []
             for col in out_cols:
-                if col == "store_name":
-                    joined_item_values.append(st[col])
+                if col == join_col:
+                    joined_values.append(joined_item[col])
                 else:
-                    joined_item_values.append(r.get(col, ""))
-            out_rows.append(Row(values=joined_item_values))
+                    joined_values.append(r.get(col, ""))
+            current_buffer.append(Row(values=joined_values))
+            written_rows.add(row_idx)
+            
+            # Flush buffer when it reaches the configured size
+            if len(current_buffer) >= self._write_buffer_size:
+                self._flush_buffer(current_buffer, db, result_table, out_schema)
+                current_buffer.clear()
+                # Persist progress
+                try:
+                    self._persist_written_rows(source_table, cid, bn, written_rows)
+                except Exception as e:
+                    self._log.error("Failed to persist written rows progress: %s", e)
+                    return False  # NACK to retry
+        
+        # Flush remaining rows
+        if current_buffer:
+            self._flush_buffer(current_buffer, db, result_table, out_schema)
+            current_buffer.clear()
+        
+        # All rows processed successfully
+        self._log.info("Batch fully processed: table=%s client=%s bn=%s total_written=%d",
+                      source_table, cid, bn, len(written_rows))
+        
+        # Cleanup tracking
+        del self._written_rows[tracking_key]
+        self._delete_written_rows_tracking(source_table, cid, bn)
+        self._delete_pending_batch(source_table, cid, bn)
+        
+        return True  # ACK
 
-        self._log.debug(
-            "JOIN %s: in=%d matched=%d",
-            db.query_ids[0],
-            len(db.payload.rows),
-            len(out_rows),
-        )
+    def _flush_buffer(self, buffer: List[Row], original_batch: DataBatch, result_table: TableName, schema: TableSchema) -> None:
+        """Flush a buffer of processed rows to the output."""
+        if not buffer:
+            return
+            
         joined_table = TableData(
-            name=TableName.TRANSACTION_STORES,
-            schema=out_schema,
-            rows=out_rows,
-            batch_number=db.payload.batch_number,
-            status=db.payload.status,
+            name=result_table,
+            schema=schema,
+            rows=buffer,
+            batch_number=original_batch.payload.batch_number,
+            status=original_batch.payload.status,
         )
-        db.payload.CopyFrom(joined_table)
-        self._log.debug(
-            "%s preserving TX batch_status=%d", db.query_ids[0], db.payload.status
-        )
-        raw = Envelope(type=MessageType.DATA_BATCH, data_batch=db).SerializeToString()
+        
+        output_batch = DataBatch()
+        output_batch.CopyFrom(original_batch)
+        output_batch.payload.CopyFrom(joined_table)
+        
+        raw = Envelope(type=MessageType.DATA_BATCH, data_batch=output_batch).SerializeToString()
         self._safe_send(raw)
-        self._delete_pending_batch(TableName.TRANSACTIONS, cid, bn)
-        return True
+        
+        self._log.debug("Flushed buffer: rows=%d table=%s", len(buffer), result_table)
 
     def _on_raw_users(
         self, raw: bytes, channel=None, delivery_tag=None, redelivered=False
