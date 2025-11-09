@@ -342,10 +342,14 @@ class FilterRouter:
         key = (cid, table)
         
         # Check for duplicate batch - only for batches coming from filter workers (mask != 0)
+        # NOTE: We check for duplicates but DON'T mark as received yet - that happens after successful processing
+        batch_is_duplicate = False
+        dedup_key = None
         if mask != 0:
             query_ids_tuple = tuple(sorted(queries))
             dedup_key = (table, cid, query_ids_tuple)
             if bn in self._received_batches[dedup_key]:
+                batch_is_duplicate = True
                 self._log.warning(
                     "DUPLICATE batch detected: table=%s bn=%s cid=%s queries=%s mask=%s",
                     table, bn, cid, queries, bin(mask)
@@ -364,15 +368,6 @@ class FilterRouter:
                         self._log.error("Failed to persist after duplicate decrement: %s", e)
                         # Don't raise - we already processed this batch, just log the error
                 return
-            # Mark batch as received - persist FIRST to avoid false duplicates on crash
-            try:
-                self._received_batches[dedup_key].add(bn)
-                self._persist_received_batches()
-            except Exception as e:
-                self._log.error("Failed to persist received batches after adding: %s", e)
-                # Remove from in-memory to keep consistency
-                self._received_batches[dedup_key].discard(bn)
-                raise
 
         # Increment pending counter for fresh batches from orchestrator
         # Make this idempotent: only increment if not already completed for this batch
@@ -468,10 +463,27 @@ class FilterRouter:
                     except Exception as e:
                         self._log.error("Failed to persist pending batches after fanout: %s", e)
                         raise
+                # Mark batch as received after successful fanout
+                if mask != 0 and dedup_key and not batch_is_duplicate:
+                    try:
+                        self._received_batches[dedup_key].add(bn)
+                        self._persist_received_batches()
+                    except Exception as e:
+                        self._log.error("Failed to persist received batches after fanout: %s", e)
+                        # Don't raise - fanout already happened
                 return
 
             # Send to aggregator - if this fails, raise exception to trigger NACK
             self._send_to_some_aggregator(batch)
+            
+            # Mark batch as received after successful send
+            if mask != 0 and dedup_key and not batch_is_duplicate:
+                try:
+                    self._received_batches[dedup_key].add(bn)
+                    self._persist_received_batches()
+                except Exception as e:
+                    self._log.error("Failed to persist received batches after send: %s", e)
+                    # Don't raise - send already happened
             
             # Decrement pending counter if this batch was previously incremented
             # Check _pending_increments to handle case where batch went through filters and came back
