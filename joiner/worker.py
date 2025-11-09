@@ -765,21 +765,23 @@ class JoinerWorker:
             current_buffer.append(Row(values=joined_values))
             written_rows.add(row_idx)
             
-            # Flush buffer when it reaches the configured size
+            # Persist progress when buffer is full (but don't flush yet - accumulate all rows)
             if len(current_buffer) >= self._write_buffer_size:
-                self._flush_buffer(current_buffer, db, result_table, out_schema)
-                current_buffer.clear()
-                # Persist progress
                 try:
                     self._persist_written_rows(source_table, cid, bn, written_rows)
                 except Exception as e:
                     self._log.error("Failed to persist written rows progress: %s", e)
                     return False  # NACK to retry
         
-        # Flush remaining rows
+        # Flush ALL accumulated rows as a single output batch
         if current_buffer:
+            self._log.info("Flushing complete batch: rows=%d matched out of %d total", len(current_buffer), total_rows)
             self._flush_buffer(current_buffer, db, result_table, out_schema)
             current_buffer.clear()
+        else:
+            self._log.warning("No rows in buffer to flush (all rows skipped or no matches)")
+            # Still need to send an empty batch to maintain batch sequence
+            self._flush_buffer([], db, result_table, out_schema)
         
         # All rows processed successfully
         self._log.info("Batch fully processed: table=%s client=%s bn=%s total_written=%d",
