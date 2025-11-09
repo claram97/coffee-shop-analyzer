@@ -77,6 +77,11 @@ class JoinerWorker:
         self._persistence_lock = threading.Lock()
         os.makedirs(self._persistence_dir, exist_ok=True)
 
+        # In-memory batch deduplication: track received batches per (table, client_id, query_ids_tuple)
+        # This mitigates duplicate batch propagation from joiner router (no persistence needed)
+        from collections import defaultdict
+        self._received_batches: Dict[tuple[TableName, str, tuple], set[int]] = defaultdict(set)
+
         # Restore state from disk
         self._restore_state()
 
@@ -230,6 +235,34 @@ class JoinerWorker:
 
         self._log.info("State restoration complete")
 
+    def _is_duplicate_batch(self, data_batch: DataBatch) -> bool:
+        """
+        Check if a batch is a duplicate. Returns True if duplicate, False otherwise.
+        Tracks batches by (table, client_id, query_ids_tuple, batch_number).
+        In-memory only - no persistence (loss on restart is acceptable).
+        """
+        table = data_batch.payload.name
+        client_id = data_batch.client_id
+        batch_number = data_batch.payload.batch_number
+        query_ids_tuple = tuple(sorted(data_batch.query_ids))
+        
+        dedup_key = (table, client_id, query_ids_tuple)
+        
+        if batch_number in self._received_batches[dedup_key]:
+            self._log.warning(
+                "DUPLICATE batch detected and discarded in joiner worker: table=%s bn=%s client=%s queries=%s",
+                table, batch_number, client_id, data_batch.query_ids
+            )
+            return True
+        
+        # Mark batch as received
+        self._received_batches[dedup_key].add(batch_number)
+        self._log.debug(
+            "Batch marked as received: table=%s bn=%s client=%s queries=%s",
+            table, batch_number, client_id, data_batch.query_ids
+        )
+        return False
+
     def _cleanup_persisted_client(self, client_id: str) -> None:
         """Clean up all persisted data for a client."""
         for filename in os.listdir(self._persistence_dir):
@@ -342,6 +375,10 @@ class JoinerWorker:
             )
         if envelope.type == MessageType.DATA_BATCH:
             db: DataBatch = envelope.data_batch
+            
+            # Check for duplicate batch and discard if already processed
+            if self._is_duplicate_batch(db):
+                return True  # ACK duplicate batch
         else:
             self._log.warning("Unknown message type: %s. Skipping.", envelope.type)
             return True
@@ -387,6 +424,10 @@ class JoinerWorker:
             )
         if envelope.type == MessageType.DATA_BATCH:
             db: DataBatch = envelope.data_batch
+            
+            # Check for duplicate batch and discard if already processed
+            if self._is_duplicate_batch(db):
+                return True  # ACK duplicate batch
         else:
             self._log.warning("Unknown message type: %s. Skipping.", envelope.type)
             return True
@@ -432,6 +473,10 @@ class JoinerWorker:
             )
         if envelope.type == MessageType.DATA_BATCH:
             db: DataBatch = envelope.data_batch
+            
+            # Check for duplicate batch and discard if already processed
+            if self._is_duplicate_batch(db):
+                return True  # ACK duplicate batch
         else:
             self._log.warning("Unknown message type: %s. Skipping.", envelope.type)
             return True
@@ -526,6 +571,10 @@ class JoinerWorker:
             )
         if envelope.type == MessageType.DATA_BATCH:
             db: DataBatch = envelope.data_batch
+            
+            # Check for duplicate batch and discard if already processed
+            if self._is_duplicate_batch(db):
+                return True  # ACK duplicate batch
         else:
             self._log.warning("Unknown message type: %s. Skipping.", envelope.type)
             return True
@@ -632,6 +681,10 @@ class JoinerWorker:
             )
         if envelope.type == MessageType.DATA_BATCH:
             db: DataBatch = envelope.data_batch
+            
+            # Check for duplicate batch and discard if already processed
+            if self._is_duplicate_batch(db):
+                return True  # ACK duplicate batch
         else:
             self._log.warning("Unknown message type: %s. Skipping.", envelope.type)
             return True
