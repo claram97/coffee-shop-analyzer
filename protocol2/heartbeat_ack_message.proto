@@ -1,0 +1,7 @@
+syntax = "proto3";
+
+package protocol;
+
+message HeartbeatAck {
+  uint64 received_at_ms = 1;
+}

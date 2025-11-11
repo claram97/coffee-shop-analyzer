@@ -9,6 +9,8 @@ import "query_result.proto";
 import "election_message.proto";
 import "election_answer_message.proto";
 import "coordinator_message.proto";
+import "heartbeat_message.proto";
+import "heartbeat_ack_message.proto";
 
 
 enum MessageType {
@@ -20,6 +22,8 @@ enum MessageType {
   ELECTION = 5;
   ELECTION_ANSWER = 6;
   COORDINATOR = 7;
+  HEARTBEAT = 8;
+  HEARTBEAT_ACK = 9;
 }
 
 
@@ -34,5 +38,7 @@ message Envelope {
     Election election = 6;
     ElectionAnswer election_answeer = 7;
     Coordinator coordinator = 8;
+    Heartbeat heartbeat = 9;
+    HeartbeatAck heartbeat_ack = 10;
   }
 }

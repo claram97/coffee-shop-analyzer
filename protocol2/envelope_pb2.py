@@ -29,17 +29,19 @@ from . import query_result_pb2 as query__result__pb2
 from . import election_message_pb2 as election__message__pb2
 from . import election_answer_message_pb2 as election__answer__message__pb2
 from . import coordinator_message_pb2 as coordinator__message__pb2
+from . import heartbeat_message_pb2 as heartbeat__message__pb2
+from . import heartbeat_ack_message_pb2 as heartbeat__ack__message__pb2
 
 
-DESCRIPTOR = _descriptor_pool.Default().AddSerializedFile(b'\n\x0e\x65nvelope.proto\x12\x08protocol\x1a\x0f\x64\x61tabatch.proto\x1a\x11\x65of_message.proto\x1a\x10table_data.proto\x1a\x12query_result.proto\x1a\x16\x65lection_message.proto\x1a\x1d\x65lection_answer_message.proto\x1a\x19\x63oordinator_message.proto\"\xeb\x02\n\x08\x45nvelope\x12#\n\x04type\x18\x01 \x01(\x0e\x32\x15.protocol.MessageType\x12)\n\ndata_batch\x18\x02 \x01(\x0b\x32\x13.protocol.DataBatchH\x00\x12#\n\x03\x65of\x18\x03 \x01(\x0b\x32\x14.protocol.EOFMessageH\x00\x12$\n\x05table\x18\x04 \x01(\x0b\x32\x13.protocol.TableDataH\x00\x12-\n\x0cquery_result\x18\x05 \x01(\x0b\x32\x15.protocol.QueryResultH\x00\x12&\n\x08\x65lection\x18\x06 \x01(\x0b\x32\x12.protocol.ElectionH\x00\x12\x34\n\x10\x65lection_answeer\x18\x07 \x01(\x0b\x32\x18.protocol.ElectionAnswerH\x00\x12,\n\x0b\x63oordinator\x18\x08 \x01(\x0b\x32\x15.protocol.CoordinatorH\x00\x42\t\n\x07payload*\x91\x01\n\x0bMessageType\x12\x0b\n\x07UNKNOWN\x10\x00\x12\x0e\n\nDATA_BATCH\x10\x01\x12\x0f\n\x0b\x45OF_MESSAGE\x10\x02\x12\x0e\n\nTABLE_DATA\x10\x03\x12\x10\n\x0cQUERY_RESULT\x10\x04\x12\x0c\n\x08\x45LECTION\x10\x05\x12\x13\n\x0f\x45LECTION_ANSWER\x10\x06\x12\x0f\n\x0b\x43OORDINATOR\x10\x07\x62\x06proto3')
+DESCRIPTOR = _descriptor_pool.Default().AddSerializedFile(b'\n\x0e\x65nvelope.proto\x12\x08protocol\x1a\x0f\x64\x61tabatch.proto\x1a\x11\x65of_message.proto\x1a\x10table_data.proto\x1a\x12query_result.proto\x1a\x16\x65lection_message.proto\x1a\x1d\x65lection_answer_message.proto\x1a\x19\x63oordinator_message.proto\x1a\x17heartbeat_message.proto\x1a\x1bheartbeat_ack_message.proto\"\xc6\x03\n\x08\x45nvelope\x12#\n\x04type\x18\x01 \x01(\x0e\x32\x15.protocol.MessageType\x12)\n\ndata_batch\x18\x02 \x01(\x0b\x32\x13.protocol.DataBatchH\x00\x12#\n\x03\x65of\x18\x03 \x01(\x0b\x32\x14.protocol.EOFMessageH\x00\x12$\n\x05table\x18\x04 \x01(\x0b\x32\x13.protocol.TableDataH\x00\x12-\n\x0cquery_result\x18\x05 \x01(\x0b\x32\x15.protocol.QueryResultH\x00\x12&\n\x08\x65lection\x18\x06 \x01(\x0b\x32\x12.protocol.ElectionH\x00\x12\x34\n\x10\x65lection_answeer\x18\x07 \x01(\x0b\x32\x18.protocol.ElectionAnswerH\x00\x12,\n\x0b\x63oordinator\x18\x08 \x01(\x0b\x32\x15.protocol.CoordinatorH\x00\x12(\n\theartbeat\x18\t \x01(\x0b\x32\x13.protocol.HeartbeatH\x00\x12/\n\rheartbeat_ack\x18\n \x01(\x0b\x32\x16.protocol.HeartbeatAckH\x00\x42\t\n\x07payload*\xb3\x01\n\x0bMessageType\x12\x0b\n\x07UNKNOWN\x10\x00\x12\x0e\n\nDATA_BATCH\x10\x01\x12\x0f\n\x0b\x45OF_MESSAGE\x10\x02\x12\x0e\n\nTABLE_DATA\x10\x03\x12\x10\n\x0cQUERY_RESULT\x10\x04\x12\x0c\n\x08\x45LECTION\x10\x05\x12\x13\n\x0f\x45LECTION_ANSWER\x10\x06\x12\x0f\n\x0b\x43OORDINATOR\x10\x07\x12\r\n\tHEARTBEAT\x10\x08\x12\x11\n\rHEARTBEAT_ACK\x10\tb\x06proto3')
 
 _globals = globals()
 _builder.BuildMessageAndEnumDescriptors(DESCRIPTOR, _globals)
 _builder.BuildTopDescriptorsAndMessages(DESCRIPTOR, 'envelope_pb2', _globals)
 if not _descriptor._USE_C_DESCRIPTORS:
   DESCRIPTOR._loaded_options = None
-  _globals['_MESSAGETYPE']._serialized_start=551
-  _globals['_MESSAGETYPE']._serialized_end=696
-  _globals['_ENVELOPE']._serialized_start=185
-  _globals['_ENVELOPE']._serialized_end=548
+  _globals['_MESSAGETYPE']._serialized_start=696
+  _globals['_MESSAGETYPE']._serialized_end=875
+  _globals['_ENVELOPE']._serialized_start=239
+  _globals['_ENVELOPE']._serialized_end=693
 # @@protoc_insertion_point(module_scope)
