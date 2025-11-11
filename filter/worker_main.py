@@ -49,7 +49,6 @@ def main():
     logger.info(f"Input queue (filters pool): {filters_pool_queue}")
     logger.info(f"Output exchange (router input): {router_exchange}")
 
-    # Initialize election coordinator (listener only for now)
     heartbeat_interval = float(os.getenv("HEARTBEAT_INTERVAL_SECONDS", "2.0"))
     heartbeat_timeout = float(os.getenv("HEARTBEAT_TIMEOUT_SECONDS", "1.0"))
     heartbeat_max_misses = int(os.getenv("HEARTBEAT_MAX_MISSES", "3"))
@@ -132,6 +131,7 @@ def main():
         logger.info("Cleaning up resources...")
         
         if election_coordinator:
+            election_coordinator.graceful_resign()
             logger.info("Stopping election coordinator...")
             election_coordinator.stop()
         

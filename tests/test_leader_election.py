@@ -480,6 +480,8 @@ class TestHeartbeatClient:
             max_missed_heartbeats=2,
             startup_grace=0.0,
         )
+        client.election_cooldown = 0.0
+        client.cooldown_jitter = 0.0
 
         client.activate()
         client._startup_grace_deadline = 0
@@ -499,6 +501,8 @@ class TestHeartbeatClient:
             max_missed_heartbeats=2,
             startup_grace=0.0,
         )
+        client.election_cooldown = 0.0
+        client.cooldown_jitter = 0.0
         client._missed_heartbeats = 1
         client.activate()
         client._startup_grace_deadline = 0
@@ -521,6 +525,8 @@ class TestHeartbeatClient:
             max_missed_heartbeats=2,
             startup_grace=0.0,
         )
+        client.election_cooldown = 0.0
+        client.cooldown_jitter = 0.0
 
         client.activate()
         client._startup_grace_deadline = 0

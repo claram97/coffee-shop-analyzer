@@ -93,7 +93,6 @@ def main():
     heartbeat_max_misses = int(os.getenv("HEARTBEAT_MAX_MISSES", "3"))
     heartbeat_startup_grace = float(os.getenv("HEARTBEAT_STARTUP_GRACE_SECONDS", "4.0"))
 
-    # Initialize election coordinator (listener only for now)
     election_coordinator = None
     heartbeat_client = None
 
@@ -158,6 +157,7 @@ def main():
         logging.info("Cleaning up resources...")
 
         if election_coordinator:
+            election_coordinator.graceful_resign()
             logging.info("Stopping election coordinator...")
             election_coordinator.stop()
         if heartbeat_client:

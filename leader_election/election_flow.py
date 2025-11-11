@@ -13,7 +13,8 @@ import struct
 import logging
 import threading
 import time
-from typing import List, Tuple, Callable, Optional
+import random
+from typing import List, Tuple, Callable, Optional, Set
 from enum import Enum
 
 from protocol2 import (
@@ -91,6 +92,9 @@ class ElectionCoordinator:
         self._election_in_progress = threading.Event()
         self._heartbeat_lock = threading.Lock()
         self._follower_last_seen = {}
+        self._leader_since: Optional[float] = None
+        self._missing_followers_logged: Set[int] = set()
+        self._stepping_down = False
         
         # Socket for listening to election messages
         self._server_socket: Optional[socket.socket] = None
@@ -207,6 +211,7 @@ class ElectionCoordinator:
             self.state = NodeState.LEADER
             self.current_leader = self.my_id
         
+        self._stepping_down = False
         self._reset_follower_tracking()
         
         # Notify via callback
@@ -226,13 +231,13 @@ class ElectionCoordinator:
     def _wait_for_coordinator(self):
         """Wait for a COORDINATOR message after receiving ANSWER."""
         # Wait for coordinator announcement with timeout
-        start_time = time.time()
+        start_time = time.monotonic()
         timeout = self.election_timeout * 2
         
         with self._state_lock:
             initial_leader = self.current_leader
             
-        while time.time() - start_time < timeout:
+        while time.monotonic() - start_time < timeout:
             if self._stop_event.is_set():
                 return
                 
@@ -347,6 +352,31 @@ class ElectionCoordinator:
             except Exception as e:
                 logger.error(f"Error in leader change callback: {e}")
     
+    def graceful_resign(self):
+        """Notify peers to start an election before shutting down."""
+        with self._state_lock:
+            is_leader = self.state == NodeState.LEADER
+        if not is_leader:
+            logger.debug("Node %s is not leader; skipping graceful resign", self.my_id)
+            return
+        if self._stepping_down:
+            return
+        self._stepping_down = True
+        logger.info("Node %s stepping down gracefully, notifying peers", self.my_id)
+        self._log_unseen_followers(force=True)
+        for node_id, host, port in self.all_nodes:
+            if node_id == self.my_id:
+                continue
+            result = send_election_message(host, port, timeout=1.0)
+            logger.info(
+                "Sent step-down election notice to node %s at %s:%s (ack=%s)",
+                node_id,
+                host,
+                port,
+                result,
+            )
+        logger.info("Node %s completed step-down notifications", self.my_id)
+    
     def _handle_heartbeat(self, heartbeat_msg: heartbeat_message_pb2.Heartbeat, client_sock: socket.socket):
         """Handle incoming HEARTBEAT message from a follower."""
         sender_id = heartbeat_msg.node_id
@@ -363,6 +393,7 @@ class ElectionCoordinator:
                 self._follower_last_seen[sender_id] = recv_ts
         
         self._send_heartbeat_ack(client_sock, recv_ts)
+        self._log_unseen_followers()
     
     def _send_heartbeat_ack(self, client_sock: socket.socket, recv_ts: float):
         """Send a HEARTBEAT_ACK envelope back to the heartbeat sender."""
@@ -380,17 +411,43 @@ class ElectionCoordinator:
         except socket.error as exc:
             logger.debug(f"Failed to send HEARTBEAT_ACK: {exc}")
     
+    def _log_unseen_followers(self, force: bool = False):
+        """Log warnings for followers that have not sent heartbeats yet."""
+        with self._heartbeat_lock:
+            unseen = [
+                node_id
+                for node_id, last_seen in self._follower_last_seen.items()
+                if last_seen is None and node_id not in self._missing_followers_logged
+            ]
+        if not unseen:
+            return
+        if not force:
+            if self._leader_since is None:
+                return
+            if time.monotonic() - self._leader_since < self.election_timeout:
+                return
+        for node_id in unseen:
+            logger.warning(
+                "No heartbeat received yet from follower %s since leadership change",
+                node_id,
+            )
+            self._missing_followers_logged.add(node_id)
+    
     def _reset_follower_tracking(self):
         """Initialize heartbeat tracking for all followers when becoming leader."""
         with self._heartbeat_lock:
             self._follower_last_seen = {
                 node_id: None for node_id, _, _ in self.all_nodes if node_id != self.my_id
             }
+            self._leader_since = time.monotonic()
+            self._missing_followers_logged = set()
     
     def _clear_follower_tracking(self):
         """Clear heartbeat tracking data when stepping down or stopping."""
         with self._heartbeat_lock:
             self._follower_last_seen = {}
+            self._leader_since = None
+            self._missing_followers_logged = set()
                 
     def get_current_leader(self) -> Optional[int]:
         """Get the current leader ID."""
@@ -420,6 +477,8 @@ class HeartbeatClient:
         heartbeat_timeout: float = 1.0,
         max_missed_heartbeats: int = 3,
         startup_grace: float = 4.0,
+        election_cooldown: float = 5.0,
+        cooldown_jitter: float = 1.0,
     ):
         self.coordinator = coordinator
         self.my_id = my_id
@@ -428,10 +487,12 @@ class HeartbeatClient:
         self.heartbeat_timeout = heartbeat_timeout
         self.max_missed_heartbeats = max(1, max_missed_heartbeats)
         self.startup_grace = max(0.0, startup_grace)
+        self.election_cooldown = max(0.0, election_cooldown)
+        self.cooldown_jitter = max(0.0, cooldown_jitter)
         self._missed_heartbeats = 0
         self._stop_event = threading.Event()
         self._thread: Optional[threading.Thread] = None
-        self._last_election_request_ts = 0.0
+        self._last_election_request_ts = -float("inf")
         self._active = False
         self._startup_grace_deadline = 0.0
         self._state_lock = threading.Lock()
@@ -462,7 +523,7 @@ class HeartbeatClient:
             already_active = self._active
             self._active = True
             self._missed_heartbeats = 0
-            self._startup_grace_deadline = time.time() + self.startup_grace
+            self._startup_grace_deadline = time.monotonic() + self.startup_grace
         if not already_active:
             logger.info("Heartbeat client activated for node %s", self.my_id)
 
@@ -481,7 +542,7 @@ class HeartbeatClient:
             except Exception as exc:
                 logger.error("Heartbeat thread error: %s", exc, exc_info=True)
             finally:
-                time.sleep(self.heartbeat_interval)
+                self._stop_event.wait(self.heartbeat_interval)
 
     def _perform_heartbeat_check(self):
         with self._state_lock:
@@ -495,12 +556,8 @@ class HeartbeatClient:
         leader_id = self.coordinator.get_current_leader()
 
         if leader_id is None:
-            if not self.coordinator.am_i_leader() and time.time() >= grace_deadline:
-                now = time.time()
-                if now - self._last_election_request_ts > self.heartbeat_interval:
-                    logger.debug("No leader known, requesting election")
-                    self.coordinator.start_election()
-                    self._last_election_request_ts = now
+            if not self.coordinator.am_i_leader() and time.monotonic() >= grace_deadline:
+                self._request_election("no_leader_known")
             self._missed_heartbeats = 0
             return
 
@@ -536,13 +593,27 @@ class HeartbeatClient:
                 self.max_missed_heartbeats,
             )
             if self._missed_heartbeats >= self.max_missed_heartbeats:
-                logger.error(
-                    "Leader %s unresponsive after %s misses, triggering election",
-                    leader_id,
-                    self._missed_heartbeats,
-                )
                 self._missed_heartbeats = 0
-                self.coordinator.start_election()
+                self._request_election(
+                    f"leader_{leader_id}_unresponsive_after_misses"
+                )
+
+    def _request_election(self, reason: str) -> bool:
+        now = time.monotonic()
+        delay = self.election_cooldown + random.uniform(0.0, self.cooldown_jitter)
+        elapsed = now - self._last_election_request_ts
+        if elapsed < delay:
+            remaining = delay - elapsed
+            logger.debug(
+                "Skipping election request (%s); cooldown %.2fs remaining",
+                reason,
+                remaining,
+            )
+            return False
+        self._last_election_request_ts = now
+        logger.warning("Triggering election (%s)", reason)
+        self.coordinator.start_election()
+        return True
 
 
 def start_election_thread(my_id: int,

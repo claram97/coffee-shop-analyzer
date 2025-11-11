@@ -257,6 +257,7 @@ def main():
         log.info("Cleaning up resources...")
 
         if election_coordinator:
+            election_coordinator.graceful_resign()
             log.info("Stopping election coordinator...")
             election_coordinator.stop()
         if heartbeat_client:
