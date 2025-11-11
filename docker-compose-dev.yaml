@@ -59,6 +59,7 @@ services:
       - LOG_LEVEL=INFO
       - CONFIG_PATH=/config/config.ini
       - FILTER_ROUTER_INDEX=0
+      - ELECTION_PORT=9200
     networks:
       - testing_net
     volumes:
@@ -78,6 +79,7 @@ services:
       - LOG_LEVEL=INFO
       - CONFIG_PATH=/config/config.ini
       - FILTER_ROUTER_INDEX=1
+      - ELECTION_PORT=9201
     networks:
       - testing_net
     volumes:
@@ -97,6 +99,7 @@ services:
       - LOG_LEVEL=INFO
       - CONFIG_PATH=/config/config.ini
       - FILTER_ROUTER_INDEX=2
+      - ELECTION_PORT=9202
     networks:
       - testing_net
     volumes:
@@ -116,6 +119,7 @@ services:
       - LOG_LEVEL=INFO
       - CONFIG_PATH=/config/config.ini
       - FILTER_ROUTER_INDEX=3
+      - ELECTION_PORT=9203
     networks:
       - testing_net
     volumes:
@@ -135,6 +139,7 @@ services:
       - LOG_LEVEL=INFO
       - CONFIG_PATH=/config/config.ini
       - FILTER_ROUTER_INDEX=4
+      - ELECTION_PORT=9204
     networks:
       - testing_net
     volumes:
@@ -154,6 +159,7 @@ services:
       - LOG_LEVEL=INFO
       - CONFIG_PATH=/config/config.ini
       - FILTER_ROUTER_INDEX=5
+      - ELECTION_PORT=9205
     networks:
       - testing_net
     volumes:
@@ -172,6 +178,7 @@ services:
       - RABBITMQ_HOST=rabbitmq
       - LOG_LEVEL=INFO
       - CONFIG_PATH=/config/config.ini
+      - ELECTION_PORT=9100
     networks:
       - testing_net
     volumes:
@@ -192,6 +199,7 @@ services:
       - RABBITMQ_HOST=rabbitmq
       - LOG_LEVEL=INFO
       - CONFIG_PATH=/config/config.ini
+      - ELECTION_PORT=9101
     networks:
       - testing_net
     volumes:
@@ -212,6 +220,7 @@ services:
       - RABBITMQ_HOST=rabbitmq
       - LOG_LEVEL=INFO
       - CONFIG_PATH=/config/config.ini
+      - ELECTION_PORT=9102
     networks:
       - testing_net
     volumes:
@@ -232,6 +241,7 @@ services:
       - RABBITMQ_HOST=rabbitmq
       - LOG_LEVEL=INFO
       - CONFIG_PATH=/config/config.ini
+      - ELECTION_PORT=9103
     networks:
       - testing_net
     volumes:
@@ -252,6 +262,7 @@ services:
       - RABBITMQ_HOST=rabbitmq
       - LOG_LEVEL=INFO
       - CONFIG_PATH=/config/config.ini
+      - ELECTION_PORT=9104
     networks:
       - testing_net
     volumes:
@@ -272,6 +283,7 @@ services:
       - RABBITMQ_HOST=rabbitmq
       - LOG_LEVEL=INFO
       - CONFIG_PATH=/config/config.ini
+      - ELECTION_PORT=9105
     networks:
       - testing_net
     volumes:
@@ -292,6 +304,7 @@ services:
       - RABBITMQ_HOST=rabbitmq
       - LOG_LEVEL=INFO
       - CONFIG_PATH=/config/config.ini
+      - ELECTION_PORT=9106
     networks:
       - testing_net
     volumes:
@@ -312,6 +325,7 @@ services:
       - RABBITMQ_HOST=rabbitmq
       - LOG_LEVEL=INFO
       - CONFIG_PATH=/config/config.ini
+      - ELECTION_PORT=9107
     networks:
       - testing_net
     volumes:
@@ -332,6 +346,7 @@ services:
       - CONFIG_PATH=/config/config.ini
       - LOG_LEVEL=INFO
       - AGGREGATOR_ID=0
+      - ELECTION_PORT=9300
     networks:
       - testing_net
     volumes:
@@ -352,6 +367,7 @@ services:
       - CONFIG_PATH=/config/config.ini
       - LOG_LEVEL=INFO
       - AGGREGATOR_ID=1
+      - ELECTION_PORT=9301
     networks:
       - testing_net
     volumes:
@@ -372,6 +388,7 @@ services:
       - CONFIG_PATH=/config/config.ini
       - LOG_LEVEL=INFO
       - AGGREGATOR_ID=2
+      - ELECTION_PORT=9302
     networks:
       - testing_net
     volumes:
@@ -392,6 +409,7 @@ services:
       - CONFIG_PATH=/config/config.ini
       - LOG_LEVEL=INFO
       - AGGREGATOR_ID=3
+      - ELECTION_PORT=9303
     networks:
       - testing_net
     volumes:
@@ -412,6 +430,7 @@ services:
       - LOG_LEVEL=INFO
       - CONFIG_PATH=/config/config.ini
       - JOINER_ROUTER_INDEX=0
+      - ELECTION_PORT=9500
     networks:
       - testing_net
     volumes:
@@ -432,6 +451,7 @@ services:
       - LOG_LEVEL=INFO
       - CONFIG_PATH=/config/config.ini
       - JOINER_ROUTER_INDEX=1
+      - ELECTION_PORT=9501
     networks:
       - testing_net
     volumes:
@@ -452,6 +472,7 @@ services:
       - LOG_LEVEL=INFO
       - CONFIG_PATH=/config/config.ini
       - JOINER_ROUTER_INDEX=2
+      - ELECTION_PORT=9502
     networks:
       - testing_net
     volumes:
@@ -472,6 +493,7 @@ services:
       - LOG_LEVEL=INFO
       - JOINER_WORKER_INDEX=0
       - CONFIG_PATH=/config/config.ini
+      - ELECTION_PORT=9400
     networks:
       - testing_net
     volumes:
@@ -492,6 +514,7 @@ services:
       - LOG_LEVEL=INFO
       - JOINER_WORKER_INDEX=1
       - CONFIG_PATH=/config/config.ini
+      - ELECTION_PORT=9401
     networks:
       - testing_net
     volumes:
@@ -512,6 +535,7 @@ services:
       - LOG_LEVEL=INFO
       - JOINER_WORKER_INDEX=2
       - CONFIG_PATH=/config/config.ini
+      - ELECTION_PORT=9402
     networks:
       - testing_net
     volumes:
@@ -532,6 +556,7 @@ services:
       - LOG_LEVEL=INFO
       - JOINER_WORKER_INDEX=3
       - CONFIG_PATH=/config/config.ini
+      - ELECTION_PORT=9403
     networks:
       - testing_net
     volumes:
@@ -553,6 +578,7 @@ services:
       - LOG_LEVEL=INFO
       - INPUT_QUEUE=results.controller.in
       - OUTPUT_QUEUES=finisher_input_queue_0,finisher_input_queue_1,finisher_input_queue_2,finisher_input_queue_3
+      - ELECTION_PORT=9700
     networks:
       - testing_net
     volumes:
@@ -572,6 +598,7 @@ services:
       - LOG_LEVEL=INFO
       - INPUT_QUEUE=results.controller.in
       - OUTPUT_QUEUES=finisher_input_queue_0,finisher_input_queue_1,finisher_input_queue_2,finisher_input_queue_3
+      - ELECTION_PORT=9701
     networks:
       - testing_net
     volumes:
@@ -591,6 +618,7 @@ services:
       - LOG_LEVEL=INFO
       - INPUT_QUEUE=results.controller.in
       - OUTPUT_QUEUES=finisher_input_queue_0,finisher_input_queue_1,finisher_input_queue_2,finisher_input_queue_3
+      - ELECTION_PORT=9702
     networks:
       - testing_net
     volumes:
@@ -610,6 +638,7 @@ services:
       - LOG_LEVEL=INFO
       - INPUT_QUEUE=results.controller.in
       - OUTPUT_QUEUES=finisher_input_queue_0,finisher_input_queue_1,finisher_input_queue_2,finisher_input_queue_3
+      - ELECTION_PORT=9703
     networks:
       - testing_net
     volumes:
@@ -630,6 +659,7 @@ services:
       - STRATEGY_MODE=append_only  # Can be 'append_only' or 'incremental'
       - INPUT_QUEUE=finisher_input_queue_0
       - OUTPUT_QUEUE=orchestrator_results_queue
+      - ELECTION_PORT=9600
     networks:
       - testing_net
     volumes:
@@ -652,6 +682,7 @@ services:
       - STRATEGY_MODE=append_only  # Can be 'append_only' or 'incremental'
       - INPUT_QUEUE=finisher_input_queue_1
       - OUTPUT_QUEUE=orchestrator_results_queue
+      - ELECTION_PORT=9601
     networks:
       - testing_net
     volumes:
@@ -674,6 +705,7 @@ services:
       - STRATEGY_MODE=append_only  # Can be 'append_only' or 'incremental'
       - INPUT_QUEUE=finisher_input_queue_2
       - OUTPUT_QUEUE=orchestrator_results_queue
+      - ELECTION_PORT=9602
     networks:
       - testing_net
     volumes:
@@ -696,6 +728,7 @@ services:
       - STRATEGY_MODE=append_only  # Can be 'append_only' or 'incremental'
       - INPUT_QUEUE=finisher_input_queue_3
       - OUTPUT_QUEUE=orchestrator_results_queue
+      - ELECTION_PORT=9603
     networks:
       - testing_net
     volumes:

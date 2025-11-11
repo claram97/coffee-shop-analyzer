@@ -16,10 +16,19 @@ import time
 from typing import List, Tuple, Callable, Optional
 from enum import Enum
 
-from protocol2 import (coordinator_message_pb2, election_answer_message_pb2,
-                       election_message_pb2, envelope_pb2)
-from .utils import (send_election_message, send_coordinator_message,
-                   answer_election_message)
+from protocol2 import (
+    coordinator_message_pb2,
+    election_answer_message_pb2,
+    election_message_pb2,
+    envelope_pb2,
+    heartbeat_message_pb2,
+    heartbeat_ack_message_pb2,
+)
+from .utils import (
+    send_election_message,
+    send_coordinator_message,
+    answer_election_message,
+)
 
 
 logger = logging.getLogger(__name__)
@@ -79,6 +88,8 @@ class ElectionCoordinator:
         self._listener_thread: Optional[threading.Thread] = None
         self._stop_event = threading.Event()
         self._election_in_progress = threading.Event()
+        self._heartbeat_lock = threading.Lock()
+        self._follower_last_seen = {}
         
         # Socket for listening to election messages
         self._server_socket: Optional[socket.socket] = None
@@ -104,6 +115,7 @@ class ElectionCoordinator:
     def stop(self):
         """Stop the election coordinator threads."""
         self._stop_event.set()
+        self._clear_follower_tracking()
         
         if self._server_socket:
             try:
@@ -193,7 +205,9 @@ class ElectionCoordinator:
         with self._state_lock:
             self.state = NodeState.LEADER
             self.current_leader = self.my_id
-            
+        
+        self._reset_follower_tracking()
+        
         # Notify via callback
         if self.on_leader_change:
             try:
@@ -289,6 +303,10 @@ class ElectionCoordinator:
             elif envelope.type == envelope_pb2.COORDINATOR:
                 logger.info(f"Node {self.my_id} received COORDINATOR message")
                 self._handle_coordinator(envelope.coordinator)
+            elif envelope.type == envelope_pb2.HEARTBEAT:
+                self._handle_heartbeat(envelope.heartbeat, client_sock)
+            elif envelope.type == envelope_pb2.HEARTBEAT_ACK:
+                logger.debug("Received HEARTBEAT_ACK message, ignoring in coordinator listener")
             else:
                 logger.warning(f"Node {self.my_id} received unknown message type: {envelope.type}")
                 
@@ -315,6 +333,9 @@ class ElectionCoordinator:
             old_leader = self.current_leader
             self.current_leader = new_leader
             self.state = NodeState.FOLLOWER
+        
+        if new_leader != self.my_id:
+            self._clear_follower_tracking()
             
         logger.info(f"Node {self.my_id} accepted new leader: {new_leader}")
         
@@ -324,6 +345,51 @@ class ElectionCoordinator:
                 self.on_leader_change(new_leader, new_leader == self.my_id)
             except Exception as e:
                 logger.error(f"Error in leader change callback: {e}")
+    
+    def _handle_heartbeat(self, heartbeat_msg: heartbeat_message_pb2.Heartbeat, client_sock: socket.socket):
+        """Handle incoming HEARTBEAT message from a follower."""
+        sender_id = heartbeat_msg.node_id
+        recv_ts = time.time()
+        
+        if self.state != NodeState.LEADER:
+            logger.debug(
+                "Node %s received heartbeat while not leader (current leader=%s)",
+                self.my_id,
+                self.current_leader,
+            )
+        else:
+            with self._heartbeat_lock:
+                self._follower_last_seen[sender_id] = recv_ts
+        
+        self._send_heartbeat_ack(client_sock, recv_ts)
+    
+    def _send_heartbeat_ack(self, client_sock: socket.socket, recv_ts: float):
+        """Send a HEARTBEAT_ACK envelope back to the heartbeat sender."""
+        ack = heartbeat_ack_message_pb2.HeartbeatAck()
+        ack.received_at_ms = int(recv_ts * 1000)
+        
+        envelope = envelope_pb2.Envelope()
+        envelope.type = envelope_pb2.HEARTBEAT_ACK
+        envelope.heartbeat_ack.CopyFrom(ack)
+        payload = envelope.SerializeToString()
+        
+        try:
+            client_sock.sendall(struct.pack('<I', len(payload)))
+            client_sock.sendall(payload)
+        except socket.error as exc:
+            logger.debug(f"Failed to send HEARTBEAT_ACK: {exc}")
+    
+    def _reset_follower_tracking(self):
+        """Initialize heartbeat tracking for all followers when becoming leader."""
+        with self._heartbeat_lock:
+            self._follower_last_seen = {
+                node_id: None for node_id, _, _ in self.all_nodes if node_id != self.my_id
+            }
+    
+    def _clear_follower_tracking(self):
+        """Clear heartbeat tracking data when stepping down or stopping."""
+        with self._heartbeat_lock:
+            self._follower_last_seen = {}
                 
     def get_current_leader(self) -> Optional[int]:
         """Get the current leader ID."""
@@ -334,6 +400,11 @@ class ElectionCoordinator:
         """Check if this node is the current leader."""
         with self._state_lock:
             return self.state == NodeState.LEADER
+    
+    def get_follower_last_seen(self, follower_id: int):
+        """Get the last heartbeat timestamp (seconds) for a follower."""
+        with self._heartbeat_lock:
+            return self._follower_last_seen.get(follower_id)
 
 
 def start_election_thread(my_id: int,

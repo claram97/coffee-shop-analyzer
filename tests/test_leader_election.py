@@ -20,13 +20,15 @@ from leader_election import (
 from leader_election.utils import (
     send_election_message,
     send_coordinator_message,
-    answer_election_message
+    answer_election_message,
+    send_heartbeat_message,
 )
 from protocol2 import (
     coordinator_message_pb2,
     election_answer_message_pb2,
     election_message_pb2,
-    envelope_pb2
+    envelope_pb2,
+    heartbeat_message_pb2,
 )
 
 
@@ -115,6 +117,47 @@ class TestElectionUtils:
         assert len(received_leader) == 1
         assert received_leader[0] == 42
         server_socket.close()
+    
+    def test_send_heartbeat_message_success(self):
+        """Test sending a HEARTBEAT message and receiving ACK."""
+        server_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        server_socket.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        server_socket.bind(('127.0.0.1', 0))
+        server_socket.listen(1)
+        port = server_socket.getsockname()[1]
+        
+        def server_handler():
+            client, _ = server_socket.accept()
+            length_bytes = client.recv(4)
+            msg_len = struct.unpack('<I', length_bytes)[0]
+            msg_data = client.recv(msg_len)
+            
+            envelope = envelope_pb2.Envelope()
+            envelope.ParseFromString(msg_data)
+            assert envelope.type == envelope_pb2.HEARTBEAT
+            assert envelope.heartbeat.node_id == 7
+            
+            ack = envelope_pb2.Envelope()
+            ack.type = envelope_pb2.HEARTBEAT_ACK
+            ack.heartbeat_ack.received_at_ms = 123456
+            payload = ack.SerializeToString()
+            
+            client.sendall(struct.pack('<I', len(payload)))
+            client.sendall(payload)
+            client.close()
+        
+        thread = threading.Thread(target=server_handler, daemon=True)
+        thread.start()
+        
+        result = send_heartbeat_message('127.0.0.1', port, node_id=7, timeout=1.0)
+        
+        assert result is True
+        server_socket.close()
+    
+    def test_send_heartbeat_message_no_response(self):
+        """Test heartbeat send failure when leader is unreachable."""
+        result = send_heartbeat_message('127.0.0.1', 9998, node_id=3, timeout=0.2)
+        assert result is False
         
 
 class TestElectionCoordinator:
@@ -225,6 +268,41 @@ class TestElectionCoordinator:
         assert len(election_count) == 1
         
         coordinator.stop()
+    
+    def test_handle_heartbeat_updates_last_seen(self):
+        """Leader should record follower heartbeat and send ACK."""
+        nodes = [(1, '127.0.0.1', 5001), (2, '127.0.0.1', 5002)]
+        coordinator = ElectionCoordinator(
+            my_id=2,
+            my_host='127.0.0.1',
+            my_port=5002,
+            all_nodes=nodes
+        )
+        coordinator.state = NodeState.LEADER
+        coordinator.current_leader = 2
+        coordinator._reset_follower_tracking()
+        
+        class DummySock:
+            def __init__(self):
+                self.data = b""
+            def sendall(self, payload):
+                self.data += payload
+        
+        dummy_sock = DummySock()
+        heartbeat = heartbeat_message_pb2.Heartbeat()
+        heartbeat.node_id = 1
+        heartbeat.sent_at_ms = 1000
+        
+        coordinator._handle_heartbeat(heartbeat, dummy_sock)
+        
+        last_seen = coordinator.get_follower_last_seen(1)
+        assert last_seen is not None
+        
+        msg_len = struct.unpack('<I', dummy_sock.data[:4])[0]
+        ack_payload = dummy_sock.data[4:4 + msg_len]
+        ack_envelope = envelope_pb2.Envelope()
+        ack_envelope.ParseFromString(ack_payload)
+        assert ack_envelope.type == envelope_pb2.HEARTBEAT_ACK
 
 
 class TestMultiNodeElection:

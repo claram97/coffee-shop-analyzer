@@ -13,7 +13,8 @@ from .election_flow import (
 from .utils import (
     send_election_message,
     send_coordinator_message,
-    answer_election_message
+    answer_election_message,
+    send_heartbeat_message,
 )
 
 __all__ = [
@@ -23,4 +24,5 @@ __all__ = [
     'send_election_message',
     'send_coordinator_message',
     'answer_election_message',
+    'send_heartbeat_message',
 ]
