@@ -5,7 +5,7 @@ import threading
 from configparser import ConfigParser
 
 from aggregator import Aggregator
-from leader_election import ElectionCoordinator
+from leader_election import ElectionCoordinator, HeartbeatClient
 
 
 def resolve_config_path() -> str:
@@ -88,8 +88,27 @@ def main():
     signal.signal(signal.SIGTERM, signal_handler)
     signal.signal(signal.SIGINT, signal_handler)
 
+    heartbeat_interval = float(os.getenv("HEARTBEAT_INTERVAL_SECONDS", "2.0"))
+    heartbeat_timeout = float(os.getenv("HEARTBEAT_TIMEOUT_SECONDS", "1.0"))
+    heartbeat_max_misses = int(os.getenv("HEARTBEAT_MAX_MISSES", "3"))
+    heartbeat_startup_grace = float(os.getenv("HEARTBEAT_STARTUP_GRACE_SECONDS", "4.0"))
+
     # Initialize election coordinator (listener only for now)
     election_coordinator = None
+    heartbeat_client = None
+
+    def handle_leader_change(new_leader_id: int, am_i_leader: bool):
+        logging.info(
+            "Leader update received | new_leader=%s | am_i_leader=%s",
+            new_leader_id,
+            am_i_leader,
+        )
+        if heartbeat_client:
+            if am_i_leader:
+                heartbeat_client.deactivate()
+            else:
+                heartbeat_client.activate()
+
     try:
         # Build list of all aggregator nodes in the cluster
         all_nodes = [(i, f"aggregator-{i}", 9300 + i) for i in range(total_aggregators)]
@@ -104,16 +123,29 @@ def main():
             my_host="0.0.0.0",
             my_port=election_port,
             all_nodes=all_nodes,
-            on_leader_change=None,
+            on_leader_change=handle_leader_change,
             election_timeout=5.0,
+        )
+
+        heartbeat_client = HeartbeatClient(
+            coordinator=election_coordinator,
+            my_id=aggregator_id,
+            all_nodes=all_nodes,
+            heartbeat_interval=heartbeat_interval,
+            heartbeat_timeout=heartbeat_timeout,
+            max_missed_heartbeats=heartbeat_max_misses,
+            startup_grace=heartbeat_startup_grace,
         )
 
         election_coordinator.start()
         logging.info(f"Election listener started on port {election_port}")
+        heartbeat_client.start()
+        heartbeat_client.activate()
 
     except Exception as e:
         logging.error(f"Failed to initialize election coordinator: {e}", exc_info=True)
         election_coordinator = None
+        heartbeat_client = None
 
     server = Aggregator(aggregator_id)
     server.run()
@@ -128,6 +160,9 @@ def main():
         if election_coordinator:
             logging.info("Stopping election coordinator...")
             election_coordinator.stop()
+        if heartbeat_client:
+            logging.info("Stopping heartbeat client...")
+            heartbeat_client.stop()
 
         server.stop()
         logging.info("Graceful shutdown complete.")

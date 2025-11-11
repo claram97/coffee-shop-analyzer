@@ -4,7 +4,7 @@ import threading
 import logging
 from results_finisher import ResultsFinisher
 from middleware.middleware_client import MessageMiddlewareQueue, MessageMiddlewareDisconnectedError
-from leader_election import ElectionCoordinator
+from leader_election import ElectionCoordinator, HeartbeatClient
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - [Main] - %(message)s')
 
@@ -27,8 +27,26 @@ def main():
         input_client = MessageMiddlewareQueue(host=rabbitmq_host, queue_name=input_queue_name)
         output_client = MessageMiddlewareQueue(host=rabbitmq_host, queue_name=output_queue_name)
 
+        heartbeat_interval = float(os.getenv("HEARTBEAT_INTERVAL_SECONDS", "2.0"))
+        heartbeat_timeout = float(os.getenv("HEARTBEAT_TIMEOUT_SECONDS", "1.0"))
+        heartbeat_max_misses = int(os.getenv("HEARTBEAT_MAX_MISSES", "3"))
+        heartbeat_startup_grace = float(os.getenv("HEARTBEAT_STARTUP_GRACE_SECONDS", "4.0"))
+
         # Initialize election coordinator (listener only for now)
         election_coordinator = None
+        heartbeat_client = None
+
+        def handle_leader_change(new_leader_id: int, am_i_leader: bool):
+            logging.info(
+                "Leader update | new_leader=%s | am_i_leader=%s",
+                new_leader_id,
+                am_i_leader,
+            )
+            if heartbeat_client:
+                if am_i_leader:
+                    heartbeat_client.deactivate()
+                else:
+                    heartbeat_client.activate()
         try:
             from app_config.config_loader import Config
             cfg_path = os.getenv("CONFIG_PATH", "/config/config.ini")
@@ -49,16 +67,30 @@ def main():
                 my_host="0.0.0.0",
                 my_port=election_port,
                 all_nodes=all_nodes,
-                on_leader_change=None,
+                on_leader_change=handle_leader_change,
                 election_timeout=5.0
+            )
+            
+            heartbeat_client = HeartbeatClient(
+                coordinator=election_coordinator,
+                my_id=finisher_index,
+                all_nodes=all_nodes,
+                heartbeat_interval=heartbeat_interval,
+                heartbeat_timeout=heartbeat_timeout,
+                max_missed_heartbeats=heartbeat_max_misses,
+                startup_grace=heartbeat_startup_grace,
             )
             
             election_coordinator.start()
             logging.info(f"Election listener started on port {election_port}")
             
+            heartbeat_client.start()
+            heartbeat_client.activate()
+            
         except Exception as e:
             logging.error(f"Failed to initialize election coordinator: {e}", exc_info=True)
             election_coordinator = None
+            heartbeat_client = None
 
         finisher = ResultsFinisher(
             input_client=input_client,
@@ -83,6 +115,10 @@ def main():
         if election_coordinator:
             logging.info("Stopping election coordinator...")
             election_coordinator.stop()
+        
+        if heartbeat_client:
+            logging.info("Stopping heartbeat client...")
+            heartbeat_client.stop()
         
         finisher.stop()
         logging.info("Shutdown complete.")

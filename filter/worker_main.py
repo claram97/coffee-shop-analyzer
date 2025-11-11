@@ -10,7 +10,7 @@ import threading
 from worker import FilterWorker
 
 from app_config.config_loader import Config
-from leader_election import ElectionCoordinator
+from leader_election import ElectionCoordinator, HeartbeatClient
 
 
 def main():
@@ -50,7 +50,26 @@ def main():
     logger.info(f"Output exchange (router input): {router_exchange}")
 
     # Initialize election coordinator (listener only for now)
+    heartbeat_interval = float(os.getenv("HEARTBEAT_INTERVAL_SECONDS", "2.0"))
+    heartbeat_timeout = float(os.getenv("HEARTBEAT_TIMEOUT_SECONDS", "1.0"))
+    heartbeat_max_misses = int(os.getenv("HEARTBEAT_MAX_MISSES", "3"))
+    heartbeat_startup_grace = float(os.getenv("HEARTBEAT_STARTUP_GRACE_SECONDS", "4.0"))
+
     election_coordinator = None
+    heartbeat_client = None
+
+    def handle_leader_change(new_leader_id: int, am_i_leader: bool):
+        logger.info(
+            "Leader update | new_leader=%s | am_i_leader=%s",
+            new_leader_id,
+            am_i_leader,
+        )
+        if heartbeat_client:
+            if am_i_leader:
+                heartbeat_client.deactivate()
+            else:
+                heartbeat_client.activate()
+
     try:
         total_filter_workers = cfg.workers.filters
         
@@ -68,16 +87,29 @@ def main():
             my_host="0.0.0.0",
             my_port=election_port,
             all_nodes=all_nodes,
-            on_leader_change=None,
+            on_leader_change=handle_leader_change,
             election_timeout=5.0
+        )
+
+        heartbeat_client = HeartbeatClient(
+            coordinator=election_coordinator,
+            my_id=worker_id,
+            all_nodes=all_nodes,
+            heartbeat_interval=heartbeat_interval,
+            heartbeat_timeout=heartbeat_timeout,
+            max_missed_heartbeats=heartbeat_max_misses,
+            startup_grace=heartbeat_startup_grace,
         )
         
         election_coordinator.start()
         logger.info(f"Election listener started on port {election_port}")
+        heartbeat_client.start()
+        heartbeat_client.activate()
         
     except Exception as e:
         logger.error(f"Failed to initialize election coordinator: {e}", exc_info=True)
         election_coordinator = None
+        heartbeat_client = None
 
     worker = None
     try:
@@ -102,6 +134,10 @@ def main():
         if election_coordinator:
             logger.info("Stopping election coordinator...")
             election_coordinator.stop()
+        
+        if heartbeat_client:
+            logger.info("Stopping heartbeat client...")
+            heartbeat_client.stop()
         
         if worker:
             worker.shutdown()

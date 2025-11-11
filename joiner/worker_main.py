@@ -18,7 +18,7 @@ from middleware.middleware_client import (
     MessageMiddlewareQueue,
 )
 from protocol2.table_data_pb2 import TableName
-from leader_election import ElectionCoordinator
+from leader_election import ElectionCoordinator, HeartbeatClient
 
 
 def force_bind(host: str, exchange: str, queue: str, routing_key: str):
@@ -161,7 +161,25 @@ def main(argv=None):
     out_q_name = cfg.names.results_controller_queue
 
     # Initialize election coordinator (listener only for now)
+    heartbeat_interval = float(os.getenv("HEARTBEAT_INTERVAL_SECONDS", "2.0"))
+    heartbeat_timeout = float(os.getenv("HEARTBEAT_TIMEOUT_SECONDS", "1.0"))
+    heartbeat_max_misses = int(os.getenv("HEARTBEAT_MAX_MISSES", "3"))
+    heartbeat_startup_grace = float(os.getenv("HEARTBEAT_STARTUP_GRACE_SECONDS", "4.0"))
+
     election_coordinator = None
+    heartbeat_client = None
+
+    def handle_leader_change(new_leader_id: int, am_i_leader: bool):
+        log.info(
+            "Leader update | new_leader=%s | am_i_leader=%s",
+            new_leader_id,
+            am_i_leader,
+        )
+        if heartbeat_client:
+            if am_i_leader:
+                heartbeat_client.deactivate()
+            else:
+                heartbeat_client.activate()
     try:
         total_joiner_workers = cfg.workers.joiners
         
@@ -179,16 +197,30 @@ def main(argv=None):
             my_host="0.0.0.0",
             my_port=election_port,
             all_nodes=all_nodes,
-            on_leader_change=None,
+            on_leader_change=handle_leader_change,
             election_timeout=5.0
+        )
+        
+        heartbeat_client = HeartbeatClient(
+            coordinator=election_coordinator,
+            my_id=shard,
+            all_nodes=all_nodes,
+            heartbeat_interval=heartbeat_interval,
+            heartbeat_timeout=heartbeat_timeout,
+            max_missed_heartbeats=heartbeat_max_misses,
+            startup_grace=heartbeat_startup_grace,
         )
         
         election_coordinator.start()
         log.info(f"Election listener started on port {election_port}")
+
+        heartbeat_client.start()
+        heartbeat_client.activate()
         
     except Exception as e:
         log.error(f"Failed to initialize election coordinator: {e}", exc_info=True)
         election_coordinator = None
+        heartbeat_client = None
 
     in_mw = build_inputs_for_shard(cfg, host, shard)
 
@@ -226,6 +258,10 @@ def main(argv=None):
         if election_coordinator:
             log.info("Stopping election coordinator...")
             election_coordinator.stop()
+        
+        if heartbeat_client:
+            log.info("Stopping heartbeat client...")
+            heartbeat_client.stop()
         
         worker.shutdown()
         log.info("Graceful shutdown complete. Exiting.")

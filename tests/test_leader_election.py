@@ -15,7 +15,8 @@ import struct
 from leader_election import (
     start_election_thread,
     ElectionCoordinator,
-    NodeState
+    NodeState,
+    HeartbeatClient
 )
 from leader_election.utils import (
     send_election_message,
@@ -449,6 +450,85 @@ class TestMultiNodeElection:
         
         coord1.stop()
         coord2.stop()
+
+
+class DummyCoordinator:
+    def __init__(self):
+        self.current_leader = None
+        self._am_leader = False
+        self.election_requests = 0
+
+    def get_current_leader(self):
+        return self.current_leader
+
+    def am_i_leader(self):
+        return self._am_leader
+
+    def start_election(self):
+        self.election_requests += 1
+
+
+class TestHeartbeatClient:
+    def test_requests_election_when_no_leader(self):
+        coordinator = DummyCoordinator()
+        client = HeartbeatClient(
+            coordinator=coordinator,
+            my_id=1,
+            all_nodes=[(1, "h1", 5001), (2, "h2", 5002)],
+            heartbeat_interval=0.1,
+            heartbeat_timeout=0.05,
+            max_missed_heartbeats=2,
+            startup_grace=0.0,
+        )
+
+        client.activate()
+        client._startup_grace_deadline = 0
+        client._perform_heartbeat_check()
+        assert coordinator.election_requests == 1
+
+    @patch("leader_election.election_flow.send_heartbeat_message", return_value=True)
+    def test_successful_heartbeat_resets_misses(self, mock_send):
+        coordinator = DummyCoordinator()
+        coordinator.current_leader = 2
+        client = HeartbeatClient(
+            coordinator=coordinator,
+            my_id=1,
+            all_nodes=[(1, "h1", 5001), (2, "h2", 5002)],
+            heartbeat_interval=0.1,
+            heartbeat_timeout=0.05,
+            max_missed_heartbeats=2,
+            startup_grace=0.0,
+        )
+        client._missed_heartbeats = 1
+        client.activate()
+        client._startup_grace_deadline = 0
+
+        client._perform_heartbeat_check()
+        mock_send.assert_called_once()
+        assert client._missed_heartbeats == 0
+        assert coordinator.election_requests == 0
+
+    @patch("leader_election.election_flow.send_heartbeat_message", return_value=False)
+    def test_exceeds_missed_threshold_triggers_election(self, mock_send):
+        coordinator = DummyCoordinator()
+        coordinator.current_leader = 2
+        client = HeartbeatClient(
+            coordinator=coordinator,
+            my_id=1,
+            all_nodes=[(1, "h1", 5001), (2, "h2", 5002)],
+            heartbeat_interval=0.1,
+            heartbeat_timeout=0.05,
+            max_missed_heartbeats=2,
+            startup_grace=0.0,
+        )
+
+        client.activate()
+        client._startup_grace_deadline = 0
+        client._perform_heartbeat_check()
+        client._perform_heartbeat_check()
+
+        assert coordinator.election_requests == 1
+        assert mock_send.call_count == 2
 
 
 class TestStartElectionThread:

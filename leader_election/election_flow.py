@@ -28,6 +28,7 @@ from .utils import (
     send_election_message,
     send_coordinator_message,
     answer_election_message,
+    send_heartbeat_message,
 )
 
 
@@ -405,6 +406,143 @@ class ElectionCoordinator:
         """Get the last heartbeat timestamp (seconds) for a follower."""
         with self._heartbeat_lock:
             return self._follower_last_seen.get(follower_id)
+
+
+class HeartbeatClient:
+    """Periodically sends heartbeats to the current leader."""
+
+    def __init__(
+        self,
+        coordinator: ElectionCoordinator,
+        my_id: int,
+        all_nodes: List[Tuple[int, str, int]],
+        heartbeat_interval: float = 2.0,
+        heartbeat_timeout: float = 1.0,
+        max_missed_heartbeats: int = 3,
+        startup_grace: float = 4.0,
+    ):
+        self.coordinator = coordinator
+        self.my_id = my_id
+        self.node_map = {node_id: (host, port) for node_id, host, port in all_nodes}
+        self.heartbeat_interval = heartbeat_interval
+        self.heartbeat_timeout = heartbeat_timeout
+        self.max_missed_heartbeats = max(1, max_missed_heartbeats)
+        self.startup_grace = max(0.0, startup_grace)
+        self._missed_heartbeats = 0
+        self._stop_event = threading.Event()
+        self._thread: Optional[threading.Thread] = None
+        self._last_election_request_ts = 0.0
+        self._active = False
+        self._startup_grace_deadline = 0.0
+        self._state_lock = threading.Lock()
+
+    def start(self):
+        if self._thread and self._thread.is_alive():
+            return
+        self._stop_event.clear()
+        self._thread = threading.Thread(
+            target=self._run, daemon=True, name=f"HeartbeatClient-{self.my_id}"
+        )
+        self._thread.start()
+        logger.info(
+            "Heartbeat client started (interval=%ss, timeout=%ss, max_missed=%s)",
+            self.heartbeat_interval,
+            self.heartbeat_timeout,
+            self.max_missed_heartbeats,
+        )
+
+    def stop(self):
+        self._stop_event.set()
+        if self._thread:
+            self._thread.join(timeout=2.0)
+        self.deactivate()
+
+    def activate(self):
+        with self._state_lock:
+            already_active = self._active
+            self._active = True
+            self._missed_heartbeats = 0
+            self._startup_grace_deadline = time.time() + self.startup_grace
+        if not already_active:
+            logger.info("Heartbeat client activated for node %s", self.my_id)
+
+    def deactivate(self):
+        with self._state_lock:
+            was_active = self._active
+            self._active = False
+            self._missed_heartbeats = 0
+        if was_active:
+            logger.info("Heartbeat client deactivated for node %s", self.my_id)
+
+    def _run(self):
+        while not self._stop_event.is_set():
+            try:
+                self._perform_heartbeat_check()
+            except Exception as exc:
+                logger.error("Heartbeat thread error: %s", exc, exc_info=True)
+            finally:
+                time.sleep(self.heartbeat_interval)
+
+    def _perform_heartbeat_check(self):
+        with self._state_lock:
+            active = self._active
+            grace_deadline = self._startup_grace_deadline
+
+        if not active:
+            self._missed_heartbeats = 0
+            return
+
+        leader_id = self.coordinator.get_current_leader()
+
+        if leader_id is None:
+            if not self.coordinator.am_i_leader() and time.time() >= grace_deadline:
+                now = time.time()
+                if now - self._last_election_request_ts > self.heartbeat_interval:
+                    logger.debug("No leader known, requesting election")
+                    self.coordinator.start_election()
+                    self._last_election_request_ts = now
+            self._missed_heartbeats = 0
+            return
+
+        if leader_id == self.my_id:
+            # I am the leader, no heartbeat needed
+            self._missed_heartbeats = 0
+            return
+
+        target = self.node_map.get(leader_id)
+        if not target:
+            logger.warning(
+                "Heartbeat client cannot resolve leader %s in node map", leader_id
+            )
+            return
+
+        host, port = target
+        success = send_heartbeat_message(
+            target_host=host,
+            target_port=port,
+            node_id=self.my_id,
+            timeout=self.heartbeat_timeout,
+        )
+
+        if success:
+            self._missed_heartbeats = 0
+            logger.debug("Heartbeat acknowledged by leader %s", leader_id)
+        else:
+            self._missed_heartbeats += 1
+            logger.warning(
+                "Heartbeat to leader %s failed (miss %s/%s)",
+                leader_id,
+                self._missed_heartbeats,
+                self.max_missed_heartbeats,
+            )
+            if self._missed_heartbeats >= self.max_missed_heartbeats:
+                logger.error(
+                    "Leader %s unresponsive after %s misses, triggering election",
+                    leader_id,
+                    self._missed_heartbeats,
+                )
+                self._missed_heartbeats = 0
+                self.coordinator.start_election()
 
 
 def start_election_thread(my_id: int,
