@@ -1,5 +1,7 @@
 FROM python:3.9.7-slim
 
+RUN apt-get update && apt-get install -y --no-install-recommends docker.io && rm -rf /var/lib/apt/lists/*
+
 # Install required dependencies (including protobuf runtime required by generated pb2)
 RUN pip install --no-cache-dir protobuf==6.32.1 pika
 

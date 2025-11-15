@@ -70,6 +70,7 @@ services:
       - testing_net
     volumes:
       - ./app_config/config.ini:/config/config.ini:ro
+      - /var/run/docker.sock:/var/run/docker.sock
     depends_on:
       rabbitmq:
         condition: service_healthy
@@ -96,6 +97,7 @@ services:
       - testing_net
     volumes:
       - ./app_config/config.ini:/config/config.ini:ro
+      - /var/run/docker.sock:/var/run/docker.sock
     depends_on:
       rabbitmq:
         condition: service_healthy
@@ -122,6 +124,7 @@ services:
       - testing_net
     volumes:
       - ./app_config/config.ini:/config/config.ini:ro
+      - /var/run/docker.sock:/var/run/docker.sock
     depends_on:
       rabbitmq:
         condition: service_healthy
@@ -148,6 +151,7 @@ services:
       - testing_net
     volumes:
       - ./app_config/config.ini:/config/config.ini:ro
+      - /var/run/docker.sock:/var/run/docker.sock
     depends_on:
       rabbitmq:
         condition: service_healthy
@@ -174,6 +178,7 @@ services:
       - testing_net
     volumes:
       - ./app_config/config.ini:/config/config.ini:ro
+      - /var/run/docker.sock:/var/run/docker.sock
     depends_on:
       rabbitmq:
         condition: service_healthy
@@ -200,6 +205,7 @@ services:
       - testing_net
     volumes:
       - ./app_config/config.ini:/config/config.ini:ro
+      - /var/run/docker.sock:/var/run/docker.sock
     depends_on:
       rabbitmq:
         condition: service_healthy
@@ -226,6 +232,7 @@ services:
       - testing_net
     volumes:
       - ./app_config/config.ini:/config/config.ini:ro
+      - /var/run/docker.sock:/var/run/docker.sock
     depends_on:
       rabbitmq:
         condition: service_healthy
@@ -254,6 +261,7 @@ services:
       - testing_net
     volumes:
       - ./app_config/config.ini:/config/config.ini:ro
+      - /var/run/docker.sock:/var/run/docker.sock
     depends_on:
       rabbitmq:
         condition: service_healthy
@@ -282,6 +290,7 @@ services:
       - testing_net
     volumes:
       - ./app_config/config.ini:/config/config.ini:ro
+      - /var/run/docker.sock:/var/run/docker.sock
     depends_on:
       rabbitmq:
         condition: service_healthy
@@ -310,6 +319,7 @@ services:
       - testing_net
     volumes:
       - ./app_config/config.ini:/config/config.ini:ro
+      - /var/run/docker.sock:/var/run/docker.sock
     depends_on:
       rabbitmq:
         condition: service_healthy
@@ -338,6 +348,7 @@ services:
       - testing_net
     volumes:
       - ./app_config/config.ini:/config/config.ini:ro
+      - /var/run/docker.sock:/var/run/docker.sock
     depends_on:
       rabbitmq:
         condition: service_healthy
@@ -366,6 +377,7 @@ services:
       - testing_net
     volumes:
       - ./app_config/config.ini:/config/config.ini:ro
+      - /var/run/docker.sock:/var/run/docker.sock
     depends_on:
       rabbitmq:
         condition: service_healthy
@@ -394,6 +406,7 @@ services:
       - testing_net
     volumes:
       - ./app_config/config.ini:/config/config.ini:ro
+      - /var/run/docker.sock:/var/run/docker.sock
     depends_on:
       rabbitmq:
         condition: service_healthy
@@ -422,6 +435,7 @@ services:
       - testing_net
     volumes:
       - ./app_config/config.ini:/config/config.ini:ro
+      - /var/run/docker.sock:/var/run/docker.sock
     depends_on:
       rabbitmq:
         condition: service_healthy
@@ -449,6 +463,7 @@ services:
       - testing_net
     volumes:
       - ./app_config/config.ini:/config/config.ini:ro
+      - /var/run/docker.sock:/var/run/docker.sock
     depends_on:
       rabbitmq:
         condition: service_healthy
@@ -476,6 +491,7 @@ services:
       - testing_net
     volumes:
       - ./app_config/config.ini:/config/config.ini:ro
+      - /var/run/docker.sock:/var/run/docker.sock
     depends_on:
       rabbitmq:
         condition: service_healthy
@@ -503,6 +519,7 @@ services:
       - testing_net
     volumes:
       - ./app_config/config.ini:/config/config.ini:ro
+      - /var/run/docker.sock:/var/run/docker.sock
     depends_on:
       rabbitmq:
         condition: service_healthy
@@ -530,6 +547,7 @@ services:
       - testing_net
     volumes:
       - ./app_config/config.ini:/config/config.ini:ro
+      - /var/run/docker.sock:/var/run/docker.sock
     depends_on:
       rabbitmq:
         condition: service_healthy
@@ -557,6 +575,7 @@ services:
       - testing_net
     volumes:
       - ./app_config/config.ini:/config/config.ini:ro
+      - /var/run/docker.sock:/var/run/docker.sock
     depends_on:
       rabbitmq:
         condition: service_healthy
@@ -584,6 +603,7 @@ services:
       - testing_net
     volumes:
       - ./app_config/config.ini:/config/config.ini:ro
+      - /var/run/docker.sock:/var/run/docker.sock
     depends_on:
       rabbitmq:
         condition: service_healthy
@@ -611,6 +631,7 @@ services:
       - testing_net
     volumes:
       - ./app_config/config.ini:/config/config.ini:ro
+      - /var/run/docker.sock:/var/run/docker.sock
     depends_on:
       rabbitmq:
         condition: service_healthy
@@ -638,6 +659,7 @@ services:
       - testing_net
     volumes:
       - ./app_config/config.ini:/config/config.ini:ro
+      - /var/run/docker.sock:/var/run/docker.sock
     depends_on:
       rabbitmq:
         condition: service_healthy
@@ -665,6 +687,7 @@ services:
       - testing_net
     volumes:
       - ./app_config/config.ini:/config/config.ini:ro
+      - /var/run/docker.sock:/var/run/docker.sock
     depends_on:
       rabbitmq:
         condition: service_healthy
@@ -692,6 +715,7 @@ services:
       - testing_net
     volumes:
       - ./app_config/config.ini:/config/config.ini:ro
+      - /var/run/docker.sock:/var/run/docker.sock
     depends_on:
       rabbitmq:
         condition: service_healthy
@@ -719,6 +743,7 @@ services:
       - testing_net
     volumes:
       - ./app_config/config.ini:/config/config.ini:ro
+      - /var/run/docker.sock:/var/run/docker.sock
     depends_on:
       rabbitmq:
         condition: service_healthy
@@ -749,6 +774,7 @@ services:
     volumes:
       - ./results-finisher:/app/results-finisher:ro
       - ./app_config/config.ini:/config/config.ini:ro
+      - /var/run/docker.sock:/var/run/docker.sock
     depends_on:
       rabbitmq:
         condition: service_healthy
@@ -777,6 +803,7 @@ services:
     volumes:
       - ./results-finisher:/app/results-finisher:ro
       - ./app_config/config.ini:/config/config.ini:ro
+      - /var/run/docker.sock:/var/run/docker.sock
     depends_on:
       rabbitmq:
         condition: service_healthy
@@ -805,6 +832,7 @@ services:
     volumes:
       - ./results-finisher:/app/results-finisher:ro
       - ./app_config/config.ini:/config/config.ini:ro
+      - /var/run/docker.sock:/var/run/docker.sock
     depends_on:
       rabbitmq:
         condition: service_healthy
@@ -833,6 +861,7 @@ services:
     volumes:
       - ./results-finisher:/app/results-finisher:ro
       - ./app_config/config.ini:/config/config.ini:ro
+      - /var/run/docker.sock:/var/run/docker.sock
     depends_on:
       rabbitmq:
         condition: service_healthy
@@ -862,6 +891,7 @@ services:
     volumes:
       - ./results-finisher:/app/results-finisher:ro
       - ./app_config/config.ini:/config/config.ini:ro
+      - /var/run/docker.sock:/var/run/docker.sock
     depends_on:
       rabbitmq:
         condition: service_healthy
@@ -893,6 +923,7 @@ services:
     volumes:
       - ./results-finisher:/app/results-finisher:ro
       - ./app_config/config.ini:/config/config.ini:ro
+      - /var/run/docker.sock:/var/run/docker.sock
     depends_on:
       rabbitmq:
         condition: service_healthy
@@ -924,6 +955,7 @@ services:
     volumes:
       - ./results-finisher:/app/results-finisher:ro
       - ./app_config/config.ini:/config/config.ini:ro
+      - /var/run/docker.sock:/var/run/docker.sock
     depends_on:
       rabbitmq:
         condition: service_healthy
@@ -955,6 +987,7 @@ services:
     volumes:
       - ./results-finisher:/app/results-finisher:ro
       - ./app_config/config.ini:/config/config.ini:ro
+      - /var/run/docker.sock:/var/run/docker.sock
     depends_on:
       rabbitmq:
         condition: service_healthy

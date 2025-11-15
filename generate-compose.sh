@@ -130,6 +130,7 @@ cat >> "$OUT_PATH" <<YAML
       - testing_net
     volumes:
       - $INI_PATH:/config/config.ini:ro
+      - /var/run/docker.sock:/var/run/docker.sock
     depends_on:
       rabbitmq:
         condition: service_healthy
@@ -162,6 +163,7 @@ cat >> "$OUT_PATH" <<YAML
       - testing_net
     volumes:
       - $INI_PATH:/config/config.ini:ro
+      - /var/run/docker.sock:/var/run/docker.sock
     depends_on:
       rabbitmq:
         condition: service_healthy
@@ -195,6 +197,7 @@ cat >> "$OUT_PATH" <<YAML
       - testing_net
     volumes:
       - $INI_PATH:/config/config.ini:ro
+      - /var/run/docker.sock:/var/run/docker.sock
     depends_on:
       rabbitmq:
         condition: service_healthy
@@ -228,6 +231,7 @@ cat >> "$OUT_PATH" <<YAML
       - testing_net
     volumes:
       - $INI_PATH:/config/config.ini:ro
+      - /var/run/docker.sock:/var/run/docker.sock
     depends_on:
       rabbitmq:
         condition: service_healthy
@@ -261,6 +265,7 @@ cat >> "$OUT_PATH" <<YAML
       - testing_net
     volumes:
       - $INI_PATH:/config/config.ini:ro
+      - /var/run/docker.sock:/var/run/docker.sock
     depends_on:
       rabbitmq:
         condition: service_healthy
@@ -300,6 +305,7 @@ cat >> "$OUT_PATH" <<YAML
     volumes:
       - ./results-finisher:/app/results-finisher:ro
       - $INI_PATH:/config/config.ini:ro
+      - /var/run/docker.sock:/var/run/docker.sock
     depends_on:
       rabbitmq:
         condition: service_healthy
@@ -335,6 +341,7 @@ cat >> "$OUT_PATH" <<YAML
     volumes:
       - ./results-finisher:/app/results-finisher:ro
       - $INI_PATH:/config/config.ini:ro
+      - /var/run/docker.sock:/var/run/docker.sock
     depends_on:
       rabbitmq:
         condition: service_healthy
