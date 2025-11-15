@@ -36,6 +36,17 @@ from .utils import (
 logger = logging.getLogger(__name__)
 
 
+def _recv_exact(sock: socket.socket, num_bytes: int) -> Optional[bytes]:
+    """Read exactly num_bytes from the socket, returning None if the stream closes."""
+    data = bytearray()
+    while len(data) < num_bytes:
+        chunk = sock.recv(num_bytes - len(data))
+        if not chunk:
+            return None
+        data.extend(chunk)
+    return bytes(data)
+
+
 class NodeState(Enum):
     """States for a node in the election process."""
     FOLLOWER = "follower"
@@ -291,12 +302,14 @@ class ElectionCoordinator:
         """Handle an incoming message from another node."""
         try:
             # Read length prefix
-            length_bytes = client_sock.recv(4)
-            if len(length_bytes) < 4:
+            length_bytes = _recv_exact(client_sock, 4)
+            if not length_bytes:
                 return
                 
             msg_len = struct.unpack('<I', length_bytes)[0]
-            msg_data = client_sock.recv(msg_len)
+            msg_data = _recv_exact(client_sock, msg_len)
+            if msg_data is None:
+                return
             
             # Parse envelope
             envelope = envelope_pb2.Envelope()
@@ -389,6 +402,9 @@ class ElectionCoordinator:
                 self.current_leader,
             )
         else:
+            logger.debug(
+                "Leader %s received heartbeat from follower %s", self.my_id, sender_id
+            )
             with self._heartbeat_lock:
                 self._follower_last_seen[sender_id] = recv_ts
         
@@ -574,6 +590,13 @@ class HeartbeatClient:
             return
 
         host, port = target
+        logger.debug(
+            "Sending heartbeat from node %s to leader %s (%s:%s)",
+            self.my_id,
+            leader_id,
+            host,
+            port,
+        )
         success = send_heartbeat_message(
             target_host=host,
             target_port=port,

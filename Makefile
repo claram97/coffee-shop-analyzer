@@ -60,12 +60,3 @@ docker-compose-down-client1:
 	docker compose -f docker-compose-client.yaml rm -f client1
 .PHONY: docker-compose-down-client1
 
-docker-compose-up-client2: docker-image
-	docker compose -f docker-compose-client.yaml up -d --build client2
-.PHONY: docker-compose-up-client2
-
-docker-compose-down-client2:
-	docker compose -f docker-compose-client.yaml stop -t 1 client2
-	docker compose -f docker-compose-client.yaml rm -f client2
-.PHONY: docker-compose-down-client2
-

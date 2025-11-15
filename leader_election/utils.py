@@ -20,6 +20,17 @@ from protocol2 import (
 logger = logging.getLogger(__name__)
 
 
+def _recv_exact(sock: socket.socket, num_bytes: int) -> Optional[bytes]:
+    """Read exactly num_bytes from the socket, returning None on EOF."""
+    data = bytearray()
+    while len(data) < num_bytes:
+        chunk = sock.recv(num_bytes - len(data))
+        if not chunk:
+            return None
+        data.extend(chunk)
+    return bytes(data)
+
+
 def send_election_message(target_host: str, target_port: int, timeout: float = 2.0) -> bool:
     """
     Send an ELECTION message to a higher-ID process.
@@ -46,12 +57,14 @@ def send_election_message(target_host: str, target_port: int, timeout: float = 2
         
         # Wait for ANSWER response
         try:
-            length_bytes = sock.recv(4)
-            if len(length_bytes) < 4:
+            length_bytes = _recv_exact(sock, 4)
+            if not length_bytes:
                 return False
                 
             response_len = struct.unpack('<I', length_bytes)[0]
-            response_data = sock.recv(response_len)
+            response_data = _recv_exact(sock, response_len)
+            if not response_data:
+                return False
             
             response_envelope = envelope_pb2.Envelope()
             response_envelope.ParseFromString(response_data)
@@ -137,12 +150,14 @@ def send_heartbeat_message(
             sock.sendall(struct.pack('<I', msg_len))
             sock.sendall(serialized)
             
-            length_bytes = sock.recv(4)
-            if len(length_bytes) < 4:
+            length_bytes = _recv_exact(sock, 4)
+            if not length_bytes:
                 return False
             
             response_len = struct.unpack('<I', length_bytes)[0]
-            response_data = sock.recv(response_len)
+            response_data = _recv_exact(sock, response_len)
+            if not response_data:
+                return False
             
             response_envelope = envelope_pb2.Envelope()
             response_envelope.ParseFromString(response_data)

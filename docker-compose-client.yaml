@@ -15,21 +15,6 @@ services:
       - ./.data:/data:ro
       - ./client_runs:/client_runs
 
-  client2:
-    container_name: client2
-    build:
-      context: .
-      dockerfile: client/Dockerfile
-    entrypoint: /client
-    environment:
-      - CLI_ID=2
-    networks:
-      - testing_net
-    volumes:
-      - ./client/config.yaml:/config.yaml:ro
-      - ./.data:/data:ro
-      - ./client_runs:/client_runs
-
 networks:
   testing_net:
     ipam:
