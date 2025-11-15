@@ -10,6 +10,7 @@ from .election_flow import (
     HeartbeatClient,
     start_election_thread
 )
+from .recovery import FollowerRecoveryManager
 
 from .utils import (
     send_election_message,
@@ -22,6 +23,7 @@ __all__ = [
     'ElectionCoordinator',
     'NodeState',
     'HeartbeatClient',
+    'FollowerRecoveryManager',
     'start_election_thread',
     'send_election_message',
     'send_coordinator_message',

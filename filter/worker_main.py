@@ -10,7 +10,7 @@ import threading
 from worker import FilterWorker
 
 from app_config.config_loader import Config
-from leader_election import ElectionCoordinator, HeartbeatClient
+from leader_election import ElectionCoordinator, HeartbeatClient, FollowerRecoveryManager
 
 
 def main():
@@ -58,9 +58,13 @@ def main():
     heartbeat_startup_grace = float(os.getenv("HEARTBEAT_STARTUP_GRACE_SECONDS", "4.0"))
     heartbeat_election_cooldown = float(os.getenv("HEARTBEAT_ELECTION_COOLDOWN_SECONDS", "5.0"))
     heartbeat_cooldown_jitter = float(os.getenv("HEARTBEAT_COOLDOWN_JITTER_SECONDS", "1.0"))
+    follower_down_timeout = float(os.getenv("FOLLOWER_DOWN_TIMEOUT_SECONDS", "15.0"))
+    follower_restart_cooldown = float(os.getenv("FOLLOWER_RESTART_COOLDOWN_SECONDS", "30.0"))
+    follower_recovery_grace = float(os.getenv("FOLLOWER_RECOVERY_GRACE_SECONDS", "10.0"))
 
     election_coordinator = None
     heartbeat_client = None
+    follower_recovery = None
 
     def handle_leader_change(new_leader_id: int, am_i_leader: bool):
         logger.info(
@@ -73,6 +77,8 @@ def main():
                 heartbeat_client.deactivate()
             else:
                 heartbeat_client.activate()
+        if follower_recovery:
+            follower_recovery.set_leader_state(am_i_leader)
 
     try:
         total_filter_workers = cfg.workers.filters
@@ -99,23 +105,36 @@ def main():
             coordinator=election_coordinator,
             my_id=worker_id,
             all_nodes=all_nodes,
-        heartbeat_interval=heartbeat_interval,
-        heartbeat_timeout=heartbeat_timeout,
-        max_missed_heartbeats=heartbeat_max_misses,
-        startup_grace=heartbeat_startup_grace,
-        election_cooldown=heartbeat_election_cooldown,
-        cooldown_jitter=heartbeat_cooldown_jitter,
-    )
+            heartbeat_interval=heartbeat_interval,
+            heartbeat_timeout=heartbeat_timeout,
+            max_missed_heartbeats=heartbeat_max_misses,
+            startup_grace=heartbeat_startup_grace,
+            election_cooldown=heartbeat_election_cooldown,
+            cooldown_jitter=heartbeat_cooldown_jitter,
+        )
+
+        node_container_map = {node_id: name for node_id, name, _ in all_nodes}
+        follower_recovery = FollowerRecoveryManager(
+            coordinator=election_coordinator,
+            my_id=worker_id,
+            node_container_map=node_container_map,
+            check_interval=max(1.0, heartbeat_interval),
+            down_timeout=follower_down_timeout,
+            restart_cooldown=follower_restart_cooldown,
+            startup_grace=follower_recovery_grace,
+        )
         
         election_coordinator.start()
         logger.info(f"Election listener started on port {election_port}")
         heartbeat_client.start()
         heartbeat_client.activate()
+        follower_recovery.start()
         
     except Exception as e:
         logger.error(f"Failed to initialize election coordinator: {e}", exc_info=True)
         election_coordinator = None
         heartbeat_client = None
+        follower_recovery = None
 
     worker = None
     try:
@@ -141,6 +160,9 @@ def main():
             election_coordinator.graceful_resign()
             logger.info("Stopping election coordinator...")
             election_coordinator.stop()
+        
+        if follower_recovery:
+            follower_recovery.stop()
         
         if heartbeat_client:
             logger.info("Stopping heartbeat client...")
