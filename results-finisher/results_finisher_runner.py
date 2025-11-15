@@ -13,8 +13,11 @@ def main():
     input_queue_name = os.getenv("INPUT_QUEUE", "results_finisher_queue_1")
     output_queue_name = os.getenv("OUTPUT_QUEUE", "orchestrator_results_queue")
     
-    # Results finishers don't have explicit index but we can derive from hostname
-    finisher_index = hash(os.getenv("HOSTNAME", "results-finisher")) % 100
+    finisher_index_env = os.getenv("RESULTS_FINISHER_INDEX")
+    if finisher_index_env is not None:
+        finisher_index = int(finisher_index_env)
+    else:
+        finisher_index = hash(os.getenv("HOSTNAME", "results-finisher")) % 100
     election_port = int(os.getenv("ELECTION_PORT", 9600 + finisher_index))
         
     logging.info("--- ResultsFinisher Service (In-Memory) ---")
@@ -31,6 +34,8 @@ def main():
         heartbeat_timeout = float(os.getenv("HEARTBEAT_TIMEOUT_SECONDS", "1.0"))
         heartbeat_max_misses = int(os.getenv("HEARTBEAT_MAX_MISSES", "3"))
         heartbeat_startup_grace = float(os.getenv("HEARTBEAT_STARTUP_GRACE_SECONDS", "4.0"))
+        heartbeat_election_cooldown = float(os.getenv("HEARTBEAT_ELECTION_COOLDOWN_SECONDS", "5.0"))
+        heartbeat_cooldown_jitter = float(os.getenv("HEARTBEAT_COOLDOWN_JITTER_SECONDS", "1.0"))
 
         election_coordinator = None
         heartbeat_client = None
@@ -74,11 +79,13 @@ def main():
                 coordinator=election_coordinator,
                 my_id=finisher_index,
                 all_nodes=all_nodes,
-                heartbeat_interval=heartbeat_interval,
-                heartbeat_timeout=heartbeat_timeout,
-                max_missed_heartbeats=heartbeat_max_misses,
-                startup_grace=heartbeat_startup_grace,
-            )
+            heartbeat_interval=heartbeat_interval,
+            heartbeat_timeout=heartbeat_timeout,
+            max_missed_heartbeats=heartbeat_max_misses,
+            startup_grace=heartbeat_startup_grace,
+            election_cooldown=heartbeat_election_cooldown,
+            cooldown_jitter=heartbeat_cooldown_jitter,
+        )
             
             election_coordinator.start()
             logging.info(f"Election listener started on port {election_port}")

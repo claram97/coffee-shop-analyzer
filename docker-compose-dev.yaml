@@ -60,6 +60,12 @@ services:
       - CONFIG_PATH=/config/config.ini
       - FILTER_ROUTER_INDEX=0
       - ELECTION_PORT=9200
+      - HEARTBEAT_INTERVAL_SECONDS=2.0
+      - HEARTBEAT_TIMEOUT_SECONDS=1.0
+      - HEARTBEAT_MAX_MISSES=3
+      - HEARTBEAT_STARTUP_GRACE_SECONDS=4.0
+      - HEARTBEAT_ELECTION_COOLDOWN_SECONDS=5.0
+      - HEARTBEAT_COOLDOWN_JITTER_SECONDS=1.0
     networks:
       - testing_net
     volumes:
@@ -80,6 +86,12 @@ services:
       - CONFIG_PATH=/config/config.ini
       - FILTER_ROUTER_INDEX=1
       - ELECTION_PORT=9201
+      - HEARTBEAT_INTERVAL_SECONDS=2.0
+      - HEARTBEAT_TIMEOUT_SECONDS=1.0
+      - HEARTBEAT_MAX_MISSES=3
+      - HEARTBEAT_STARTUP_GRACE_SECONDS=4.0
+      - HEARTBEAT_ELECTION_COOLDOWN_SECONDS=5.0
+      - HEARTBEAT_COOLDOWN_JITTER_SECONDS=1.0
     networks:
       - testing_net
     volumes:
@@ -100,6 +112,12 @@ services:
       - CONFIG_PATH=/config/config.ini
       - FILTER_ROUTER_INDEX=2
       - ELECTION_PORT=9202
+      - HEARTBEAT_INTERVAL_SECONDS=2.0
+      - HEARTBEAT_TIMEOUT_SECONDS=1.0
+      - HEARTBEAT_MAX_MISSES=3
+      - HEARTBEAT_STARTUP_GRACE_SECONDS=4.0
+      - HEARTBEAT_ELECTION_COOLDOWN_SECONDS=5.0
+      - HEARTBEAT_COOLDOWN_JITTER_SECONDS=1.0
     networks:
       - testing_net
     volumes:
@@ -120,6 +138,12 @@ services:
       - CONFIG_PATH=/config/config.ini
       - FILTER_ROUTER_INDEX=3
       - ELECTION_PORT=9203
+      - HEARTBEAT_INTERVAL_SECONDS=2.0
+      - HEARTBEAT_TIMEOUT_SECONDS=1.0
+      - HEARTBEAT_MAX_MISSES=3
+      - HEARTBEAT_STARTUP_GRACE_SECONDS=4.0
+      - HEARTBEAT_ELECTION_COOLDOWN_SECONDS=5.0
+      - HEARTBEAT_COOLDOWN_JITTER_SECONDS=1.0
     networks:
       - testing_net
     volumes:
@@ -140,6 +164,12 @@ services:
       - CONFIG_PATH=/config/config.ini
       - FILTER_ROUTER_INDEX=4
       - ELECTION_PORT=9204
+      - HEARTBEAT_INTERVAL_SECONDS=2.0
+      - HEARTBEAT_TIMEOUT_SECONDS=1.0
+      - HEARTBEAT_MAX_MISSES=3
+      - HEARTBEAT_STARTUP_GRACE_SECONDS=4.0
+      - HEARTBEAT_ELECTION_COOLDOWN_SECONDS=5.0
+      - HEARTBEAT_COOLDOWN_JITTER_SECONDS=1.0
     networks:
       - testing_net
     volumes:
@@ -160,6 +190,12 @@ services:
       - CONFIG_PATH=/config/config.ini
       - FILTER_ROUTER_INDEX=5
       - ELECTION_PORT=9205
+      - HEARTBEAT_INTERVAL_SECONDS=2.0
+      - HEARTBEAT_TIMEOUT_SECONDS=1.0
+      - HEARTBEAT_MAX_MISSES=3
+      - HEARTBEAT_STARTUP_GRACE_SECONDS=4.0
+      - HEARTBEAT_ELECTION_COOLDOWN_SECONDS=5.0
+      - HEARTBEAT_COOLDOWN_JITTER_SECONDS=1.0
     networks:
       - testing_net
     volumes:
@@ -178,7 +214,14 @@ services:
       - RABBITMQ_HOST=rabbitmq
       - LOG_LEVEL=INFO
       - CONFIG_PATH=/config/config.ini
+      - FILTER_WORKER_INDEX=0
       - ELECTION_PORT=9100
+      - HEARTBEAT_INTERVAL_SECONDS=2.0
+      - HEARTBEAT_TIMEOUT_SECONDS=1.0
+      - HEARTBEAT_MAX_MISSES=3
+      - HEARTBEAT_STARTUP_GRACE_SECONDS=4.0
+      - HEARTBEAT_ELECTION_COOLDOWN_SECONDS=5.0
+      - HEARTBEAT_COOLDOWN_JITTER_SECONDS=1.0
     networks:
       - testing_net
     volumes:
@@ -199,7 +242,14 @@ services:
       - RABBITMQ_HOST=rabbitmq
       - LOG_LEVEL=INFO
       - CONFIG_PATH=/config/config.ini
+      - FILTER_WORKER_INDEX=1
       - ELECTION_PORT=9101
+      - HEARTBEAT_INTERVAL_SECONDS=2.0
+      - HEARTBEAT_TIMEOUT_SECONDS=1.0
+      - HEARTBEAT_MAX_MISSES=3
+      - HEARTBEAT_STARTUP_GRACE_SECONDS=4.0
+      - HEARTBEAT_ELECTION_COOLDOWN_SECONDS=5.0
+      - HEARTBEAT_COOLDOWN_JITTER_SECONDS=1.0
     networks:
       - testing_net
     volumes:
@@ -220,7 +270,14 @@ services:
       - RABBITMQ_HOST=rabbitmq
       - LOG_LEVEL=INFO
       - CONFIG_PATH=/config/config.ini
+      - FILTER_WORKER_INDEX=2
       - ELECTION_PORT=9102
+      - HEARTBEAT_INTERVAL_SECONDS=2.0
+      - HEARTBEAT_TIMEOUT_SECONDS=1.0
+      - HEARTBEAT_MAX_MISSES=3
+      - HEARTBEAT_STARTUP_GRACE_SECONDS=4.0
+      - HEARTBEAT_ELECTION_COOLDOWN_SECONDS=5.0
+      - HEARTBEAT_COOLDOWN_JITTER_SECONDS=1.0
     networks:
       - testing_net
     volumes:
@@ -241,7 +298,14 @@ services:
       - RABBITMQ_HOST=rabbitmq
       - LOG_LEVEL=INFO
       - CONFIG_PATH=/config/config.ini
+      - FILTER_WORKER_INDEX=3
       - ELECTION_PORT=9103
+      - HEARTBEAT_INTERVAL_SECONDS=2.0
+      - HEARTBEAT_TIMEOUT_SECONDS=1.0
+      - HEARTBEAT_MAX_MISSES=3
+      - HEARTBEAT_STARTUP_GRACE_SECONDS=4.0
+      - HEARTBEAT_ELECTION_COOLDOWN_SECONDS=5.0
+      - HEARTBEAT_COOLDOWN_JITTER_SECONDS=1.0
     networks:
       - testing_net
     volumes:
@@ -262,7 +326,14 @@ services:
       - RABBITMQ_HOST=rabbitmq
       - LOG_LEVEL=INFO
       - CONFIG_PATH=/config/config.ini
+      - FILTER_WORKER_INDEX=4
       - ELECTION_PORT=9104
+      - HEARTBEAT_INTERVAL_SECONDS=2.0
+      - HEARTBEAT_TIMEOUT_SECONDS=1.0
+      - HEARTBEAT_MAX_MISSES=3
+      - HEARTBEAT_STARTUP_GRACE_SECONDS=4.0
+      - HEARTBEAT_ELECTION_COOLDOWN_SECONDS=5.0
+      - HEARTBEAT_COOLDOWN_JITTER_SECONDS=1.0
     networks:
       - testing_net
     volumes:
@@ -283,7 +354,14 @@ services:
       - RABBITMQ_HOST=rabbitmq
       - LOG_LEVEL=INFO
       - CONFIG_PATH=/config/config.ini
+      - FILTER_WORKER_INDEX=5
       - ELECTION_PORT=9105
+      - HEARTBEAT_INTERVAL_SECONDS=2.0
+      - HEARTBEAT_TIMEOUT_SECONDS=1.0
+      - HEARTBEAT_MAX_MISSES=3
+      - HEARTBEAT_STARTUP_GRACE_SECONDS=4.0
+      - HEARTBEAT_ELECTION_COOLDOWN_SECONDS=5.0
+      - HEARTBEAT_COOLDOWN_JITTER_SECONDS=1.0
     networks:
       - testing_net
     volumes:
@@ -304,7 +382,14 @@ services:
       - RABBITMQ_HOST=rabbitmq
       - LOG_LEVEL=INFO
       - CONFIG_PATH=/config/config.ini
+      - FILTER_WORKER_INDEX=6
       - ELECTION_PORT=9106
+      - HEARTBEAT_INTERVAL_SECONDS=2.0
+      - HEARTBEAT_TIMEOUT_SECONDS=1.0
+      - HEARTBEAT_MAX_MISSES=3
+      - HEARTBEAT_STARTUP_GRACE_SECONDS=4.0
+      - HEARTBEAT_ELECTION_COOLDOWN_SECONDS=5.0
+      - HEARTBEAT_COOLDOWN_JITTER_SECONDS=1.0
     networks:
       - testing_net
     volumes:
@@ -325,7 +410,14 @@ services:
       - RABBITMQ_HOST=rabbitmq
       - LOG_LEVEL=INFO
       - CONFIG_PATH=/config/config.ini
+      - FILTER_WORKER_INDEX=7
       - ELECTION_PORT=9107
+      - HEARTBEAT_INTERVAL_SECONDS=2.0
+      - HEARTBEAT_TIMEOUT_SECONDS=1.0
+      - HEARTBEAT_MAX_MISSES=3
+      - HEARTBEAT_STARTUP_GRACE_SECONDS=4.0
+      - HEARTBEAT_ELECTION_COOLDOWN_SECONDS=5.0
+      - HEARTBEAT_COOLDOWN_JITTER_SECONDS=1.0
     networks:
       - testing_net
     volumes:
@@ -347,6 +439,12 @@ services:
       - LOG_LEVEL=INFO
       - AGGREGATOR_ID=0
       - ELECTION_PORT=9300
+      - HEARTBEAT_INTERVAL_SECONDS=2.0
+      - HEARTBEAT_TIMEOUT_SECONDS=1.0
+      - HEARTBEAT_MAX_MISSES=3
+      - HEARTBEAT_STARTUP_GRACE_SECONDS=4.0
+      - HEARTBEAT_ELECTION_COOLDOWN_SECONDS=5.0
+      - HEARTBEAT_COOLDOWN_JITTER_SECONDS=1.0
     networks:
       - testing_net
     volumes:
@@ -368,6 +466,12 @@ services:
       - LOG_LEVEL=INFO
       - AGGREGATOR_ID=1
       - ELECTION_PORT=9301
+      - HEARTBEAT_INTERVAL_SECONDS=2.0
+      - HEARTBEAT_TIMEOUT_SECONDS=1.0
+      - HEARTBEAT_MAX_MISSES=3
+      - HEARTBEAT_STARTUP_GRACE_SECONDS=4.0
+      - HEARTBEAT_ELECTION_COOLDOWN_SECONDS=5.0
+      - HEARTBEAT_COOLDOWN_JITTER_SECONDS=1.0
     networks:
       - testing_net
     volumes:
@@ -389,6 +493,12 @@ services:
       - LOG_LEVEL=INFO
       - AGGREGATOR_ID=2
       - ELECTION_PORT=9302
+      - HEARTBEAT_INTERVAL_SECONDS=2.0
+      - HEARTBEAT_TIMEOUT_SECONDS=1.0
+      - HEARTBEAT_MAX_MISSES=3
+      - HEARTBEAT_STARTUP_GRACE_SECONDS=4.0
+      - HEARTBEAT_ELECTION_COOLDOWN_SECONDS=5.0
+      - HEARTBEAT_COOLDOWN_JITTER_SECONDS=1.0
     networks:
       - testing_net
     volumes:
@@ -410,6 +520,12 @@ services:
       - LOG_LEVEL=INFO
       - AGGREGATOR_ID=3
       - ELECTION_PORT=9303
+      - HEARTBEAT_INTERVAL_SECONDS=2.0
+      - HEARTBEAT_TIMEOUT_SECONDS=1.0
+      - HEARTBEAT_MAX_MISSES=3
+      - HEARTBEAT_STARTUP_GRACE_SECONDS=4.0
+      - HEARTBEAT_ELECTION_COOLDOWN_SECONDS=5.0
+      - HEARTBEAT_COOLDOWN_JITTER_SECONDS=1.0
     networks:
       - testing_net
     volumes:
@@ -431,6 +547,12 @@ services:
       - CONFIG_PATH=/config/config.ini
       - JOINER_ROUTER_INDEX=0
       - ELECTION_PORT=9500
+      - HEARTBEAT_INTERVAL_SECONDS=2.0
+      - HEARTBEAT_TIMEOUT_SECONDS=1.0
+      - HEARTBEAT_MAX_MISSES=3
+      - HEARTBEAT_STARTUP_GRACE_SECONDS=4.0
+      - HEARTBEAT_ELECTION_COOLDOWN_SECONDS=5.0
+      - HEARTBEAT_COOLDOWN_JITTER_SECONDS=1.0
     networks:
       - testing_net
     volumes:
@@ -452,6 +574,12 @@ services:
       - CONFIG_PATH=/config/config.ini
       - JOINER_ROUTER_INDEX=1
       - ELECTION_PORT=9501
+      - HEARTBEAT_INTERVAL_SECONDS=2.0
+      - HEARTBEAT_TIMEOUT_SECONDS=1.0
+      - HEARTBEAT_MAX_MISSES=3
+      - HEARTBEAT_STARTUP_GRACE_SECONDS=4.0
+      - HEARTBEAT_ELECTION_COOLDOWN_SECONDS=5.0
+      - HEARTBEAT_COOLDOWN_JITTER_SECONDS=1.0
     networks:
       - testing_net
     volumes:
@@ -473,6 +601,12 @@ services:
       - CONFIG_PATH=/config/config.ini
       - JOINER_ROUTER_INDEX=2
       - ELECTION_PORT=9502
+      - HEARTBEAT_INTERVAL_SECONDS=2.0
+      - HEARTBEAT_TIMEOUT_SECONDS=1.0
+      - HEARTBEAT_MAX_MISSES=3
+      - HEARTBEAT_STARTUP_GRACE_SECONDS=4.0
+      - HEARTBEAT_ELECTION_COOLDOWN_SECONDS=5.0
+      - HEARTBEAT_COOLDOWN_JITTER_SECONDS=1.0
     networks:
       - testing_net
     volumes:
@@ -494,6 +628,12 @@ services:
       - JOINER_WORKER_INDEX=0
       - CONFIG_PATH=/config/config.ini
       - ELECTION_PORT=9400
+      - HEARTBEAT_INTERVAL_SECONDS=2.0
+      - HEARTBEAT_TIMEOUT_SECONDS=1.0
+      - HEARTBEAT_MAX_MISSES=3
+      - HEARTBEAT_STARTUP_GRACE_SECONDS=4.0
+      - HEARTBEAT_ELECTION_COOLDOWN_SECONDS=5.0
+      - HEARTBEAT_COOLDOWN_JITTER_SECONDS=1.0
     networks:
       - testing_net
     volumes:
@@ -515,6 +655,12 @@ services:
       - JOINER_WORKER_INDEX=1
       - CONFIG_PATH=/config/config.ini
       - ELECTION_PORT=9401
+      - HEARTBEAT_INTERVAL_SECONDS=2.0
+      - HEARTBEAT_TIMEOUT_SECONDS=1.0
+      - HEARTBEAT_MAX_MISSES=3
+      - HEARTBEAT_STARTUP_GRACE_SECONDS=4.0
+      - HEARTBEAT_ELECTION_COOLDOWN_SECONDS=5.0
+      - HEARTBEAT_COOLDOWN_JITTER_SECONDS=1.0
     networks:
       - testing_net
     volumes:
@@ -536,6 +682,12 @@ services:
       - JOINER_WORKER_INDEX=2
       - CONFIG_PATH=/config/config.ini
       - ELECTION_PORT=9402
+      - HEARTBEAT_INTERVAL_SECONDS=2.0
+      - HEARTBEAT_TIMEOUT_SECONDS=1.0
+      - HEARTBEAT_MAX_MISSES=3
+      - HEARTBEAT_STARTUP_GRACE_SECONDS=4.0
+      - HEARTBEAT_ELECTION_COOLDOWN_SECONDS=5.0
+      - HEARTBEAT_COOLDOWN_JITTER_SECONDS=1.0
     networks:
       - testing_net
     volumes:
@@ -557,6 +709,12 @@ services:
       - JOINER_WORKER_INDEX=3
       - CONFIG_PATH=/config/config.ini
       - ELECTION_PORT=9403
+      - HEARTBEAT_INTERVAL_SECONDS=2.0
+      - HEARTBEAT_TIMEOUT_SECONDS=1.0
+      - HEARTBEAT_MAX_MISSES=3
+      - HEARTBEAT_STARTUP_GRACE_SECONDS=4.0
+      - HEARTBEAT_ELECTION_COOLDOWN_SECONDS=5.0
+      - HEARTBEAT_COOLDOWN_JITTER_SECONDS=1.0
     networks:
       - testing_net
     volumes:
@@ -578,11 +736,19 @@ services:
       - LOG_LEVEL=INFO
       - INPUT_QUEUE=results.controller.in
       - OUTPUT_QUEUES=finisher_input_queue_0,finisher_input_queue_1,finisher_input_queue_2,finisher_input_queue_3
+      - RESULTS_ROUTER_INDEX=0
       - ELECTION_PORT=9700
+      - HEARTBEAT_INTERVAL_SECONDS=2.0
+      - HEARTBEAT_TIMEOUT_SECONDS=1.0
+      - HEARTBEAT_MAX_MISSES=3
+      - HEARTBEAT_STARTUP_GRACE_SECONDS=4.0
+      - HEARTBEAT_ELECTION_COOLDOWN_SECONDS=5.0
+      - HEARTBEAT_COOLDOWN_JITTER_SECONDS=1.0
     networks:
       - testing_net
     volumes:
       - ./results-finisher:/app/results-finisher:ro
+      - ./app_config/config.ini:/config/config.ini:ro
     depends_on:
       rabbitmq:
         condition: service_healthy
@@ -598,11 +764,19 @@ services:
       - LOG_LEVEL=INFO
       - INPUT_QUEUE=results.controller.in
       - OUTPUT_QUEUES=finisher_input_queue_0,finisher_input_queue_1,finisher_input_queue_2,finisher_input_queue_3
+      - RESULTS_ROUTER_INDEX=1
       - ELECTION_PORT=9701
+      - HEARTBEAT_INTERVAL_SECONDS=2.0
+      - HEARTBEAT_TIMEOUT_SECONDS=1.0
+      - HEARTBEAT_MAX_MISSES=3
+      - HEARTBEAT_STARTUP_GRACE_SECONDS=4.0
+      - HEARTBEAT_ELECTION_COOLDOWN_SECONDS=5.0
+      - HEARTBEAT_COOLDOWN_JITTER_SECONDS=1.0
     networks:
       - testing_net
     volumes:
       - ./results-finisher:/app/results-finisher:ro
+      - ./app_config/config.ini:/config/config.ini:ro
     depends_on:
       rabbitmq:
         condition: service_healthy
@@ -618,11 +792,19 @@ services:
       - LOG_LEVEL=INFO
       - INPUT_QUEUE=results.controller.in
       - OUTPUT_QUEUES=finisher_input_queue_0,finisher_input_queue_1,finisher_input_queue_2,finisher_input_queue_3
+      - RESULTS_ROUTER_INDEX=2
       - ELECTION_PORT=9702
+      - HEARTBEAT_INTERVAL_SECONDS=2.0
+      - HEARTBEAT_TIMEOUT_SECONDS=1.0
+      - HEARTBEAT_MAX_MISSES=3
+      - HEARTBEAT_STARTUP_GRACE_SECONDS=4.0
+      - HEARTBEAT_ELECTION_COOLDOWN_SECONDS=5.0
+      - HEARTBEAT_COOLDOWN_JITTER_SECONDS=1.0
     networks:
       - testing_net
     volumes:
       - ./results-finisher:/app/results-finisher:ro
+      - ./app_config/config.ini:/config/config.ini:ro
     depends_on:
       rabbitmq:
         condition: service_healthy
@@ -638,11 +820,19 @@ services:
       - LOG_LEVEL=INFO
       - INPUT_QUEUE=results.controller.in
       - OUTPUT_QUEUES=finisher_input_queue_0,finisher_input_queue_1,finisher_input_queue_2,finisher_input_queue_3
+      - RESULTS_ROUTER_INDEX=3
       - ELECTION_PORT=9703
+      - HEARTBEAT_INTERVAL_SECONDS=2.0
+      - HEARTBEAT_TIMEOUT_SECONDS=1.0
+      - HEARTBEAT_MAX_MISSES=3
+      - HEARTBEAT_STARTUP_GRACE_SECONDS=4.0
+      - HEARTBEAT_ELECTION_COOLDOWN_SECONDS=5.0
+      - HEARTBEAT_COOLDOWN_JITTER_SECONDS=1.0
     networks:
       - testing_net
     volumes:
       - ./results-finisher:/app/results-finisher:ro
+      - ./app_config/config.ini:/config/config.ini:ro
     depends_on:
       rabbitmq:
         condition: service_healthy
@@ -659,11 +849,19 @@ services:
       - STRATEGY_MODE=append_only  # Can be 'append_only' or 'incremental'
       - INPUT_QUEUE=finisher_input_queue_0
       - OUTPUT_QUEUE=orchestrator_results_queue
+      - RESULTS_FINISHER_INDEX=0
       - ELECTION_PORT=9600
+      - HEARTBEAT_INTERVAL_SECONDS=2.0
+      - HEARTBEAT_TIMEOUT_SECONDS=1.0
+      - HEARTBEAT_MAX_MISSES=3
+      - HEARTBEAT_STARTUP_GRACE_SECONDS=4.0
+      - HEARTBEAT_ELECTION_COOLDOWN_SECONDS=5.0
+      - HEARTBEAT_COOLDOWN_JITTER_SECONDS=1.0
     networks:
       - testing_net
     volumes:
       - ./results-finisher:/app/results-finisher:ro
+      - ./app_config/config.ini:/config/config.ini:ro
     depends_on:
       rabbitmq:
         condition: service_healthy
@@ -682,11 +880,19 @@ services:
       - STRATEGY_MODE=append_only  # Can be 'append_only' or 'incremental'
       - INPUT_QUEUE=finisher_input_queue_1
       - OUTPUT_QUEUE=orchestrator_results_queue
+      - RESULTS_FINISHER_INDEX=1
       - ELECTION_PORT=9601
+      - HEARTBEAT_INTERVAL_SECONDS=2.0
+      - HEARTBEAT_TIMEOUT_SECONDS=1.0
+      - HEARTBEAT_MAX_MISSES=3
+      - HEARTBEAT_STARTUP_GRACE_SECONDS=4.0
+      - HEARTBEAT_ELECTION_COOLDOWN_SECONDS=5.0
+      - HEARTBEAT_COOLDOWN_JITTER_SECONDS=1.0
     networks:
       - testing_net
     volumes:
       - ./results-finisher:/app/results-finisher:ro
+      - ./app_config/config.ini:/config/config.ini:ro
     depends_on:
       rabbitmq:
         condition: service_healthy
@@ -705,11 +911,19 @@ services:
       - STRATEGY_MODE=append_only  # Can be 'append_only' or 'incremental'
       - INPUT_QUEUE=finisher_input_queue_2
       - OUTPUT_QUEUE=orchestrator_results_queue
+      - RESULTS_FINISHER_INDEX=2
       - ELECTION_PORT=9602
+      - HEARTBEAT_INTERVAL_SECONDS=2.0
+      - HEARTBEAT_TIMEOUT_SECONDS=1.0
+      - HEARTBEAT_MAX_MISSES=3
+      - HEARTBEAT_STARTUP_GRACE_SECONDS=4.0
+      - HEARTBEAT_ELECTION_COOLDOWN_SECONDS=5.0
+      - HEARTBEAT_COOLDOWN_JITTER_SECONDS=1.0
     networks:
       - testing_net
     volumes:
       - ./results-finisher:/app/results-finisher:ro
+      - ./app_config/config.ini:/config/config.ini:ro
     depends_on:
       rabbitmq:
         condition: service_healthy
@@ -728,11 +942,19 @@ services:
       - STRATEGY_MODE=append_only  # Can be 'append_only' or 'incremental'
       - INPUT_QUEUE=finisher_input_queue_3
       - OUTPUT_QUEUE=orchestrator_results_queue
+      - RESULTS_FINISHER_INDEX=3
       - ELECTION_PORT=9603
+      - HEARTBEAT_INTERVAL_SECONDS=2.0
+      - HEARTBEAT_TIMEOUT_SECONDS=1.0
+      - HEARTBEAT_MAX_MISSES=3
+      - HEARTBEAT_STARTUP_GRACE_SECONDS=4.0
+      - HEARTBEAT_ELECTION_COOLDOWN_SECONDS=5.0
+      - HEARTBEAT_COOLDOWN_JITTER_SECONDS=1.0
     networks:
       - testing_net
     volumes:
       - ./results-finisher:/app/results-finisher:ro
+      - ./app_config/config.ini:/config/config.ini:ro
     depends_on:
       rabbitmq:
         condition: service_healthy

@@ -144,8 +144,11 @@ def main():
         if not output_queues:
             raise ValueError("OUTPUT_QUEUES environment variable must be configured with at least one queue.")
 
-        # Results routers don't have explicit index but we can derive from hostname
-        router_index = hash(os.getenv("HOSTNAME", "results-router")) % 100
+        router_index_env = os.getenv("RESULTS_ROUTER_INDEX")
+        if router_index_env is not None:
+            router_index = int(router_index_env)
+        else:
+            router_index = hash(os.getenv("HOSTNAME", "results-router")) % 100
         election_port = int(os.getenv("ELECTION_PORT", 9700 + router_index))
 
         logger.info("--- ResultsRouter Service ---")
@@ -165,6 +168,8 @@ def main():
         heartbeat_timeout = float(os.getenv("HEARTBEAT_TIMEOUT_SECONDS", "1.0"))
         heartbeat_max_misses = int(os.getenv("HEARTBEAT_MAX_MISSES", "3"))
         heartbeat_startup_grace = float(os.getenv("HEARTBEAT_STARTUP_GRACE_SECONDS", "4.0"))
+        heartbeat_election_cooldown = float(os.getenv("HEARTBEAT_ELECTION_COOLDOWN_SECONDS", "5.0"))
+        heartbeat_cooldown_jitter = float(os.getenv("HEARTBEAT_COOLDOWN_JITTER_SECONDS", "1.0"))
 
         election_coordinator = None
         heartbeat_client = None
@@ -208,11 +213,13 @@ def main():
                 coordinator=election_coordinator,
                 my_id=router_index,
                 all_nodes=all_nodes,
-                heartbeat_interval=heartbeat_interval,
-                heartbeat_timeout=heartbeat_timeout,
-                max_missed_heartbeats=heartbeat_max_misses,
-                startup_grace=heartbeat_startup_grace,
-            )
+            heartbeat_interval=heartbeat_interval,
+            heartbeat_timeout=heartbeat_timeout,
+            max_missed_heartbeats=heartbeat_max_misses,
+            startup_grace=heartbeat_startup_grace,
+            election_cooldown=heartbeat_election_cooldown,
+            cooldown_jitter=heartbeat_cooldown_jitter,
+        )
             
             election_coordinator.start()
             logger.info(f"Election listener started on port {election_port}")
