@@ -106,6 +106,7 @@ class ElectionCoordinator:
         self._leader_since: Optional[float] = None
         self._missing_followers_logged: Set[int] = set()
         self._stepping_down = False
+        self._coordinator_version = 0
         
         # Socket for listening to election messages
         self._server_socket: Optional[socket.socket] = None
@@ -221,6 +222,7 @@ class ElectionCoordinator:
         with self._state_lock:
             self.state = NodeState.LEADER
             self.current_leader = self.my_id
+            self._coordinator_version += 1
         
         self._stepping_down = False
         self._reset_follower_tracking()
@@ -246,16 +248,23 @@ class ElectionCoordinator:
         timeout = self.election_timeout * 2
         
         with self._state_lock:
-            initial_leader = self.current_leader
+            initial_version = self._coordinator_version
             
         while time.monotonic() - start_time < timeout:
             if self._stop_event.is_set():
                 return
                 
             with self._state_lock:
-                if self.current_leader != initial_leader:
-                    # Leader changed, coordinator message received
-                    logger.info(f"Node {self.my_id} accepted new leader {self.current_leader}")
+                version_changed = self._coordinator_version != initial_version
+                is_leader_now = self.state == NodeState.LEADER and self.current_leader == self.my_id
+                if version_changed:
+                    logger.info(
+                        "Node %s accepted coordinator message for leader %s",
+                        self.my_id,
+                        self.current_leader,
+                    )
+                    return
+                if is_leader_now:
                     return
                     
             time.sleep(0.1)
@@ -352,6 +361,7 @@ class ElectionCoordinator:
             old_leader = self.current_leader
             self.current_leader = new_leader
             self.state = NodeState.FOLLOWER
+            self._coordinator_version += 1
         
         if new_leader != self.my_id:
             self._clear_follower_tracking()
