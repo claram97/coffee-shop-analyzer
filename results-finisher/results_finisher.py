@@ -211,12 +211,12 @@ class ResultsFinisher:
 
         is_complete = False
         with state.lock:
-            self._update_batch_accounting(state, table_type, batch)
+            should_process_rows = self._update_batch_accounting(state, table_type, batch)
 
             # Consolidación especial para Q4
-            if qtype == QueryType.Q4:
+            if should_process_rows and qtype == QueryType.Q4:
                 self._q4_consolidate(state, table_type, batch)
-            else:
+            elif should_process_rows:
                 self._consolidate_batch_data(state, table_type, batch)
 
             state.last_update_time = time.time()
@@ -335,7 +335,7 @@ class ResultsFinisher:
 
     def _update_batch_accounting(
         self, state: QueryState, table_type: str, batch: DataBatch
-    ):
+    ) -> bool:
         shards_info_pb = list(batch.shards_info)
         if shards_info_pb:
             shards_info = [
@@ -390,9 +390,19 @@ class ResultsFinisher:
         )
         if copy_index >= len(bitmap):
             bitmap.extend([False] * (copy_index - len(bitmap) + 1))
-        if not bitmap[copy_index]:
+        is_duplicate = bitmap[copy_index]
+        if not is_duplicate:
             bitmap[copy_index] = True
             shard_entry["received_count"] = shard_entry.get("received_count", 0) + 1
+        else:
+            logger.debug(
+                "Duplicate DataBatch detected for query '%s', table '%s', batch %s, shard %s, copy %s.",
+                state.query_id,
+                table_type,
+                batch_number,
+                shard_key,
+                copy_index,
+            )
 
         expected_total_shards = self._calculate_total_expected_shards(batch_info)
         received_shard_instances = self._count_received_shards(batch_info)
@@ -432,6 +442,8 @@ class ResultsFinisher:
 
         if table_type in state.eof_received:
             self._check_and_mark_table_as_complete(state, table_type)
+
+        return not is_duplicate
 
     def _consolidate_batch_data(
         self, state: QueryState, table_type: str, batch: DataBatch
