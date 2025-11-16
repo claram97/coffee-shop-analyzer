@@ -650,6 +650,7 @@ services:
       - testing_net
     volumes:
       - ./results-finisher:/app/results-finisher:ro
+      - ./results_finisher_state/finisher-0:/tmp/results_finisher_state
     depends_on:
       rabbitmq:
         condition: service_healthy
@@ -672,6 +673,7 @@ services:
       - testing_net
     volumes:
       - ./results-finisher:/app/results-finisher:ro
+      - ./results_finisher_state/finisher-1:/tmp/results_finisher_state
     depends_on:
       rabbitmq:
         condition: service_healthy
@@ -694,6 +696,7 @@ services:
       - testing_net
     volumes:
       - ./results-finisher:/app/results-finisher:ro
+      - ./results_finisher_state/finisher-2:/tmp/results_finisher_state
     depends_on:
       rabbitmq:
         condition: service_healthy
@@ -716,6 +719,7 @@ services:
       - testing_net
     volumes:
       - ./results-finisher:/app/results-finisher:ro
+      - ./results_finisher_state/finisher-3:/tmp/results_finisher_state
     depends_on:
       rabbitmq:
         condition: service_healthy

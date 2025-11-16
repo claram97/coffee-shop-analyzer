@@ -1,4 +1,5 @@
 import logging
+import os
 import threading
 import time
 from dataclasses import dataclass, field
@@ -18,6 +19,7 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 from query_strategy_append_only import get_strategy
 from constants import QueryType
+from persistence import FinisherPersistence
 
 TABLE_NAME_TO_TYPE = {
     TableName.TRANSACTIONS: "Transactions",
@@ -85,32 +87,69 @@ class ResultsFinisher:
         self.active_queries: Dict[Tuple[str, str], QueryState] = {}
         self.global_lock = threading.Lock()
 
+        state_dir = os.getenv("RESULTS_FINISHER_STATE_DIR")
+        self.persistence = FinisherPersistence(state_dir)
+
         logger.info("Initialized ResultsFinisher for processing.")
 
-    def _process_message(self, body: bytes):
-        # logger.info("Processing message")
+    def _process_message(self, body: bytes, channel=None, delivery_tag=None, redelivered=False):
+        manual_ack = channel is not None and delivery_tag is not None
         try:
             if not body:
                 logger.warning("Received empty message body, ignoring.")
-                return
+                if manual_ack:
+                    channel.basic_ack(delivery_tag=delivery_tag)
+                return False
 
             envelope = Envelope()
             envelope.ParseFromString(body)
-
-            if envelope.type != MessageType.DATA_BATCH:
-                logger.warning(
-                    "Received envelope with unsupported type %s, ignoring.",
-                    envelope.type,
-                )
-                return
-
-            batch = envelope.data_batch
-            self._handle_data_batch(batch)
-
         except DecodeError as e:
             logger.error("Failed to decode envelope. Discarding message. Error: %s", e)
+            if manual_ack:
+                channel.basic_ack(delivery_tag=delivery_tag)
+            return False
         except Exception as e:
             logger.critical(f"Unexpected error in message handler: {e}", exc_info=True)
+            if manual_ack:
+                channel.basic_nack(delivery_tag=delivery_tag, requeue=True)
+            return False
+
+        if envelope.type != MessageType.DATA_BATCH:
+            logger.warning(
+                "Received envelope with unsupported type %s, ignoring.",
+                envelope.type,
+            )
+            if manual_ack:
+                channel.basic_ack(delivery_tag=delivery_tag)
+            return False
+
+        batch = envelope.data_batch
+        metadata = self._build_batch_metadata(batch)
+        client_id = metadata["client_id"]
+        query_id = metadata["query_id"]
+
+        try:
+            record = self.persistence.save_batch(metadata, body)
+            self.persistence.append_manifest(client_id, query_id, record)
+        except Exception as exc:
+            logger.error("Failed to persist incoming batch: %s", exc, exc_info=True)
+            if manual_ack:
+                channel.basic_nack(delivery_tag=delivery_tag, requeue=True)
+            return False
+
+        if manual_ack:
+            channel.basic_ack(delivery_tag=delivery_tag)
+
+        try:
+            self._process_persisted_record(record, envelope=envelope)
+        except Exception as exc:
+            logger.error(
+                "Failed to process persisted batch %s: %s",
+                record.get("id"),
+                exc,
+                exc_info=True,
+            )
+        return False
 
     def _handle_data_batch(self, batch: DataBatch):
         # logger.info("Handling data batch")
@@ -192,6 +231,56 @@ class ResultsFinisher:
             )
             self._finalize_query(state)
             self._cleanup_query_state(client_id, query_id)
+        return True
+
+    def _build_batch_metadata(self, batch: DataBatch) -> Dict[str, Any]:
+        payload = batch.payload
+        batch_number = 0
+        table_name = "UNKNOWN"
+        if payload is not None:
+            batch_number = int(getattr(payload, "batch_number", 0))
+            try:
+                table_name = TableName.Name(payload.name)
+            except ValueError:
+                table_name = str(payload.name)
+
+        query_enum = int(batch.query_ids[0]) if batch.query_ids else -1
+        metadata = {
+            "client_id": getattr(batch, "client_id", ""),
+            "query_enum": query_enum,
+            "query_id": str(query_enum),
+            "batch_number": batch_number,
+            "table_name": table_name,
+            "timestamp": time.time(),
+        }
+        return metadata
+
+    def _process_persisted_record(self, record: Dict[str, str], envelope: Envelope = None):
+        env = envelope
+        if env is None:
+            raw = self.persistence.load_batch_bytes(record)
+            if raw is None:
+                raise RuntimeError(f"Persisted batch bytes missing for id={record.get('id')}")
+            env = Envelope()
+            env.ParseFromString(raw)
+
+        if env.type != MessageType.DATA_BATCH:
+            raise ValueError("Persisted envelope is not a DATA_BATCH message.")
+
+        self._handle_data_batch(env.data_batch)
+
+    def _replay_persisted_batches(self):
+        recovered = 0
+        for record in self.persistence.iter_batches():
+            try:
+                self._process_persisted_record(record)
+                recovered += 1
+            except Exception as exc:
+                logger.error(
+                    "Failed to replay batch %s: %s", record.get("id"), exc, exc_info=True
+                )
+        if recovered:
+            logger.info("Replayed %d persisted batches.", recovered)
 
     @staticmethod
     def _normalize_user_id(value: Any) -> str:
@@ -486,11 +575,12 @@ class ResultsFinisher:
             key = (client_id, query_id)
             if key in self.active_queries:
                 del self.active_queries[key]
-            logger.info(
-                "In-memory cleanup complete for query '%s' (client %s).",
-                query_id,
-                client_id,
-            )
+        self._remove_persisted_query_files(client_id, query_id)
+        logger.info(
+            "In-memory cleanup complete for query '%s' (client %s).",
+            query_id,
+            client_id,
+        )
 
     def _send_result(
         self,
@@ -581,6 +671,27 @@ class ResultsFinisher:
                 exc_info=True,
             )
 
+    def _remove_persisted_query_files(self, client_id: str, query_id: str):
+        entries = self.persistence.load_manifest(client_id, query_id)
+        for entry in entries:
+            data_file = entry.get("data_file")
+            meta_file = entry.get("meta_file")
+            if data_file:
+                data_path = os.path.join(self.persistence.batches_dir, data_file)
+                if os.path.exists(data_path):
+                    try:
+                        os.remove(data_path)
+                    except OSError:
+                        pass
+            if meta_file:
+                meta_path = os.path.join(self.persistence.batches_dir, meta_file)
+                if os.path.exists(meta_path):
+                    try:
+                        os.remove(meta_path)
+                    except OSError:
+                        pass
+        self.persistence.delete_manifest(client_id, query_id)
+
     def _create_result_message(
         self, query_type: QueryType, result: Any
     ) -> Tuple[TableName, list[str], list[list[Any]]]:
@@ -655,6 +766,7 @@ class ResultsFinisher:
 
     def start(self):
         logger.info("ResultsFinisher is starting...")
+        self._replay_persisted_batches()
         self.input_client.start_consuming(self._process_message)
 
     def stop(self):
@@ -662,4 +774,19 @@ class ResultsFinisher:
         self.input_client.stop_consuming()
         self.input_client.close()
         self.output_client.close()
+        self._cleanup_active_queries()
         logger.info("ResultsFinisher has stopped.")
+
+    def _cleanup_active_queries(self):
+        with self.global_lock:
+            active = list(self.active_queries.keys())
+        for client_id, query_id in active:
+            try:
+                self._cleanup_query_state(client_id, query_id)
+            except Exception as exc:
+                logger.warning(
+                    "Failed to cleanup query '%s' (client %s) during shutdown: %s",
+                    query_id,
+                    client_id,
+                    exc,
+                )

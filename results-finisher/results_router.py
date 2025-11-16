@@ -90,15 +90,18 @@ class ResultsRouter:
     #     )
     #     return False
 
-    def _process_message(self, body: bytes):
-        # logger.info("Processing message")
+    def _process_message(self, body: bytes, channel=None, delivery_tag=None, redelivered=False):
         """
         Parses, validates, and routes a single incoming message.
-        This is the core callback for the message consumer.
+        Uses manual ACKs so messages are requeued on failures.
         """
+        manual_ack = channel is not None and delivery_tag is not None
+
         if not body:
             logger.warning("Received an empty message body. Discarding.")
-            return
+            if manual_ack:
+                channel.basic_ack(delivery_tag=delivery_tag)
+            return False
 
         try:
             # The primary responsibility is to route DataBatch messages.
@@ -110,7 +113,9 @@ class ResultsRouter:
                     "Received envelope with unsupported type %s. Discarding.",
                     envelope.type,
                 )
-                return
+                if manual_ack:
+                    channel.basic_ack(delivery_tag=delivery_tag)
+                return False
 
             message = envelope.data_batch
 
@@ -121,7 +126,9 @@ class ResultsRouter:
 
             if not message.query_ids:
                 logger.warning("DataBatch contains no query_ids for routing. Discarding.")
-                return
+                if manual_ack:
+                    channel.basic_ack(delivery_tag=delivery_tag)
+                return False
 
             # Route based on the first query_id in the list.
             query_id = str(int(message.query_ids[0]))
@@ -131,7 +138,9 @@ class ResultsRouter:
                     "DataBatch missing client_id for routing. Query: %s. Discarding.",
                     query_id,
                 )
-                return
+                if manual_ack:
+                    channel.basic_ack(delivery_tag=delivery_tag)
+                return False
 
             routing_key = f"{client_id}:{query_id}"
             batch_number = getattr(message.payload, "batch_number", 0)
@@ -139,6 +148,8 @@ class ResultsRouter:
             target_client = self.output_clients[target_queue_name]
             
             target_client.send(body)
+            if manual_ack:
+                channel.basic_ack(delivery_tag=delivery_tag)
             logger.debug(
                 "Routed DATA_BATCH %s for query '%s' (client %s) to queue '%s'",
                 batch_number,
@@ -146,6 +157,7 @@ class ResultsRouter:
                 client_id,
                 target_queue_name,
             )
+            return False
 
         except DecodeError as e:
             logger.error(
@@ -153,8 +165,13 @@ class ResultsRouter:
                 e,
                 body[:60],
             )
+            if manual_ack:
+                channel.basic_ack(delivery_tag=delivery_tag)
         except Exception as e:
             logger.critical(f"An unexpected error occurred in the message handler: {e}", exc_info=True)
+            if manual_ack:
+                channel.basic_nack(delivery_tag=delivery_tag, requeue=True)
+        return False
 
     def start(self):
         """Starts the message consumer in a dedicated thread."""
