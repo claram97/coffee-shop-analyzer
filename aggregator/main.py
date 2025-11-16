@@ -68,7 +68,7 @@ def main():
 
     initialize_log(logging_level)
 
-    logging.debug(
+    logging.info(
         f"action: config | result: success | "
         f"logging_level: {logging_level} | "
         f"aggregator_id: {aggregator_id}"
@@ -107,7 +107,7 @@ def main():
     follower_recovery = None
 
     def handle_leader_change(new_leader_id: int, am_i_leader: bool):
-        logging.info(
+        logging.debug(
             "Leader update received | new_leader=%s | am_i_leader=%s",
             new_leader_id,
             am_i_leader,
@@ -124,10 +124,10 @@ def main():
         # Build list of all aggregator nodes in the cluster
         all_nodes = [(i, f"aggregator-{i}", 9300 + i) for i in range(total_aggregators)]
 
-        logging.info(
+        logging.debug(
             f"Initializing election coordinator for aggregator-{aggregator_id} on port {election_port}"
         )
-        logging.info(f"Cluster nodes: {all_nodes}")
+        logging.debug(f"Cluster nodes: {all_nodes}")
 
         election_coordinator = ElectionCoordinator(
             my_id=aggregator_id,
@@ -162,7 +162,7 @@ def main():
         )
 
         election_coordinator.start()
-        logging.info(f"Election listener started on port {election_port}")
+        logging.debug(f"Election listener started on port {election_port}")
         heartbeat_client.start()
         heartbeat_client.activate()
         follower_recovery.start()

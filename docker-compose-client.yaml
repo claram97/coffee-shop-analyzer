@@ -15,6 +15,366 @@ services:
       - ./.data:/data:ro
       - ./client_runs:/client_runs
 
+  client2:
+    container_name: client2
+    build:
+      context: .
+      dockerfile: client/Dockerfile
+    entrypoint: /client
+    environment:
+      - CLI_ID=2
+    networks:
+      - testing_net
+    volumes:
+      - ./client/config.yaml:/config.yaml:ro
+      - ./.data:/data:ro
+      - ./client_runs:/client_runs
+
+  client3:
+    container_name: client3
+    build:
+      context: .
+      dockerfile: client/Dockerfile
+    entrypoint: /client
+    environment:
+      - CLI_ID=3
+    networks:
+      - testing_net
+    volumes:
+      - ./client/config.yaml:/config.yaml:ro
+      - ./.data:/data:ro
+      - ./client_runs:/client_runs
+
+  client4:
+    container_name: client4
+    build:
+      context: .
+      dockerfile: client/Dockerfile
+    entrypoint: /client
+    environment:
+      - CLI_ID=4
+    networks:
+      - testing_net
+    volumes:
+      - ./client/config.yaml:/config.yaml:ro
+      - ./.data:/data:ro
+      - ./client_runs:/client_runs
+
+  client5:
+    container_name: client5
+    build:
+      context: .
+      dockerfile: client/Dockerfile
+    entrypoint: /client
+    environment:
+      - CLI_ID=5
+    networks:
+      - testing_net
+    volumes:
+      - ./client/config.yaml:/config.yaml:ro
+      - ./.data:/data:ro
+      - ./client_runs:/client_runs
+
+  client6:
+    container_name: client6
+    build:
+      context: .
+      dockerfile: client/Dockerfile
+    entrypoint: /client
+    environment:
+      - CLI_ID=6
+    networks:
+      - testing_net
+    volumes:
+      - ./client/config.yaml:/config.yaml:ro
+      - ./.data:/data:ro
+      - ./client_runs:/client_runs
+
+  client7:
+    container_name: client7
+    build:
+      context: .
+      dockerfile: client/Dockerfile
+    entrypoint: /client
+    environment:
+      - CLI_ID=7
+    networks:
+      - testing_net
+    volumes:
+      - ./client/config.yaml:/config.yaml:ro
+      - ./.data:/data:ro
+      - ./client_runs:/client_runs
+
+  client8:
+    container_name: client8
+    build:
+      context: .
+      dockerfile: client/Dockerfile
+    entrypoint: /client
+    environment:
+      - CLI_ID=8
+    networks:
+      - testing_net
+    volumes:
+      - ./client/config.yaml:/config.yaml:ro
+      - ./.data:/data:ro
+      - ./client_runs:/client_runs
+
+  client9:
+    container_name: client9
+    build:
+      context: .
+      dockerfile: client/Dockerfile
+    entrypoint: /client
+    environment:
+      - CLI_ID=9
+    networks:
+      - testing_net
+    volumes:
+      - ./client/config.yaml:/config.yaml:ro
+      - ./.data:/data:ro
+      - ./client_runs:/client_runs
+
+  client10:
+    container_name: client10
+    build:
+      context: .
+      dockerfile: client/Dockerfile
+    entrypoint: /client
+    environment:
+      - CLI_ID=10
+    networks:
+      - testing_net
+    volumes:
+      - ./client/config.yaml:/config.yaml:ro
+      - ./.data:/data:ro
+      - ./client_runs:/client_runs
+
+  client11:
+    container_name: client11
+    build:
+      context: .
+      dockerfile: client/Dockerfile
+    entrypoint: /client
+    environment:
+      - CLI_ID=11
+    networks:
+      - testing_net
+    volumes:
+      - ./client/config.yaml:/config.yaml:ro
+      - ./.data:/data:ro
+      - ./client_runs:/client_runs
+
+  client12:
+    container_name: client12
+    build:
+      context: .
+      dockerfile: client/Dockerfile
+    entrypoint: /client
+    environment:
+      - CLI_ID=12
+    networks:
+      - testing_net
+    volumes:
+      - ./client/config.yaml:/config.yaml:ro
+      - ./.data:/data:ro
+      - ./client_runs:/client_runs
+
+  client13:
+    container_name: client13
+    build:
+      context: .
+      dockerfile: client/Dockerfile
+    entrypoint: /client
+    environment:
+      - CLI_ID=13
+    networks:
+      - testing_net
+    volumes:
+      - ./client/config.yaml:/config.yaml:ro
+      - ./.data:/data:ro
+      - ./client_runs:/client_runs
+
+  client14:
+    container_name: client14
+    build:
+      context: .
+      dockerfile: client/Dockerfile
+    entrypoint: /client
+    environment:
+      - CLI_ID=14
+    networks:
+      - testing_net
+    volumes:
+      - ./client/config.yaml:/config.yaml:ro
+      - ./.data:/data:ro
+      - ./client_runs:/client_runs
+
+  client15:
+    container_name: client15
+    build:
+      context: .
+      dockerfile: client/Dockerfile
+    entrypoint: /client
+    environment:
+      - CLI_ID=15
+    networks:
+      - testing_net
+    volumes:
+      - ./client/config.yaml:/config.yaml:ro
+      - ./.data:/data:ro
+      - ./client_runs:/client_runs
+
+  client16:
+    container_name: client16
+    build:
+      context: .
+      dockerfile: client/Dockerfile
+    entrypoint: /client
+    environment:
+      - CLI_ID=16
+    networks:
+      - testing_net
+    volumes:
+      - ./client/config.yaml:/config.yaml:ro
+      - ./.data:/data:ro
+      - ./client_runs:/client_runs
+
+  client17:
+    container_name: client17
+    build:
+      context: .
+      dockerfile: client/Dockerfile
+    entrypoint: /client
+    environment:
+      - CLI_ID=17
+    networks:
+      - testing_net
+    volumes:
+      - ./client/config.yaml:/config.yaml:ro
+      - ./.data:/data:ro
+      - ./client_runs:/client_runs
+
+  client18:
+    container_name: client18
+    build:
+      context: .
+      dockerfile: client/Dockerfile
+    entrypoint: /client
+    environment:
+      - CLI_ID=18
+    networks:
+      - testing_net
+    volumes:
+      - ./client/config.yaml:/config.yaml:ro
+      - ./.data:/data:ro
+      - ./client_runs:/client_runs
+
+  client19:
+    container_name: client19
+    build:
+      context: .
+      dockerfile: client/Dockerfile
+    entrypoint: /client
+    environment:
+      - CLI_ID=19
+    networks:
+      - testing_net
+    volumes:
+      - ./client/config.yaml:/config.yaml:ro
+      - ./.data:/data:ro
+      - ./client_runs:/client_runs
+
+  client20:
+    container_name: client20
+    build:
+      context: .
+      dockerfile: client/Dockerfile
+    entrypoint: /client
+    environment:
+      - CLI_ID=20
+    networks:
+      - testing_net
+    volumes:
+      - ./client/config.yaml:/config.yaml:ro
+      - ./.data:/data:ro
+      - ./client_runs:/client_runs
+
+  client21:
+    container_name: client21
+    build:
+      context: .
+      dockerfile: client/Dockerfile
+    entrypoint: /client
+    environment:
+      - CLI_ID=21
+    networks:
+      - testing_net
+    volumes:
+      - ./client/config.yaml:/config.yaml:ro
+      - ./.data:/data:ro
+      - ./client_runs:/client_runs
+
+  client22:
+    container_name: client22
+    build:
+      context: .
+      dockerfile: client/Dockerfile
+    entrypoint: /client
+    environment:
+      - CLI_ID=22
+    networks:
+      - testing_net
+    volumes:
+      - ./client/config.yaml:/config.yaml:ro
+      - ./.data:/data:ro
+      - ./client_runs:/client_runs
+
+  client23:
+    container_name: client23
+    build:
+      context: .
+      dockerfile: client/Dockerfile
+    entrypoint: /client
+    environment:
+      - CLI_ID=23
+    networks:
+      - testing_net
+    volumes:
+      - ./client/config.yaml:/config.yaml:ro
+      - ./.data:/data:ro
+      - ./client_runs:/client_runs
+
+  client24:
+    container_name: client24
+    build:
+      context: .
+      dockerfile: client/Dockerfile
+    entrypoint: /client
+    environment:
+      - CLI_ID=24
+    networks:
+      - testing_net
+    volumes:
+      - ./client/config.yaml:/config.yaml:ro
+      - ./.data:/data:ro
+      - ./client_runs:/client_runs
+
+  client25:
+    container_name: client25
+    build:
+      context: .
+      dockerfile: client/Dockerfile
+    entrypoint: /client
+    environment:
+      - CLI_ID=25
+    networks:
+      - testing_net
+    volumes:
+      - ./client/config.yaml:/config.yaml:ro
+      - ./.data:/data:ro
+      - ./client_runs:/client_runs
+
 networks:
   testing_net:
     ipam:

@@ -46,7 +46,7 @@ class ExchangePublisherPool:
     def __init__(self, host):
         self._host = host
         self._pool = {}
-        logging.info(f"Created exchange publisher pool for host: {host}")
+        logging.info("Created exchange publisher pool for host: %s", host)
 
     def get_exchange(self, exchange_name, route_keys):
         key = (
@@ -55,13 +55,15 @@ class ExchangePublisherPool:
         )
         if key not in self._pool:
             logging.info(
-                f"Creating new exchange in pool: {exchange_name} with keys {route_keys}"
+                "Creating new exchange in pool: %s with keys %s",
+                exchange_name,
+                route_keys,
             )
             self._pool[key] = MessageMiddlewareExchange(
                 host=self._host, exchange_name=exchange_name, route_keys=route_keys
             )
         else:
-            logging.debug(f"Reusing existing exchange from pool: {exchange_name}")
+            logging.debug("Reusing existing exchange from pool: %s", exchange_name)
         return self._pool[key]
 
 
@@ -83,7 +85,7 @@ class Aggregator:
         self._jr_replicas = self.config.routers.joiner
 
         self._exchange_pool = ExchangePublisherPool(host=self.host)
-        logging.info(f"Initialized exchange pool for aggregator {id}")
+        logging.info("Initialized exchange pool for aggregator %s", id)
 
         tables = ["menu_items", "stores", "transactions", "transaction_items", "users"]
         self._exchanges = {}
@@ -97,7 +99,11 @@ class Aggregator:
                 exchange_name=exchange_name, route_keys=[routing_key]
             )
             logging.info(
-                f"Created exchange connection for {table}: {exchange_name} -> {routing_key} with queue {queue_name}"
+                "Created exchange connection for %s: %s -> %s with queue %s",
+                table,
+                exchange_name,
+                routing_key,
+                queue_name,
             )
 
         self._out_queues = {}
@@ -111,7 +117,7 @@ class Aggregator:
                 )
 
     def _send_to_joiner_by_table(self, table: str, raw_bytes: bytes):
-        logging.info("Sending to joiner by table=%s", table)
+        logging.debug("Sending to joiner by table=%s", table)
         replica = random.randint(0, self._jr_replicas - 1)
         q = self._out_queues.get((table, replica))
         if not q:
@@ -120,7 +126,7 @@ class Aggregator:
         q.send(raw_bytes)
 
     def _forward_databatch_by_table(self, raw: bytes, table_name: str):
-        logging.info("Forwarding DataBatch message")
+        logging.debug("Forwarding DataBatch message")
         """Reenvía DataBatch a la cola correcta usando el table_name provisto."""
         try:
             table = table_name
@@ -139,10 +145,10 @@ class Aggregator:
             return
 
     def _forward_eof(self, raw: bytes, table_name: str):
-        logging.info("Forwarding EOF message")
+        logging.debug("Forwarding EOF message")
         """Detecta tabla desde EOFMessage y reenvía a la cola correcta."""
         table = table_name
-        logging.info("Forwarding EOF for table=%s", table)
+        logging.debug("Forwarding EOF for table=%s", table)
         for replica in range(0, self._jr_replicas):
             q = self._out_queues.get((table, replica))
             q.send(raw)
@@ -150,7 +156,7 @@ class Aggregator:
     def run(self):
         """Start the aggregator server."""
         self.running = True
-        logging.info(f"Starting aggregator server with ID {self.id}")
+        logging.info("Starting aggregator server with ID %s", self.id)
 
         self._exchanges["menu_items"].start_consuming(self._handle_menu_item)
         self._exchanges["stores"].start_consuming(self._handle_store)
@@ -160,12 +166,12 @@ class Aggregator:
         )
         self._exchanges["users"].start_consuming(self._handle_user)
 
-        logging.debug("Started aggregator server")
+        logging.info("Started aggregator server")
 
     def stop(self):
         """Stop the aggregator server."""
         self.running = False
-        logging.debug("Stopping aggregator server")
+        logging.info("Stopping aggregator server")
 
         for exchange in self._exchanges.values():
             exchange.stop_consuming()
@@ -176,7 +182,7 @@ class Aggregator:
         logging.info("Aggregator server stopped")
 
     def _handle_menu_item(self, message: bytes) -> bool:
-        logging.info("Handling menu item message")
+        logging.debug("Handling menu item message")
         try:
             if not message:
                 return False
@@ -198,7 +204,7 @@ class Aggregator:
             return False
 
     def _handle_store(self, message: bytes) -> bool:
-        logging.info("Handling store message")
+        logging.debug("Handling store message")
         try:
             if not message:
                 return False
@@ -220,7 +226,7 @@ class Aggregator:
             return False
 
     def _handle_transaction(self, message: bytes):
-        logging.info("Handling transaction message")
+        logging.debug("Handling transaction message")
         try:
             if not message:
                 return False
@@ -291,7 +297,7 @@ class Aggregator:
             return False
 
     def _handle_transaction_item(self, message: bytes):
-        logging.info("Handling transaction item message")
+        logging.debug("Handling transaction item message")
         try:
             if not message:
                 return False
@@ -349,7 +355,7 @@ class Aggregator:
             return False
 
     def _handle_user(self, message: bytes) -> bool:
-        logging.info("Handling user message")
+        logging.debug("Handling user message")
         try:
             if not message:
                 logging.error("Empty message received in user handler")

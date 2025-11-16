@@ -1,4 +1,5 @@
 import logging
+import shutil
 import subprocess
 import threading
 import time
@@ -34,6 +35,7 @@ class FollowerRecoveryManager:
         self._leader_active = False
         self._leader_since = 0.0
         self._state_lock = threading.Lock()
+        self._docker_cli = shutil.which("docker") or "/usr/bin/docker"
 
     def start(self):
         if self._thread and self._thread.is_alive():
@@ -111,7 +113,7 @@ class FollowerRecoveryManager:
         )
         try:
             result = subprocess.run(
-                ["docker", "restart", container_name],
+                [self._docker_cli, "restart", container_name],
                 check=False,
                 capture_output=True,
                 text=True,
