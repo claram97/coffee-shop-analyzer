@@ -16,6 +16,7 @@ COMPONENTS=(
     "joiner-worker-"
     "aggregator-"
     "results-router-"
+    "results-finisher-"
 )
 
 # Number of times to kill containers (default: 10)

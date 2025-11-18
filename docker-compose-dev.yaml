@@ -1046,6 +1046,7 @@ services:
       - ./results-finisher:/app/results-finisher:ro
       - ./app_config/config.ini:/config/config.ini:ro
       - /var/run/docker.sock:/var/run/docker.sock
+      - ./results_finisher_state/finisher-0:/tmp/results_finisher_state
     depends_on:
       rabbitmq:
         condition: service_healthy
@@ -1081,6 +1082,7 @@ services:
       - ./results-finisher:/app/results-finisher:ro
       - ./app_config/config.ini:/config/config.ini:ro
       - /var/run/docker.sock:/var/run/docker.sock
+      - ./results_finisher_state/finisher-1:/tmp/results_finisher_state
     depends_on:
       rabbitmq:
         condition: service_healthy
@@ -1116,6 +1118,7 @@ services:
       - ./results-finisher:/app/results-finisher:ro
       - ./app_config/config.ini:/config/config.ini:ro
       - /var/run/docker.sock:/var/run/docker.sock
+      - ./results_finisher_state/finisher-2:/tmp/results_finisher_state
     depends_on:
       rabbitmq:
         condition: service_healthy
@@ -1151,6 +1154,7 @@ services:
       - ./results-finisher:/app/results-finisher:ro
       - ./app_config/config.ini:/config/config.ini:ro
       - /var/run/docker.sock:/var/run/docker.sock
+      - ./results_finisher_state/finisher-3:/tmp/results_finisher_state
     depends_on:
       rabbitmq:
         condition: service_healthy

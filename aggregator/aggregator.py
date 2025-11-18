@@ -7,8 +7,8 @@ processing and analyzing coffee shop data from multiple clients.
 """
 import logging
 import os
-import random
 from collections import defaultdict
+from typing import Dict, Optional, Tuple
 
 from processing import (
     process_query_2,
@@ -41,6 +41,7 @@ TID_TO_NAME = {
     TableName.TRANSACTIONS: "transactions",
     TableName.USERS: "users",
 }
+LIGHT_TABLES = {"menu_items", "stores"}
 
 
 class ExchangePublisherPool:
@@ -120,6 +121,8 @@ class Aggregator:
         
         # In-memory batch deduplication: track received batches per (table, client_id, query_ids_tuple)
         self._received_batches = defaultdict(set)
+        # Track joiner replicas used per (table, client_id)
+        self._client_table_replicas: Dict[Tuple[str, str], set[int]] = defaultdict(set)
 
     def _is_duplicate_batch(self, data_batch: DataBatch) -> bool:
         """
@@ -148,17 +151,28 @@ class Aggregator:
         )
         return False
 
-    def _send_to_joiner_by_table(self, table: str, raw_bytes: bytes):
-        logging.debug("Sending to joiner by table=%s", table)
-        replica = random.randint(0, self._jr_replicas - 1)
-        q = self._out_queues.get((table, replica))
-        if not q:
-            logging.error("No out queue configured for table=%s", table)
-            raise Exception(f"No out queue configured for table={table}")
-        q.send(raw_bytes)
+    def _target_replicas(self, table: str, client_id: Optional[str], batch_number: int) -> list[int]:
+        if table in LIGHT_TABLES:
+            replicas = list(range(self._jr_replicas))
+        else:
+            shard = batch_number if batch_number is not None else 0
+            replicas = [shard % self._jr_replicas]
+        if client_id:
+            self._client_table_replicas[(table, client_id)].update(replicas)
+        return replicas
 
-    def _forward_databatch_by_table(self, raw: bytes, table_name: str):
-        logging.debug("Forwarding DataBatch message")
+    def _send_to_joiner_by_table(self, table: str, client_id: Optional[str], batch_number: int, raw_bytes: bytes):
+        logging.info("Sending to joiner by table=%s", table)
+        replicas = self._target_replicas(table, client_id, batch_number)
+        for replica in replicas:
+            q = self._out_queues.get((table, replica))
+            if not q:
+                logging.error("No out queue configured for table=%s replica=%s", table, replica)
+                raise Exception(f"No out queue configured for table={table}")
+            q.send(raw_bytes)
+
+    def _forward_databatch_by_table(self, data_batch: DataBatch, raw: bytes, table_name: str):
+        logging.info("Forwarding DataBatch message")
         """Reenvía DataBatch a la cola correcta usando el table_name provisto."""
         try:
             table = table_name
@@ -169,7 +183,8 @@ class Aggregator:
                 logging.error("Unknown table_name=%s", table_name)
                 return
 
-            self._send_to_joiner_by_table(table, raw)
+            batch_number = int(getattr(data_batch.payload, "batch_number", 0) or 0)
+            self._send_to_joiner_by_table(table, data_batch.client_id, batch_number, raw)
         except Exception:
             logging.exception(
                 "Failed to forward databatch by table. Table: %s", table_name
@@ -189,13 +204,28 @@ class Aggregator:
             # The filter already set this, so we keep it as-is
             original_trace = eof.trace if eof.trace else ""
             logging.info("Forwarding EOF for table=%s with trace=%s", table_name, original_trace)
-            
-            for replica in range(0, self._jr_replicas):
+            client_id = eof.client_id if eof.client_id else None
+            replicas: list[int]
+            if table_name in LIGHT_TABLES or not client_id:
+                replicas = list(range(self._jr_replicas))
+            else:
+                replicas = list(self._client_table_replicas.pop((table_name, client_id), []))
+                if not replicas:
+                    replicas = list(range(self._jr_replicas))
+
+            for replica in replicas:
                 q = self._out_queues.get((table_name, replica))
                 if not q:
                     raise Exception(f"No out queue configured for table={table_name}, replica={replica}")
                 q.send(raw)
-                logging.debug(f"Forwarded EOF to joiner_router replica={replica} table={table_name} trace={original_trace}")
+                logging.debug(
+                    "Forwarded EOF to joiner_router replica=%s table=%s trace=%s",
+                    replica,
+                    table_name,
+                    original_trace,
+                )
+            if client_id:
+                self._client_table_replicas.pop((table_name, client_id), None)
         except Exception:
             logging.exception("Failed to forward EOF")
             raise
@@ -246,7 +276,7 @@ class Aggregator:
                         channel.basic_ack(delivery_tag=delivery_tag)
                     return False
                 table_name = TID_TO_NAME[data_batch.payload.name]
-                self._forward_databatch_by_table(message, table_name)
+                self._forward_databatch_by_table(data_batch, message, table_name)
             else:
                 logging.warning("Unknown message type: %s", envelope.type)
             
@@ -276,7 +306,7 @@ class Aggregator:
                         channel.basic_ack(delivery_tag=delivery_tag)
                     return False
                 table_name = TID_TO_NAME[data_batch.payload.name]
-                self._forward_databatch_by_table(message, table_name)
+                self._forward_databatch_by_table(data_batch, message, table_name)
             else:
                 logging.warning("Unknown message type: %s", envelope.type)
             
@@ -313,12 +343,10 @@ class Aggregator:
                 query_id = data_batch.query_ids[0] if data_batch.query_ids else None
 
                 if query_id == 0 or query_id is None:
-                    self._forward_databatch_by_table(message, "transactions")
+                    self._forward_databatch_by_table(data_batch, message, "transactions")
                 elif query_id == 2:
                     processed = process_query_3(rows)
                     out = serialize_query3_results(processed)
-                    # TODO: Convert out to new protobuf format
-                    # For now, assume out is list of dicts
                     columns = ['transaction_id', 'store_id', 'payment_method_id', 'user_id', 'original_amount', 'discount_applied', 'final_amount', 'created_at']
                     row_values = [[str(row.get(col, '')) for col in columns] for row in out]
                     new_table_data = build_table_data(
@@ -333,7 +361,7 @@ class Aggregator:
                     new_data_batch.payload.CopyFrom(new_table_data)
                     new_envelope = Envelope(type=MessageType.DATA_BATCH, data_batch=new_data_batch)
                     new_message = new_envelope.SerializeToString()
-                    self._forward_databatch_by_table(new_message, "transactions")
+                    self._forward_databatch_by_table(new_data_batch, new_message, "transactions")
                 elif query_id == 3:
                     processed = process_query_4_transactions(rows)
                     out = serialize_query4_transaction_results(processed)
@@ -351,7 +379,7 @@ class Aggregator:
                     new_data_batch.payload.CopyFrom(new_table_data)
                     new_envelope = Envelope(type=MessageType.DATA_BATCH, data_batch=new_data_batch)
                     new_message = new_envelope.SerializeToString()
-                    self._forward_databatch_by_table(new_message, "transactions")
+                    self._forward_databatch_by_table(new_data_batch, new_message, "transactions")
                 else:
                     logging.error("Unexpected query_id=%s for transaction table", query_id)
                     return False
@@ -414,7 +442,7 @@ class Aggregator:
                     )
                     new_envelope = Envelope(type=MessageType.DATA_BATCH, data_batch=new_data_batch)
                     new_message = new_envelope.SerializeToString()
-                    self._forward_databatch_by_table(new_message, "transaction_items")
+                    self._forward_databatch_by_table(new_data_batch, new_message, "transaction_items")
                 else:
                     logging.error(
                         "Transaction item with query distinct from 1: %s", query_id
@@ -450,7 +478,7 @@ class Aggregator:
                         channel.basic_ack(delivery_tag=delivery_tag)
                     return False
                 table_name = TID_TO_NAME[data_batch.payload.name]
-                self._forward_databatch_by_table(message, table_name)
+                self._forward_databatch_by_table(data_batch, message, table_name)
             else:
                 logging.warning("Unknown message type: %s", envelope.type)
             
