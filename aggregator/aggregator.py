@@ -8,6 +8,7 @@ processing and analyzing coffee shop data from multiple clients.
 import logging
 import os
 import random
+from collections import defaultdict
 
 from processing import (
     process_query_2,
@@ -48,10 +49,11 @@ class ExchangePublisherPool:
         self._pool = {}
         logging.info("Created exchange publisher pool for host: %s", host)
 
-    def get_exchange(self, exchange_name, route_keys):
+    def get_exchange(self, exchange_name, route_keys, queue_name=None):
         key = (
             exchange_name,
             tuple(route_keys) if isinstance(route_keys, list) else (route_keys,),
+            queue_name,  # Include queue_name in cache key
         )
         if key not in self._pool:
             logging.info(
@@ -60,7 +62,7 @@ class ExchangePublisherPool:
                 route_keys,
             )
             self._pool[key] = MessageMiddlewareExchange(
-                host=self._host, exchange_name=exchange_name, route_keys=route_keys
+                host=self._host, exchange_name=exchange_name, route_keys=route_keys, queue_name=queue_name
             )
         else:
             logging.debug("Reusing existing exchange from pool: %s", exchange_name)
@@ -96,7 +98,7 @@ class Aggregator:
             queue_name = self.config.aggregator_queue(table, self.id)
 
             self._exchanges[table] = self._exchange_pool.get_exchange(
-                exchange_name=exchange_name, route_keys=[routing_key]
+                exchange_name=exchange_name, route_keys=[routing_key], queue_name=queue_name
             )
             logging.info(
                 "Created exchange connection for %s: %s -> %s with queue %s",
@@ -115,6 +117,36 @@ class Aggregator:
                 self._out_queues[(table, replica)] = MessageMiddlewareQueue(
                     host=self.host, queue_name=out_q
                 )
+        
+        # In-memory batch deduplication: track received batches per (table, client_id, query_ids_tuple)
+        self._received_batches = defaultdict(set)
+
+    def _is_duplicate_batch(self, data_batch: DataBatch) -> bool:
+        """
+        Check if a batch is a duplicate. Returns True if duplicate, False otherwise.
+        Tracks batches by (table, client_id, query_ids_tuple, batch_number).
+        """
+        table = data_batch.payload.name
+        client_id = data_batch.client_id
+        batch_number = data_batch.payload.batch_number
+        query_ids_tuple = tuple(sorted(data_batch.query_ids))
+        
+        dedup_key = (table, client_id, query_ids_tuple)
+        
+        if batch_number in self._received_batches[dedup_key]:
+            logging.warning(
+                "DUPLICATE batch detected and discarded in aggregator: table=%s bn=%s client=%s queries=%s",
+                table, batch_number, client_id, data_batch.query_ids
+            )
+            return True
+        
+        # Mark batch as received
+        self._received_batches[dedup_key].add(batch_number)
+        logging.debug(
+            "Batch marked as received: table=%s bn=%s client=%s queries=%s",
+            table, batch_number, client_id, data_batch.query_ids
+        )
+        return False
 
     def _send_to_joiner_by_table(self, table: str, raw_bytes: bytes):
         logging.debug("Sending to joiner by table=%s", table)
@@ -122,7 +154,7 @@ class Aggregator:
         q = self._out_queues.get((table, replica))
         if not q:
             logging.error("No out queue configured for table=%s", table)
-            return
+            raise Exception(f"No out queue configured for table={table}")
         q.send(raw_bytes)
 
     def _forward_databatch_by_table(self, raw: bytes, table_name: str):
@@ -146,12 +178,27 @@ class Aggregator:
 
     def _forward_eof(self, raw: bytes, table_name: str):
         logging.debug("Forwarding EOF message")
-        """Detecta tabla desde EOFMessage y reenvía a la cola correcta."""
-        table = table_name
-        logging.debug("Forwarding EOF for table=%s", table)
-        for replica in range(0, self._jr_replicas):
-            q = self._out_queues.get((table, replica))
-            q.send(raw)
+        """Parse EOF, update trace with aggregator ID, and forward to joiner routers."""
+        try:
+            envelope = Envelope()
+            envelope.ParseFromString(raw)
+            eof = envelope.eof
+            
+            # Update trace: append aggregator_id to existing trace
+            # Expected format: "filter_router_id:aggregator_id"
+            # The filter already set this, so we keep it as-is
+            original_trace = eof.trace if eof.trace else ""
+            logging.info("Forwarding EOF for table=%s with trace=%s", table_name, original_trace)
+            
+            for replica in range(0, self._jr_replicas):
+                q = self._out_queues.get((table_name, replica))
+                if not q:
+                    raise Exception(f"No out queue configured for table={table_name}, replica={replica}")
+                q.send(raw)
+                logging.debug(f"Forwarded EOF to joiner_router replica={replica} table={table_name} trace={original_trace}")
+        except Exception:
+            logging.exception("Failed to forward EOF")
+            raise
 
     def run(self):
         """Start the aggregator server."""
@@ -181,7 +228,7 @@ class Aggregator:
 
         logging.info("Aggregator server stopped")
 
-    def _handle_menu_item(self, message: bytes) -> bool:
+    def _handle_menu_item(self, message: bytes, channel=None, delivery_tag=None, redelivered=None) -> bool:
         logging.debug("Handling menu item message")
         try:
             if not message:
@@ -194,16 +241,24 @@ class Aggregator:
                 self._forward_eof(message, table_name)
             elif envelope.type == MessageType.DATA_BATCH:
                 data_batch = envelope.data_batch
+                if self._is_duplicate_batch(data_batch):
+                    if channel and delivery_tag is not None:
+                        channel.basic_ack(delivery_tag=delivery_tag)
+                    return False
                 table_name = TID_TO_NAME[data_batch.payload.name]
                 self._forward_databatch_by_table(message, table_name)
             else:
                 logging.warning("Unknown message type: %s", envelope.type)
-            return True
+            
+            if channel and delivery_tag is not None:
+                channel.basic_ack(delivery_tag=delivery_tag)
+                logging.debug(f"Manually ACKed menu item message, delivery_tag: {delivery_tag}")
+            return False
         except Exception:
             logging.exception("Failed to handle menu item")
             return False
 
-    def _handle_store(self, message: bytes) -> bool:
+    def _handle_store(self, message: bytes, channel=None, delivery_tag=None, redelivered=None) -> bool:
         logging.debug("Handling store message")
         try:
             if not message:
@@ -216,16 +271,24 @@ class Aggregator:
                 self._forward_eof(message, table_name)
             elif envelope.type == MessageType.DATA_BATCH:
                 data_batch = envelope.data_batch
+                if self._is_duplicate_batch(data_batch):
+                    if channel and delivery_tag is not None:
+                        channel.basic_ack(delivery_tag=delivery_tag)
+                    return False
                 table_name = TID_TO_NAME[data_batch.payload.name]
                 self._forward_databatch_by_table(message, table_name)
             else:
                 logging.warning("Unknown message type: %s", envelope.type)
-            return True
+            
+            if channel and delivery_tag is not None:
+                channel.basic_ack(delivery_tag=delivery_tag)
+                logging.debug(f"Manually ACKed store message, delivery_tag: {delivery_tag}")
+            return False
         except Exception:
             logging.exception("Failed to handle store")
             return False
 
-    def _handle_transaction(self, message: bytes):
+    def _handle_transaction(self, message: bytes, channel=None, delivery_tag=None, redelivered=None):
         logging.debug("Handling transaction message")
         try:
             if not message:
@@ -238,10 +301,13 @@ class Aggregator:
                 eof_msg = envelope.eof
                 table_name = TID_TO_NAME[eof_msg.table]
                 self._forward_eof(message, table_name)
-                return True
 
             elif envelope.type == MessageType.DATA_BATCH:
                 data_batch = envelope.data_batch
+                if self._is_duplicate_batch(data_batch):
+                    if channel and delivery_tag is not None:
+                        channel.basic_ack(delivery_tag=delivery_tag)
+                    return False
                 table_data = data_batch.payload
                 rows = list(iterate_rows_as_dicts(table_data))
                 query_id = data_batch.query_ids[0] if data_batch.query_ids else None
@@ -291,12 +357,16 @@ class Aggregator:
                     return False
             else:
                 logging.warning("Unknown message type: %s", envelope.type)
-            return True
+            
+            if channel and delivery_tag is not None:
+                channel.basic_ack(delivery_tag=delivery_tag)
+                logging.debug(f"Manually ACKed transaction message, delivery_tag: {delivery_tag}")
+            return False
         except Exception:
             logging.exception("Failed to handle transaction")
             return False
 
-    def _handle_transaction_item(self, message: bytes):
+    def _handle_transaction_item(self, message: bytes, channel=None, delivery_tag=None, redelivered=None):
         logging.debug("Handling transaction item message")
         try:
             if not message:
@@ -309,10 +379,13 @@ class Aggregator:
                 eof_msg = envelope.eof
                 table_name = TID_TO_NAME[eof_msg.table]
                 self._forward_eof(message, table_name)
-                return True
 
             elif envelope.type == MessageType.DATA_BATCH:
                 data_batch = envelope.data_batch
+                if self._is_duplicate_batch(data_batch):
+                    if channel and delivery_tag is not None:
+                        channel.basic_ack(delivery_tag=delivery_tag)
+                    return False
                 table_data = data_batch.payload
                 rows = list(iterate_rows_as_dicts(table_data))
                 query_id = data_batch.query_ids[0] if data_batch.query_ids else None
@@ -349,12 +422,16 @@ class Aggregator:
                     return False
             else:
                 logging.warning("Unknown message type: %s", envelope.type)
-            return True
+            
+            if channel and delivery_tag is not None:
+                channel.basic_ack(delivery_tag=delivery_tag)
+                logging.debug(f"Manually ACKed transaction item message, delivery_tag: {delivery_tag}")
+            return False
         except Exception:
             logging.exception("Failed to handle transaction item")
             return False
 
-    def _handle_user(self, message: bytes) -> bool:
+    def _handle_user(self, message: bytes, channel=None, delivery_tag=None, redelivered=None) -> bool:
         logging.debug("Handling user message")
         try:
             if not message:
@@ -368,11 +445,19 @@ class Aggregator:
                 self._forward_eof(message, table_name)
             elif envelope.type == MessageType.DATA_BATCH:
                 data_batch = envelope.data_batch
+                if self._is_duplicate_batch(data_batch):
+                    if channel and delivery_tag is not None:
+                        channel.basic_ack(delivery_tag=delivery_tag)
+                    return False
                 table_name = TID_TO_NAME[data_batch.payload.name]
                 self._forward_databatch_by_table(message, table_name)
             else:
                 logging.warning("Unknown message type: %s", envelope.type)
-            return True
+            
+            if channel and delivery_tag is not None:
+                channel.basic_ack(delivery_tag=delivery_tag)
+                logging.debug(f"Manually ACKed user message, delivery_tag: {delivery_tag}")
+            return False
         except Exception:
             logging.exception("Failed to handle user")
             return False

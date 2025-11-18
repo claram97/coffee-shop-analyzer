@@ -46,13 +46,13 @@ eval "$(python3 ./app_config/config_subscript.py -c "$INI_PATH" election_ports -
 
 : "${HEARTBEAT_INTERVAL_SECONDS:=0.5}"
 : "${HEARTBEAT_TIMEOUT_SECONDS:=0.5}"
-: "${HEARTBEAT_MAX_MISSES:=2}"
+: "${HEARTBEAT_MAX_MISSES:=3}"
 : "${HEARTBEAT_STARTUP_GRACE_SECONDS:=3.0}"
 : "${HEARTBEAT_ELECTION_COOLDOWN_SECONDS:=5.0}"
 : "${HEARTBEAT_COOLDOWN_JITTER_SECONDS:=0.2}"
 : "${FOLLOWER_DOWN_TIMEOUT_SECONDS:=6.0}"
 : "${FOLLOWER_RESTART_COOLDOWN_SECONDS:=20.0}"
-: "${FOLLOWER_RECOVERY_GRACE_SECONDS:=4.0}"
+: "${FOLLOWER_RECOVERY_GRACE_SECONDS:=6.0}"
 : "${FOLLOWER_MAX_RESTART_ATTEMPTS:=3}"
 
 cat > "$OUT_PATH" <<YAML
@@ -142,11 +142,13 @@ cat >> "$OUT_PATH" <<YAML
       - FOLLOWER_MAX_RESTART_ATTEMPTS=${FOLLOWER_MAX_RESTART_ATTEMPTS}
       - FOLLOWER_MAX_RESTART_ATTEMPTS=${FOLLOWER_MAX_RESTART_ATTEMPTS}
       - FOLLOWER_MAX_RESTART_ATTEMPTS=${FOLLOWER_MAX_RESTART_ATTEMPTS}
+      - FILTER_ROUTER_STATE_DIR=/tmp/filter_router_state
     networks:
       - testing_net
     volumes:
       - $INI_PATH:/config/config.ini:ro
       - /var/run/docker.sock:/var/run/docker.sock
+      - ./filter_router_state/router-${i}:/tmp/filter_router_state
     depends_on:
       rabbitmq:
         condition: service_healthy
@@ -294,6 +296,7 @@ cat >> "$OUT_PATH" <<YAML
     volumes:
       - $INI_PATH:/config/config.ini:ro
       - /var/run/docker.sock:/var/run/docker.sock
+      - ./joiner_state/worker-${i}:/tmp/joiner_state
     depends_on:
       rabbitmq:
         condition: service_healthy

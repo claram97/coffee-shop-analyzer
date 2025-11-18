@@ -259,6 +259,7 @@ def main():
         route_cfg=route_cfg,
         fr_replicas=fr_replicas,
         stop_event=stop_event,
+        router_id=jr_index,
     )
 
     in_queues: list[str] = []

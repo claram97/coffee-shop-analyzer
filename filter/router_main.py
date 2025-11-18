@@ -50,6 +50,7 @@ def build_filter_router_from_config(
         in_mw=router_in,
         exchange_fmt=cfg.names.filter_router_exchange_fmt,
         rk_fmt=cfg.names.filter_router_rk_fmt,
+        router_id=pid,
     )
     table_cfg = TableConfig(cfg.workers.aggregators)
     policy = QueryPolicyResolver()

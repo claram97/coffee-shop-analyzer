@@ -260,6 +260,10 @@ def main(argv=None):
 
     out_results = make_results_pub()
 
+    # Get write buffer size from config (can be overridden by environment variable)
+    write_buffer_size = int(os.environ.get("JOINER_WRITE_BUFFER_SIZE", str(cfg.joiner_write_buffer_size)))
+    log.info("Using write buffer size: %d", write_buffer_size)
+
     worker = JoinerWorker(
         in_mw=in_mw,
         out_results_mw=out_results,
@@ -268,6 +272,7 @@ def main(argv=None):
         router_replicas=cfg.routers.joiner,
         out_factory=make_results_pub,
         stop_event=stop_event,
+        write_buffer_size=write_buffer_size,
     )
 
     log.info(

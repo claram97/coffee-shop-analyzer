@@ -149,6 +149,9 @@ class Config:
         r_results = cp.getint("results", "routers", fallback=1)
         self.routers = RoutersCfg(r_filters, r_joiners, r_results)
 
+        # Joiner worker configuration
+        self.joiner_write_buffer_size = cp.getint("joiners", "write_buffer_size", fallback=100)
+
         def _get_port(key: str, default: int) -> int:
             if cp.has_section("election_ports"):
                 section = cp["election_ports"]
@@ -164,7 +167,7 @@ class Config:
             results_workers=_get_port("results_workers", 9600),
             results_routers=_get_port("results_routers", 9700),
         )
-
+  
     def joiner_partitions(self, table: str) -> int:
         """Shards de salida del Joiner Router para TABLE (consumen Joiners)."""
         t = str(table).strip()

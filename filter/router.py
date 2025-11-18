@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import json
 import logging
+import os
 import random
 import threading
 import time
@@ -101,6 +103,8 @@ class FilterRouter:
         policy: QueryPolicyResolver,
         table_cfg: TableConfig,
         orch_workers: int,
+        persistence_dir: str = "/tmp/filter_router_state",
+        router_id: int = 0,
     ):
         self._p = producer
         self._pol = policy
@@ -109,17 +113,211 @@ class FilterRouter:
         self._pending_batches: Dict[tuple[TableName, str], int] = defaultdict(int)
         self._pending_eof: Dict[tuple[str, str], tuple[int, EOFMessage]] = {}
         self._orch_workers = orch_workers
+        # Store unacked EOF messages: key=(table, client_id) -> list of (channel, delivery_tag)
+        self._unacked_eofs: Dict[tuple[TableName, str], list] = {}
+        self._eof_ack_lock = threading.Lock()
+        
+        # Batch deduplication: track received batch numbers per (table, client_id, query_ids_tuple)
+        self._received_batches: Dict[tuple[TableName, str, tuple], set[int]] = defaultdict(set)
+        
+        # Track pending increments: (table, client_id) -> set of batch_numbers that COMPLETED increment
+        # This makes pending increments idempotent on redelivery
+        # A batch is in this set ONLY if both mark and increment+persist succeeded
+        self._pending_increments: Dict[tuple[TableName, str], set[int]] = defaultdict(set)
+        
+        # Persistence
+        self._persistence_dir = persistence_dir
+        self._router_id = router_id
+        self._persistence_lock = threading.Lock()
+        os.makedirs(self._persistence_dir, exist_ok=True)
+        
+        # Restore state from disk
+        self._restore_state()
 
-    def process_message(self, msg: Envelope) -> None:
-        self._log.debug("Processing message: %r, message type: %r", msg, msg.type)
+    def _get_pending_batches_path(self) -> str:
+        """Get file path for pending batches state."""
+        return os.path.join(self._persistence_dir, f"router_{self._router_id}_pending_batches.json")
+    
+    def _get_pending_eof_path(self) -> str:
+        """Get file path for pending EOF state."""
+        return os.path.join(self._persistence_dir, f"router_{self._router_id}_pending_eof.json")
+    
+    def _get_received_batches_path(self) -> str:
+        """Get file path for received batches deduplication state."""
+        return os.path.join(self._persistence_dir, f"router_{self._router_id}_received_batches.json")
+    
+    def _get_pending_increments_path(self) -> str:
+        """Get file path for pending increments tracking."""
+        return os.path.join(self._persistence_dir, f"router_{self._router_id}_pending_increments.json")
+    
+    def _persist_pending_batches(self) -> None:
+        """Persist pending batches counter to disk."""
+        with self._persistence_lock:
+            path = self._get_pending_batches_path()
+            temp_path = path + ".tmp"
+            try:
+                # Convert tuple keys to strings for JSON serialization
+                # Key format is (client_id, table)
+                data = {f"{client}:{table}": count for (client, table), count in self._pending_batches.items()}
+                with open(temp_path, "w") as f:
+                    json.dump(data, f)
+                os.rename(temp_path, path)
+                self._log.debug("Persisted pending batches: %d entries", len(data))
+            except Exception as e:
+                self._log.error("Failed to persist pending batches: %s", e)
+                if os.path.exists(temp_path):
+                    os.remove(temp_path)
+                raise
+    
+    def _persist_pending_eof(self) -> None:
+        """Persist pending EOF state to disk."""
+        with self._persistence_lock:
+            path = self._get_pending_eof_path()
+            temp_path = path + ".tmp"
+            try:
+                # Convert to serializable format
+                data = {}
+                for (table, client), (count, eof) in self._pending_eof.items():
+                    key = f"{table}:{client}"
+                    data[key] = {
+                        "count": count,
+                        "table": eof.table,
+                        "client_id": eof.client_id,
+                    }
+                with open(temp_path, "w") as f:
+                    json.dump(data, f)
+                os.rename(temp_path, path)
+                self._log.debug("Persisted pending EOF: %d entries", len(data))
+            except Exception as e:
+                self._log.error("Failed to persist pending EOF: %s", e)
+                if os.path.exists(temp_path):
+                    os.remove(temp_path)
+                raise
+    
+    def _persist_received_batches(self) -> None:
+        """Persist received batches for deduplication."""
+        with self._persistence_lock:
+            path = self._get_received_batches_path()
+            temp_path = path + ".tmp"
+            try:
+                # Convert to serializable format
+                data = {f"{table}:{client}:{','.join(map(str, query_ids))}": list(batches) 
+                        for (table, client, query_ids), batches in self._received_batches.items()}
+                with open(temp_path, "w") as f:
+                    json.dump(data, f)
+                os.rename(temp_path, path)
+                self._log.debug("Persisted received batches: %d entries", len(data))
+            except Exception as e:
+                self._log.error("Failed to persist received batches: %s", e)
+                if os.path.exists(temp_path):
+                    os.remove(temp_path)
+                raise
+    
+    def _persist_pending_increments(self) -> None:
+        """Persist pending increments tracking."""
+        with self._persistence_lock:
+            path = self._get_pending_increments_path()
+            temp_path = path + ".tmp"
+            try:
+                # Convert to serializable format
+                # Key format is (table, client_id)
+                data = {f"{table}:{client}": list(batches)
+                        for (table, client), batches in self._pending_increments.items()}
+                with open(temp_path, "w") as f:
+                    json.dump(data, f)
+                os.rename(temp_path, path)
+                self._log.debug("Persisted pending increments: %d entries", len(data))
+            except Exception as e:
+                self._log.error("Failed to persist pending increments: %s", e)
+                if os.path.exists(temp_path):
+                    os.remove(temp_path)
+                raise
+    
+    def _restore_state(self) -> None:
+        """Restore state from disk on startup."""
+        if not os.path.exists(self._persistence_dir):
+            return
+        
+        self._log.info("Restoring filter router state from disk: %s", self._persistence_dir)
+        
+        # Restore pending batches
+        batches_path = self._get_pending_batches_path()
+        if os.path.exists(batches_path):
+            try:
+                with open(batches_path, "r") as f:
+                    data = json.load(f)
+                for key_str, count in data.items():
+                    # Key format is "client_id:table"
+                    client, table_str = key_str.split(":", 1)
+                    table = int(table_str)
+                    self._pending_batches[(client, table)] = count
+                self._log.info("Restored %d pending batch counters", len(self._pending_batches))
+            except Exception as e:
+                self._log.warning("Failed to restore pending batches: %s", e)
+        
+        # Restore pending EOFs
+        eof_path = self._get_pending_eof_path()
+        if os.path.exists(eof_path):
+            try:
+                with open(eof_path, "r") as f:
+                    data = json.load(f)
+                for key_str, eof_data in data.items():
+                    table_str, client = key_str.split(":", 1)
+                    table = int(table_str)
+                    eof = EOFMessage(table=eof_data["table"], client_id=eof_data["client_id"])
+                    self._pending_eof[(table, client)] = (eof_data["count"], eof)
+                self._log.info("Restored %d pending EOF entries", len(self._pending_eof))
+            except Exception as e:
+                self._log.warning("Failed to restore pending EOFs: %s", e)
+        
+        # Restore received batches for deduplication
+        received_path = self._get_received_batches_path()
+        if os.path.exists(received_path):
+            try:
+                with open(received_path, "r") as f:
+                    data = json.load(f)
+                for key_str, batch_list in data.items():
+                    parts = key_str.split(":", 2)
+                    table = int(parts[0])
+                    client = parts[1]
+                    query_ids = tuple(map(int, parts[2].split(","))) if len(parts) > 2 and parts[2] else tuple()
+                    self._received_batches[(table, client, query_ids)] = set(batch_list)
+                self._log.info("Restored %d received batch sets for deduplication", len(self._received_batches))
+            except Exception as e:
+                self._log.warning("Failed to restore received batches: %s", e)
+        
+        # Restore pending increments tracking
+        increments_path = self._get_pending_increments_path()
+        if os.path.exists(increments_path):
+            try:
+                with open(increments_path, "r") as f:
+                    data = json.load(f)
+                for key_str, batch_list in data.items():
+                    table_str, client = key_str.split(":", 1)
+                    table = int(table_str)
+                    self._pending_increments[(table, client)] = set(batch_list)
+                self._log.info("Restored %d pending increment sets", len(self._pending_increments))
+            except Exception as e:
+                self._log.warning("Failed to restore pending increments: %s", e)
+        
+        self._log.info("Filter router state restoration complete")
+
+    def process_message(self, msg: Envelope, channel=None, delivery_tag=None, redelivered=False) -> tuple[bool, bool]:
+        """
+        Process a message and return (should_ack, ack_now).
+        - should_ack: True if message should eventually be acked
+        - ack_now: True if should ack immediately, False if should delay ack
+        """
+        self._log.debug("Processing message: %r, message type: %r, redelivered: %r", msg, msg.type, redelivered)
         if msg.type == MessageType.DATA_BATCH:
             self._handle_data(msg.data_batch)
+            return (True, True)  # Regular messages: ack immediately
         elif msg.type == MessageType.EOF_MESSAGE:
-            # EOF messages carry an EOFMessage, handle them with the
-            # dedicated EOF handler instead of the DataBatch handler.
-            self._handle_table_eof(msg.eof)
+            # EOF messages: delay ack until fully processed
+            return self._handle_table_eof(msg.eof, channel, delivery_tag, redelivered)
         else:
             self._log.warning("Unknown message type: %r", type(msg))
+            return (True, True)
 
     def _handle_data(self, batch: DataBatch) -> None:
         self._log.debug("Handling DataBatch message: %r", batch)
@@ -142,46 +340,100 @@ class FilterRouter:
             cid,
         )
         key = (cid, table)
+        
+        # Check for duplicate batch - only for batches coming from filter workers (mask != 0)
+        # NOTE: We check for duplicates but DON'T mark as received yet - that happens after successful processing
+        batch_is_duplicate = False
+        dedup_key = None
+        if mask != 0:
+            query_ids_tuple = tuple(sorted(queries))
+            dedup_key = (table, cid, query_ids_tuple)
+            if bn in self._received_batches[dedup_key]:
+                batch_is_duplicate = True
+                self._log.warning(
+                    "DUPLICATE batch detected: table=%s bn=%s cid=%s queries=%s mask=%s",
+                    table, bn, cid, queries, bin(mask)
+                )
+                # Check if this duplicate still needs pending decrement (crash recovery)
+                increment_key = (table, cid)
+                if bn in self._pending_increments[increment_key]:
+                    self._log.info("Duplicate batch needs pending decrement (crash recovery): bn=%d", bn)
+                    self._pending_batches[key] = max(0, self._pending_batches[key] - 1)
+                    self._pending_increments[increment_key].discard(bn)
+                    try:
+                        self._persist_pending_batches()
+                        self._persist_pending_increments()
+                        self._maybe_flush_pending_eof(key)
+                    except Exception as e:
+                        self._log.error("Failed to persist after duplicate decrement: %s", e)
+                        # Don't raise - we already processed this batch, just log the error
+                return
 
+        # Increment pending counter for fresh batches from orchestrator
+        # Make this idempotent: only increment if not already completed for this batch
+        increment_done = False
         if mask == 0:
-            self._pending_batches[key] += 1
-            self._log.debug("pending++ %s -> %d", key, self._pending_batches[key])
+            increment_key = (table, cid)
+            if bn not in self._pending_increments[increment_key]:
+                # Atomically: increment, mark as complete, persist both
+                self._pending_batches[key] += 1
+                self._pending_increments[increment_key].add(bn)
+                self._log.debug("pending++ %s bn=%d -> %d", key, bn, self._pending_batches[key])
+                try:
+                    # Persist both together - if this fails, rollback both
+                    self._persist_pending_batches()
+                    self._persist_pending_increments()
+                    increment_done = True
+                except Exception as e:
+                    self._log.error("Failed to persist after increment: %s", e)
+                    # Rollback both in-memory changes
+                    self._pending_batches[key] = max(0, self._pending_batches[key] - 1)
+                    self._pending_increments[increment_key].discard(bn)
+                    raise
+            else:
+                # Batch already completed increment (redelivery after successful increment+persist)
+                self._log.info("Batch already incremented pending (redelivery): table=%s bn=%d cid=%s", 
+                              table, bn, cid)
+                increment_done = True  # Increment was completed, so we should decrement later
 
-        total_steps = self._pol.total_steps(table, queries)
-        next_step = first_zero_bit(mask, total_steps)
-        if next_step is not None and self._pol.steps_remaining(
-            table, queries, steps_done=next_step
-        ):
-            # DataBatch protobuf (protocol2) does not have `reserved_u16`.
-            # Use the existing `filter_steps` field to store the updated mask.
-            new_mask = set_bit(mask, next_step)
-            try:
-                batch.filter_steps = new_mask
-            except Exception:
-                # If assignment to filter_steps fails for any reason, fall back
-                # to setting an attribute on the Python object (legacy-like).
-                setattr(batch, "filter_steps", new_mask)
+        # Wrap processing to rollback pending increment on failure
+        try:
+            total_steps = self._pol.total_steps(table, queries)
+            next_step = first_zero_bit(mask, total_steps)
+            if next_step is not None and self._pol.steps_remaining(
+                table, queries, steps_done=next_step
+            ):
+                # DataBatch protobuf (protocol2) does not have `reserved_u16`.
+                # Use the existing `filter_steps` field to store the updated mask.
+                new_mask = set_bit(mask, next_step)
+                try:
+                    batch.filter_steps = new_mask
+                except Exception:
+                    # If assignment to filter_steps fails for any reason, fall back
+                    # to setting an attribute on the Python object (legacy-like).
+                    setattr(batch, "filter_steps", new_mask)
 
-            self._log.debug(
-                "→ filters step=%d table=%s new_mask=%s",
-                next_step,
-                table,
-                bin(new_mask),
-            )
-            try:
+                self._log.debug(
+                    "→ filters step=%d table=%s new_mask=%s",
+                    next_step,
+                    table,
+                    bin(new_mask),
+                )
+                # Send to filters - if this fails, raise exception to trigger NACK
                 self._p.send_to_filters_pool(batch)
-            except Exception as e:
-                self._log.error("send_to_filters_pool failed: %s", e)
-            return
+                return
 
-        dup_count = int(self._pol.get_duplication_count(queries) or 1)
-        if dup_count > 1:
-            self._log.debug(
-                "Fan-out x%d table=%s queries=%s", dup_count, table, queries
-            )
+            dup_count = int(self._pol.get_duplication_count(queries) or 1)
+            if dup_count > 1:
+                self._log.debug(
+                    "Fan-out x%d table=%s queries=%s", dup_count, table, queries
+                )
 
-            try:
-                self._pending_batches[key] += dup_count
+                # Process fan-out: children inherit parent's mask (via CopyFrom)
+                # Since fanout only happens after all filter steps, mask != 0
+                # Children will skip increment logic (line 364 checks mask==0)
+                # Only the parent batch (which had mask=0 initially) incremented pending
+                fanout_batches = []
                 for i in range(dup_count):
                     new_queries = self._pol.get_new_batch_queries(
                         table, queries, copy_number=i
@@ -190,24 +442,72 @@ class FilterRouter:
                     b.CopyFrom(batch)
                     b.query_ids.clear()
                     b.query_ids.extend(new_queries)
-                    self._handle_data(b)
-            except Exception as e:
-                self._log.error("requeue_to_router failed: %s", e)
+                    fanout_batches.append(b)
+                
+                # Process all fanout batches - if any fails, exception propagates
+                for b in fanout_batches:
+                    self._handle_data(b)  # Each child handles its own pending counter
+                
+                # The parent batch is now fully processed (replaced by children)
+                # Decrement if this batch was previously incremented
+                increment_key = (table, cid)
+                if increment_done or (bn in self._pending_increments[increment_key]):
+                    self._pending_batches[key] = max(0, self._pending_batches[key] - 1)
+                    self._pending_increments[increment_key].discard(bn)  # Remove from tracking
+                    self._log.debug(
+                        "pending-- (fanout parent consumed) %s bn=%d -> %d", key, bn, self._pending_batches[key]
+                    )
+                    try:
+                        self._persist_pending_batches()
+                        self._persist_pending_increments()
+                    except Exception as e:
+                        self._log.error("Failed to persist pending batches after fanout: %s", e)
+                        raise
+                # Mark batch as received after successful fanout
+                if mask != 0 and dedup_key and not batch_is_duplicate:
+                    try:
+                        self._received_batches[dedup_key].add(bn)
+                        self._persist_received_batches()
+                    except Exception as e:
+                        self._log.error("Failed to persist received batches after fanout: %s", e)
+                        # Don't raise - fanout already happened
+                return
 
-            self._pending_batches[key] = max(0, self._pending_batches[key] - 1)
-            self._log.debug(
-                "pending-- (fanout parent) %s -> %d", key, self._pending_batches[key]
-            )
-            return
-
-        try:
+            # Send to aggregator - if this fails, raise exception to trigger NACK
             self._send_to_some_aggregator(batch)
-        except Exception as e:
-            self._log.error("send_sharded failed: %s", e)
-
-        self._pending_batches[key] = max(0, self._pending_batches[key] - 1)
-        self._log.debug("pending-- %s -> %d", key, self._pending_batches[key])
-        self._maybe_flush_pending_eof(key)
+            
+            # Mark batch as received after successful send
+            if mask != 0 and dedup_key and not batch_is_duplicate:
+                try:
+                    self._received_batches[dedup_key].add(bn)
+                    self._persist_received_batches()
+                except Exception as e:
+                    self._log.error("Failed to persist received batches after send: %s", e)
+                    # Don't raise - send already happened
+            
+            # Decrement pending counter if this batch was previously incremented
+            # Check _pending_increments to handle case where batch went through filters and came back
+            increment_key = (table, cid)
+            if increment_done or (bn in self._pending_increments[increment_key]):
+                self._pending_batches[key] = max(0, self._pending_batches[key] - 1)
+                self._pending_increments[increment_key].discard(bn)  # Remove from tracking
+                self._log.debug("pending-- %s bn=%d -> %d", key, bn, self._pending_batches[key])
+                try:
+                    self._persist_pending_batches()
+                    self._persist_pending_increments()
+                except Exception as e:
+                    self._log.error("Failed to persist pending batches after decrement: %s", e)
+                    raise
+                self._maybe_flush_pending_eof(key)
+        except Exception:
+            # Rollback pending increment if processing failed
+            if increment_done:
+                self._pending_batches[key] = max(0, self._pending_batches[key] - 1)
+                try:
+                    self._persist_pending_batches()
+                except Exception as persist_err:
+                    self._log.error("Failed to rollback pending batches after error: %s", persist_err)
+            raise
 
     def _send_to_some_aggregator(self, batch: DataBatch) -> None:
         if batch.payload.name in [TableName.MENU_ITEMS, TableName.STORES]:
@@ -219,13 +519,36 @@ class FilterRouter:
         num_parts = max(1, int(self._cfg.aggregators))
         self._p.send_to_aggregator_partition(randint(0, num_parts - 1), batch)
 
-    def _handle_table_eof(self, eof: EOFMessage) -> None:
-        self._log.debug("Handling TABLE_EOF message: %r", eof)
+    def _handle_table_eof(self, eof: EOFMessage, channel=None, delivery_tag=None, redelivered=False) -> tuple[bool, bool]:
+        """
+        Handle EOF message. Returns (should_ack, ack_now).
+        For EOFs: store the ack info and don't ack until fully processed.
+        """
         key = (eof.table, eof.client_id)
-        self._log.debug("TABLE_EOF received: key=%s", key)
+        
+        if redelivered:
+            self._log.info("TABLE_EOF REDELIVERED (recovering state): key=%s", key)
+        else:
+            self._log.debug("TABLE_EOF received: key=%s", key)
+        
+        # Store the channel and delivery_tag for later acking (append to list)
+        with self._eof_ack_lock:
+            if channel is not None and delivery_tag is not None:
+                if key not in self._unacked_eofs:
+                    self._unacked_eofs[key] = []
+                self._unacked_eofs[key].append((channel, delivery_tag))
+        
         (recvd, _eof) = self._pending_eof.get(key, (0, eof))
         self._pending_eof[key] = (recvd + 1, eof)
+        try:
+            self._persist_pending_eof()
+        except Exception as e:
+            self._log.error("Failed to persist pending EOF: %s", e)
+            return (True, False)  # Still delay ACK but log error
         self._maybe_flush_pending_eof(key)
+        
+        # Return: should_ack=True (eventually), ack_now=False (delay until processed)
+        return (True, False)
 
     def _maybe_flush_pending_eof(self, key: tuple[TableName, str]) -> None:
         pending = self._pending_batches.get(key, 0)
@@ -246,8 +569,40 @@ class FilterRouter:
                     key,
                     e,
                 )
+        
+        # Now ACK the EOF message since we've successfully forwarded it
+        self._ack_eof(key)
+        
         self._pending_eof.pop(key, None)
         self._pending_batches.pop(key, None)
+        # Clean up all deduplication sets for this table and client (regardless of query_ids)
+        keys_to_remove = [k for k in self._received_batches.keys() if k[0] == key[0] and k[1] == key[1]]
+        for k in keys_to_remove:
+            self._received_batches.pop(k, None)
+        # Clean up pending increments tracking
+        self._pending_increments.pop(key, None)
+        
+        # Clean up persisted state for this key
+        try:
+            self._persist_pending_batches()
+            self._persist_pending_eof()
+            self._persist_received_batches()
+            self._persist_pending_increments()
+        except Exception as e:
+            self._log.warning("Failed to clean up persisted state after EOF: %s", e)
+    
+    def _ack_eof(self, key: tuple[TableName, str]) -> None:
+        """Acknowledge all EOF messages for this key after they have been fully processed."""
+        with self._eof_ack_lock:
+            ack_list = self._unacked_eofs.get(key, [])
+            if ack_list:
+                self._log.info("ACKing %d TABLE_EOF messages: key=%s", len(ack_list), key)
+                for channel, delivery_tag in ack_list:
+                    try:
+                        channel.basic_ack(delivery_tag=delivery_tag)
+                    except Exception as e:
+                        self._log.error("Failed to ACK EOF key=%s delivery_tag=%s: %s", key, delivery_tag, e)
+                del self._unacked_eofs[key]
 
 
 class ExchangeBusProducer:
@@ -259,6 +614,7 @@ class ExchangeBusProducer:
         exchange_fmt: str = "ex.{table}",
         rk_fmt: str = "agg.{table}.{pid:02d}",
         *,
+        router_id: int = 0,
         max_retries: int = 5,
         base_backoff_ms: int = 100,
         backoff_multiplier: float = 2.0,
@@ -271,6 +627,7 @@ class ExchangeBusProducer:
         self._pub_cache: dict[tuple[TableName, str], MessageMiddlewareExchange] = {}
         self._pub_locks: dict[tuple[TableName, str], threading.Lock] = {}
         self._in_mw = in_mw
+        self._router_id = router_id
 
         self._max_retries = int(max_retries)
         self._base_backoff_ms = int(base_backoff_ms)
@@ -390,6 +747,7 @@ class ExchangeBusProducer:
             self._filters_pub.send(raw)
         except Exception as e:
             self._log.error("filters_pool send failed: %s", e)
+            raise
 
     def send_to_aggregator_partition(self, partition_id: int, batch: DataBatch) -> None:
         table = batch.payload.name
@@ -426,12 +784,14 @@ class ExchangeBusProducer:
         self, key: tuple[TableName, str], partition_id: int
     ) -> None:
         try:
-            eof = EOFMessage(table=key[0], client_id=key[1])
+            # Add trace: "filter_router_id:aggregator_id"
+            trace = f"{self._router_id}:{partition_id}"
+            eof = EOFMessage(table=key[0], client_id=key[1], trace=trace)
             env = Envelope(type=MessageType.EOF_MESSAGE, eof=eof)
             payload = env.SerializeToString()
             k = self._key_for(key[0], int(partition_id))
             self._log.info(
-                "publish TABLE_EOF → aggregator key=%s part=%d", key, int(partition_id)
+                "publish TABLE_EOF → aggregator key=%s part=%d trace=%s", key, int(partition_id), trace
             )
             self._send_with_retry(k, payload)
         except Exception as e:
@@ -453,6 +813,8 @@ class RouterServer:
         table_cfg: TableConfig,
         stop_event: threading.Event,
         orch_workers: int,
+        persistence_dir: str = "/tmp/filter_router_state",
+        router_id: int = 0,
     ):
         self._producer = producer
         self._mw_in = router_in
@@ -461,6 +823,8 @@ class RouterServer:
             policy=policy,
             table_cfg=table_cfg,
             orch_workers=orch_workers,
+            persistence_dir=persistence_dir,
+            router_id=router_id,
         )
         self._log = logging.getLogger("filter-router-server")
         self._stop_event = stop_event
@@ -468,21 +832,21 @@ class RouterServer:
     def run(self) -> None:
         self._log.debug("RouterServer starting consume")
 
-        def _cb(body: bytes):
+        def _cb(body: bytes, channel=None, delivery_tag=None, redelivered=False):
             if self._stop_event.is_set():
                 self._log.warning("Shutdown in progress, skipping incoming message.")
-                return
+                return True  # Auto-ack to avoid redelivery during shutdown
             try:
                 if len(body) < 1:
                     self._log.error("Received empty message")
-                    return
+                    return True  # Ack empty messages
                 msg = Envelope()
                 msg.ParseFromString(body)
-                self._router.process_message(msg)
+                should_ack, ack_now = self._router.process_message(msg, channel, delivery_tag, redelivered)
+                return ack_now  # Return whether to ack immediately
             except Exception as e:
                 self._log.exception("Error in router callback: %s", e)
-            except Exception as e:
-                self._log.exception("Error in router callback: %s", e)
+                return False  # NACK to trigger redelivery on transient errors
 
         try:
             self._mw_in.start_consuming(_cb)
