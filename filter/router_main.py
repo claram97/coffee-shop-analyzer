@@ -72,7 +72,6 @@ def main():
     args = ap.parse_args()
 
     fr_index = int(os.environ["FILTER_ROUTER_INDEX"])
-    election_port = int(os.environ.get("ELECTION_PORT", 9200 + fr_index))
 
     logging.basicConfig(
         level=getattr(logging, args.log_level.upper(), logging.INFO),
@@ -110,6 +109,7 @@ def main():
     follower_down_timeout = float(os.getenv("FOLLOWER_DOWN_TIMEOUT_SECONDS", "10.0"))
     follower_restart_cooldown = float(os.getenv("FOLLOWER_RESTART_COOLDOWN_SECONDS", "30.0"))
     follower_recovery_grace = float(os.getenv("FOLLOWER_RECOVERY_GRACE_SECONDS", "6.0"))
+    follower_max_restart_attempts = int(os.getenv("FOLLOWER_MAX_RESTART_ATTEMPTS", "3"))
 
     election_coordinator = None
     heartbeat_client = None
@@ -130,10 +130,12 @@ def main():
             follower_recovery.set_leader_state(am_i_leader)
     try:
         total_filter_routers = cfg.routers.filter
+        router_port_base = cfg.election_ports.filter_routers
+        election_port = int(os.environ.get("ELECTION_PORT", router_port_base + fr_index))
         
         # Build list of all filter router nodes in the cluster
         all_nodes = [
-            (i, f"filter-router-{i}", 9200 + i)
+            (i, f"filter-router-{i}", router_port_base + i)
             for i in range(total_filter_routers)
         ]
         
@@ -170,6 +172,7 @@ def main():
             down_timeout=follower_down_timeout,
             restart_cooldown=follower_restart_cooldown,
             startup_grace=follower_recovery_grace,
+            max_restart_attempts=follower_max_restart_attempts,
         )
 
         election_coordinator.start()
@@ -183,6 +186,10 @@ def main():
         election_coordinator = None
         heartbeat_client = None
         follower_recovery = None
+
+    if not (election_coordinator and heartbeat_client and follower_recovery):
+        log.critical("Leader election components failed to start, aborting.")
+        sys.exit(1)
     
     server = build_filter_router_from_config(cfg, stop_event)
     try:

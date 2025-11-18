@@ -20,6 +20,7 @@ class FollowerRecoveryManager:
         down_timeout: float = 15.0,
         restart_cooldown: float = 30.0,
         startup_grace: float = 10.0,
+        max_restart_attempts: int = 3,
     ):
         self.coordinator = coordinator
         self.my_id = my_id
@@ -28,10 +29,12 @@ class FollowerRecoveryManager:
         self.down_timeout = max(1.0, down_timeout)
         self.restart_cooldown = max(1.0, restart_cooldown)
         self.startup_grace = max(0.0, startup_grace)
+        self.max_restart_attempts = max(1, max_restart_attempts)
 
         self._stop_event = threading.Event()
         self._thread: Optional[threading.Thread] = None
         self._last_restart: Dict[int, float] = {}
+        self._restart_attempts: Dict[int, int] = {}
         self._leader_active = False
         self._leader_since = 0.0
         self._state_lock = threading.Lock()
@@ -57,6 +60,7 @@ class FollowerRecoveryManager:
             self._leader_since = time.monotonic() if is_leader else 0.0
             if not is_leader:
                 self._last_restart.clear()
+                self._restart_attempts.clear()
 
     def _run(self):
         while not self._stop_event.is_set():
@@ -96,9 +100,18 @@ class FollowerRecoveryManager:
                 continue
 
             self._last_restart[node_id] = now_monotonic
+            self._restart_attempts[node_id] = self._restart_attempts.get(node_id, 0) + 1
             self._restart_container(container_name, node_id, stale_for)
 
     def _can_restart(self, node_id: int, now_monotonic: float) -> bool:
+        attempts = self._restart_attempts.get(node_id, 0)
+        if attempts >= self.max_restart_attempts:
+            logger.warning(
+                "Restart limit reached for follower %s (attempts=%s)",
+                node_id,
+                attempts,
+            )
+            return False
         last_restart = self._last_restart.get(node_id)
         if last_restart is None:
             return True

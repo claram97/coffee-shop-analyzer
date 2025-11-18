@@ -1,6 +1,7 @@
 import logging
 import os
 import signal
+import sys
 import threading
 from configparser import ConfigParser
 
@@ -74,14 +75,14 @@ def main():
         f"aggregator_id: {aggregator_id}"
     )
 
-    election_port = int(os.getenv("ELECTION_PORT", 9300 + aggregator_id))
-
     # Get total aggregators from config
     cfg_path = resolve_config_path()
     from app_config.config_loader import Config
 
     cfg = Config(cfg_path)
     total_aggregators = cfg.workers.aggregators
+    agg_port_base = cfg.election_ports.aggregators
+    election_port = int(os.getenv("ELECTION_PORT", agg_port_base + aggregator_id))
 
     stop_event = threading.Event()
 
@@ -101,6 +102,7 @@ def main():
     follower_down_timeout = float(os.getenv("FOLLOWER_DOWN_TIMEOUT_SECONDS", "10.0"))
     follower_restart_cooldown = float(os.getenv("FOLLOWER_RESTART_COOLDOWN_SECONDS", "30.0"))
     follower_recovery_grace = float(os.getenv("FOLLOWER_RECOVERY_GRACE_SECONDS", "6.0"))
+    follower_max_restart_attempts = int(os.getenv("FOLLOWER_MAX_RESTART_ATTEMPTS", "3"))
 
     election_coordinator = None
     heartbeat_client = None
@@ -122,7 +124,7 @@ def main():
 
     try:
         # Build list of all aggregator nodes in the cluster
-        all_nodes = [(i, f"aggregator-{i}", 9300 + i) for i in range(total_aggregators)]
+        all_nodes = [(i, f"aggregator-{i}", agg_port_base + i) for i in range(total_aggregators)]
 
         logging.debug(
             f"Initializing election coordinator for aggregator-{aggregator_id} on port {election_port}"
@@ -159,6 +161,7 @@ def main():
             down_timeout=follower_down_timeout,
             restart_cooldown=follower_restart_cooldown,
             startup_grace=follower_recovery_grace,
+            max_restart_attempts=follower_max_restart_attempts,
         )
 
         election_coordinator.start()
@@ -172,6 +175,10 @@ def main():
         election_coordinator = None
         heartbeat_client = None
         follower_recovery = None
+
+    if not (election_coordinator and heartbeat_client and follower_recovery):
+        logging.critical("Leader election components failed to start, aborting.")
+        sys.exit(1)
 
     server = Aggregator(aggregator_id)
     server.run()

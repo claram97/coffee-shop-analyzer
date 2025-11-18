@@ -5,6 +5,7 @@ Entry point for the Filter Worker service.
 import logging
 import os
 import signal
+import sys
 import threading
 
 from worker import FilterWorker
@@ -27,7 +28,6 @@ def main():
     else:
         # Fallback to a deterministic value based on hostname for ad-hoc runs
         worker_id = hash(os.getenv("HOSTNAME", "filter-worker")) % 100
-    election_port = int(os.getenv("ELECTION_PORT", 9100 + worker_id))
 
     stop_event = threading.Event()
 
@@ -61,6 +61,7 @@ def main():
     follower_down_timeout = float(os.getenv("FOLLOWER_DOWN_TIMEOUT_SECONDS", "10.0"))
     follower_restart_cooldown = float(os.getenv("FOLLOWER_RESTART_COOLDOWN_SECONDS", "30.0"))
     follower_recovery_grace = float(os.getenv("FOLLOWER_RECOVERY_GRACE_SECONDS", "6.0"))
+    follower_max_restart_attempts = int(os.getenv("FOLLOWER_MAX_RESTART_ATTEMPTS", "3"))
 
     election_coordinator = None
     heartbeat_client = None
@@ -82,10 +83,12 @@ def main():
 
     try:
         total_filter_workers = cfg.workers.filters
+        worker_port_base = cfg.election_ports.filter_workers
+        election_port = int(os.getenv("ELECTION_PORT", worker_port_base + worker_id))
         
         # Build list of all filter worker nodes in the cluster
         all_nodes = [
-            (i, f"filter-worker-{i}", 9100 + i)
+            (i, f"filter-worker-{i}", worker_port_base + i)
             for i in range(total_filter_workers)
         ]
         
@@ -122,6 +125,7 @@ def main():
             down_timeout=follower_down_timeout,
             restart_cooldown=follower_restart_cooldown,
             startup_grace=follower_recovery_grace,
+            max_restart_attempts=follower_max_restart_attempts,
         )
         
         election_coordinator.start()
@@ -135,6 +139,10 @@ def main():
         election_coordinator = None
         heartbeat_client = None
         follower_recovery = None
+
+        if not (election_coordinator and heartbeat_client and follower_recovery):
+            logger.critical("Leader election components failed to start, aborting.")
+            sys.exit(1)
 
     worker = None
     try:

@@ -1,6 +1,7 @@
 import logging
 import os
 import signal
+import sys
 import threading
 from typing import Dict
 
@@ -173,6 +174,7 @@ def main():
         follower_down_timeout = float(os.getenv("FOLLOWER_DOWN_TIMEOUT_SECONDS", "10.0"))
         follower_restart_cooldown = float(os.getenv("FOLLOWER_RESTART_COOLDOWN_SECONDS", "30.0"))
         follower_recovery_grace = float(os.getenv("FOLLOWER_RECOVERY_GRACE_SECONDS", "6.0"))
+        follower_max_restart_attempts = int(os.getenv("FOLLOWER_MAX_RESTART_ATTEMPTS", "3"))
 
         election_coordinator = None
         heartbeat_client = None
@@ -196,10 +198,12 @@ def main():
             cfg_path = os.getenv("CONFIG_PATH", "/config/config.ini")
             cfg = Config(cfg_path)
             total_results_routers = cfg.routers.results
+            router_port_base = cfg.election_ports.results_routers
+            election_port = int(os.getenv("ELECTION_PORT", router_port_base + router_index))
             
             # Build list of all results router nodes in the cluster
             all_nodes = [
-                (i, f"results-router-{i}", 9700 + i)
+                (i, f"results-router-{i}", router_port_base + i)
                 for i in range(total_results_routers)
             ]
             
@@ -236,6 +240,7 @@ def main():
                 down_timeout=follower_down_timeout,
                 restart_cooldown=follower_restart_cooldown,
                 startup_grace=follower_recovery_grace,
+                max_restart_attempts=follower_max_restart_attempts,
             )
             
             election_coordinator.start()
@@ -250,6 +255,10 @@ def main():
             election_coordinator = None
             heartbeat_client = None
             follower_recovery = None
+
+        if not (election_coordinator and heartbeat_client and follower_recovery):
+            logger.critical("Leader election components failed to start, aborting.")
+            sys.exit(1)
 
         # Setup and run the router
         router = ResultsRouter(input_client=input_client, output_clients=output_clients)

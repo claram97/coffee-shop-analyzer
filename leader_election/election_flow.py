@@ -14,6 +14,7 @@ import logging
 import threading
 import time
 import random
+from concurrent.futures import ThreadPoolExecutor, wait
 from typing import List, Tuple, Callable, Optional, Set
 from enum import Enum
 
@@ -234,12 +235,38 @@ class ElectionCoordinator:
             except Exception as e:
                 logger.error(f"Error in leader change callback: {e}")
         
-        # Announce to all other nodes
-        for node_id, host, port in self.all_nodes:
-            if node_id != self.my_id:
-                logger.info(f"Sending COORDINATOR to node {node_id} at {host}:{port}")
-                result = send_coordinator_message(host, port, self.my_id, timeout=2.0)
-                logger.info(f"COORDINATOR send to node {node_id}: {result}")
+        followers = [
+            (node_id, host, port)
+            for node_id, host, port in self.all_nodes
+            if node_id != self.my_id
+        ]
+
+        if not followers:
+            return
+
+        def _announce(target):
+            node_id, host, port = target
+            logger.info(
+                "Sending COORDINATOR to node %s at %s:%s",
+                node_id,
+                host,
+                port,
+            )
+            result = send_coordinator_message(host, port, self.my_id, timeout=1.0)
+            if result:
+                logger.info("COORDINATOR delivered to node %s", node_id)
+            else:
+                logger.warning(
+                    "Failed to notify node %s at %s:%s",
+                    node_id,
+                    host,
+                    port,
+                )
+
+        max_workers = min(8, len(followers))
+        with ThreadPoolExecutor(max_workers=max_workers) as executor:
+            futures = [executor.submit(_announce, follower) for follower in followers]
+            wait(futures, timeout=max(self.election_timeout, 2.0))
                 
     def _wait_for_coordinator(self):
         """Wait for a COORDINATOR message after receiving ANSWER."""
