@@ -376,6 +376,7 @@ cat >> "$OUT_PATH" <<YAML
       - ./results-finisher:/app/results-finisher:ro
       - $INI_PATH:/config/config.ini:ro
       - /var/run/docker.sock:/var/run/docker.sock
+      - ./results_finisher_state/finisher-${i}:/tmp/results_finisher_state
     depends_on:
       rabbitmq:
         condition: service_healthy

@@ -1,7 +1,7 @@
 #!/bin/bash
 
-# Chaos testing script - randomly kills and restarts containers
-# Usage: ./chaos_test.sh [number_of_kills]
+# Chaos testing script - randomly stops containers and lets the leader revive them
+# Usage: ./chaos_test.sh [number_of_events]
 
 set -e
 
@@ -19,13 +19,12 @@ COMPONENTS=(
     "results-finisher-"
 )
 
-# Number of times to kill containers (default: 10)
-NUM_KILLS=${1:-10}
+# Number of times to stop containers (default: 10)
+NUM_EVENTS=${1:-10}
 
 echo "=== Chaos Testing Script ==="
-echo "Will perform $NUM_KILLS container kills"
-echo "Max wait between kills: 20 seconds"
-echo "Max wait before restart: 10 seconds"
+echo "Will perform $NUM_EVENTS container stops"
+echo "Max wait between stops: 20 seconds"
 echo ""
 
 # Function to get all running containers matching a pattern
@@ -57,45 +56,33 @@ pick_random_container() {
     echo "${all_containers[$random_index]}"
 }
 
-# Function to kill and restart a container
-chaos_kill_restart() {
+# Function to stop a container and let the leader revive it
+chaos_stop_container() {
     local container=$1
     
-    echo "[$(date +'%H:%M:%S')] Killing container: $container"
-    docker kill "$container" 2>/dev/null || true
-    
-    # Random wait before restart (0-10 seconds)
-    local restart_wait=$((RANDOM % 11))
-    echo "[$(date +'%H:%M:%S')] Will restart in $restart_wait seconds..."
-    
-    # Start restart in background
-    (
-        sleep "$restart_wait"
-        echo "[$(date +'%H:%M:%S')] Restarting container: $container"
-        docker start "$container" 2>/dev/null || true
-        echo "[$(date +'%H:%M:%S')] Container $container restarted"
-    ) &
+    echo "[$(date +'%H:%M:%S')] Stopping container: $container"
+    docker stop "$container" 2>/dev/null || true
 }
 
 # Main chaos loop
-for i in $(seq 1 "$NUM_KILLS"); do
+for i in $(seq 1 "$NUM_EVENTS"); do
     echo ""
-    echo "=== Chaos Event $i/$NUM_KILLS ==="
+    echo "=== Chaos Event $i/$NUM_EVENTS ==="
     
     # Pick a random container
     target_container=$(pick_random_container)
     
     if [[ -z "$target_container" ]]; then
-        echo "No containers found to kill. Exiting."
+        echo "No containers found to stop. Exiting."
         break
     fi
     
-    # Kill and schedule restart
-    chaos_kill_restart "$target_container"
+    # Stop container and let leader handle recovery
+    chaos_stop_container "$target_container"
     
-    # Wait random time before next kill (0-20 seconds)
-    if [[ $i -lt $NUM_KILLS ]]; then
-        wait_time=$((RANDOM % 21))
+    # Wait random time before next stop event (0-10 seconds)
+    if [[ $i -lt $NUM_EVENTS ]]; then
+        wait_time=$((RANDOM % 10))
         echo "[$(date +'%H:%M:%S')] Waiting $wait_time seconds before next chaos event..."
         sleep "$wait_time"
     fi
@@ -103,6 +90,4 @@ done
 
 echo ""
 echo "=== Chaos testing complete ==="
-echo "Waiting for all background restart tasks to complete..."
-wait
-echo "[$(date +'%H:%M:%S')] All containers have been restarted"
+echo "[$(date +'%H:%M:%S')] Containers should have been revived by their leaders"
