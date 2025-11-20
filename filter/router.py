@@ -501,10 +501,29 @@ class FilterRouter:
 
         return (True, False)
 
+    def _normalize_table_client_key(self, key: tuple) -> tuple:
+        """
+        Returns (table, client_id) regardless of the original tuple order.
+        Table names come in as ints (TableName enum) and client_ids are strings,
+        so we use that distinction to detect swapped tuples.
+        """
+        if not isinstance(key, tuple) or len(key) != 2:
+            return key
+        first, second = key
+        if isinstance(first, str) and not isinstance(second, str):
+            return (second, first)
+        return (first, second)
+
+    def _client_first_key(self, key: tuple[TableName, str]) -> tuple[str, TableName]:
+        """Returns the (client_id, table) variant for compatibility with old state."""
+        normalized = self._normalize_table_client_key(key)
+        return (normalized[1], normalized[0])
+
     def _maybe_flush_pending_eof(self, key: tuple[TableName, str]) -> None:
+        canonical_key = self._normalize_table_client_key(key)
         flush_info = None
         with self._state_lock:
-            flush_info = self._check_and_flush_eof(key)
+            flush_info = self._check_and_flush_eof(canonical_key)
 
         if flush_info:
             self._flush_eof(*flush_info)
@@ -515,46 +534,56 @@ class FilterRouter:
         to mark it as "flushing" and returns the necessary info for the caller
         to perform the I/O. This method MUST be called with _state_lock held.
         """
-        pending = self._pending_batches.get(key, 0)
-        (recvd, eof) = self._pending_eof.get(key, (0, None))
+        canonical_key = self._normalize_table_client_key(key)
+        client_first_key = self._client_first_key(canonical_key)
+
+        # pending batches were historically keyed (client, table) so check both
+        pending = self._pending_batches.get(client_first_key, self._pending_batches.get(canonical_key, 0))
+
+        eof_entry_key = canonical_key if canonical_key in self._pending_eof else client_first_key
+        (recvd, eof) = self._pending_eof.get(eof_entry_key, (0, None))
 
         if eof is None or recvd < self._orch_workers or pending > 0:
             if eof is not None:
                 self._log.info("TABLE_EOF deferred: key=%s pending=%d recvd=%d orch_workers=%d", 
-                             key, pending, recvd, self._orch_workers)
+                             canonical_key, pending, recvd, self._orch_workers)
             return None
 
-        self._log.info("TABLE_EOF ready to be flushed for key: %s", key)
+        self._log.info("TABLE_EOF ready to be flushed for key: %s", canonical_key)
         
-        self._pending_eof.pop(key, None)
+        self._pending_eof.pop(eof_entry_key, None)
         
         total_parts = max(1, int(self._cfg.aggregators))
         
-        return (key, total_parts)
+        return (canonical_key, total_parts)
 
     def _flush_eof(self, key: tuple[TableName, str], total_parts: int):
         """
         Sends EOF messages to aggregators and cleans up state.
         This method is called outside of the state lock.
         """
-        self._log.info("TABLE_EOF -> aggregators: key=%s parts=%d", key, total_parts)
+        canonical_key = self._normalize_table_client_key(key)
+        client_first_key = self._client_first_key(canonical_key)
+
+        self._log.info("TABLE_EOF -> aggregators: key=%s parts=%d", canonical_key, total_parts)
         for part in range(total_parts):
             try:
-                self._p.send_table_eof_to_aggregator_partition(key, part)
+                self._p.send_table_eof_to_aggregator_partition(canonical_key, part)
             except Exception as e:
                 self._log.error(
                     "send_table_eof_to_aggregator_partition failed part=%d key=%s: %s",
-                    part, key, e
+                    part, canonical_key, e
                 )
         
-        self._ack_eof(key)
+        self._ack_eof(canonical_key)
         
         with self._state_lock:
-            self._pending_batches.pop(key, None)
-            keys_to_remove = [k for k in self._received_batches.keys() if k[0] == key[0] and k[1] == key[1]]
+            self._pending_batches.pop(client_first_key, None)
+            self._pending_batches.pop(canonical_key, None)
+            keys_to_remove = [k for k in self._received_batches.keys() if k[0] == canonical_key[0] and k[1] == canonical_key[1]]
             for k in keys_to_remove:
                 self._received_batches.pop(k, None)
-            self._pending_increments.pop(key, None)
+            self._pending_increments.pop(canonical_key, None)
             
             try:
                 self._persist_pending_batches()
