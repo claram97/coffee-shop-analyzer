@@ -13,7 +13,7 @@ COMPONENTS=(
     "filter-router-"
     "filter-worker-"
     "joiner-router-"
-    "joiner-worker-"
+    "joiner-worker-"    
     "aggregator-"
     "results-router-"
     "results-finisher-"
