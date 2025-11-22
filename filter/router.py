@@ -112,6 +112,9 @@ class FilterRouter:
         self._log = logging.getLogger("filter-router")
         self._pending_batches: Dict[tuple[TableName, str], int] = defaultdict(int)
         self._pending_eof: Dict[tuple[str, str], tuple[int, EOFMessage]] = {}
+        self._processed_eof_traces: set[tuple[int, str, str]] = set()
+        # Track received (but not yet flushed) EOF trace IDs to prevent double-counting on restart
+        self._received_eof_traces: set[tuple[int, str, str]] = set()
         self._orch_workers = orch_workers
         # Store unacked EOF messages: key=(table, client_id) -> list of (channel, delivery_tag)
         self._unacked_eofs: Dict[tuple[TableName, str], list] = {}
@@ -150,6 +153,14 @@ class FilterRouter:
     def _get_pending_increments_path(self) -> str:
         """Get file path for pending increments tracking."""
         return os.path.join(self._persistence_dir, f"router_{self._router_id}_pending_increments.json")
+    
+    def _get_processed_eof_traces_path(self) -> str:
+        """Get file path for processed EOF traces."""
+        return os.path.join(self._persistence_dir, f"router_{self._router_id}_processed_eof_traces.json")
+    
+    def _get_received_eof_traces_path(self) -> str:
+        """Get file path for received EOF traces."""
+        return os.path.join(self._persistence_dir, f"router_{self._router_id}_received_eof_traces.json")
     
     def _persist_pending_batches(self) -> None:
         """Persist pending batches counter to disk."""
@@ -234,6 +245,40 @@ class FilterRouter:
                     os.remove(temp_path)
                 raise
     
+    def _persist_processed_eof_traces(self) -> None:
+        """Persist processed EOF traces to disk."""
+        with self._persistence_lock:
+            path = self._get_processed_eof_traces_path()
+            temp_path = path + ".tmp"
+            try:
+                data = [list(trace) for trace in self._processed_eof_traces]
+                with open(temp_path, "w") as f:
+                    json.dump(data, f)
+                os.rename(temp_path, path)
+                self._log.debug("Persisted processed EOF traces: %d entries", len(data))
+            except Exception as e:
+                self._log.error("Failed to persist processed EOF traces: %s", e)
+                if os.path.exists(temp_path):
+                    os.remove(temp_path)
+                raise
+    
+    def _persist_received_eof_traces(self) -> None:
+        """Persist received EOF traces to disk."""
+        with self._persistence_lock:
+            path = self._get_received_eof_traces_path()
+            temp_path = path + ".tmp"
+            try:
+                data = [list(trace) for trace in self._received_eof_traces]
+                with open(temp_path, "w") as f:
+                    json.dump(data, f)
+                os.rename(temp_path, path)
+                self._log.debug("Persisted received EOF traces: %d entries", len(data))
+            except Exception as e:
+                self._log.error("Failed to persist received EOF traces: %s", e)
+                if os.path.exists(temp_path):
+                    os.remove(temp_path)
+                raise
+    
     def _restore_state(self) -> None:
         """Restore state from disk on startup."""
         if not os.path.exists(self._persistence_dir):
@@ -300,6 +345,28 @@ class FilterRouter:
                 self._log.info("Restored %d pending increment sets", len(self._pending_increments))
             except Exception as e:
                 self._log.warning("Failed to restore pending increments: %s", e)
+        
+        # Restore processed EOF traces
+        traces_path = self._get_processed_eof_traces_path()
+        if os.path.exists(traces_path):
+            try:
+                with open(traces_path, "r") as f:
+                    data = json.load(f)
+                self._processed_eof_traces = {tuple(trace) for trace in data}
+                self._log.info("Restored %d processed EOF traces", len(self._processed_eof_traces))
+            except Exception as e:
+                self._log.warning("Failed to restore processed EOF traces: %s", e)
+        
+        # Restore received EOF traces (to prevent double-counting on restart)
+        received_traces_path = self._get_received_eof_traces_path()
+        if os.path.exists(received_traces_path):
+            try:
+                with open(received_traces_path, "r") as f:
+                    data = json.load(f)
+                self._received_eof_traces = {tuple(trace) for trace in data}
+                self._log.info("Restored %d received EOF traces", len(self._received_eof_traces))
+            except Exception as e:
+                self._log.warning("Failed to restore received EOF traces: %s", e)
         
         self._log.info("Filter router state restoration complete")
 
@@ -472,11 +539,23 @@ class FilterRouter:
 
     def _handle_table_eof(self, eof: EOFMessage, channel=None, delivery_tag=None, redelivered=False) -> tuple[bool, bool]:
         key = (eof.table, eof.client_id)
+        trace_key = (eof.table, eof.client_id, eof.trace)
+
+        with self._state_lock:
+            # Check if already processed (flushed)
+            if trace_key in self._processed_eof_traces:
+                self._log.warning("TABLE_EOF duplicate (already flushed): key=%s, trace=%s. ACK.", key, eof.trace)
+                return (True, True)
+            
+            # Check if already received (but not yet flushed) - prevent double-counting on restart
+            if trace_key in self._received_eof_traces:
+                self._log.info("TABLE_EOF already received (not yet flushed): key=%s, trace=%s. ACK.", key, eof.trace)
+                return (True, True)
         
         if redelivered:
-            self._log.info("TABLE_EOF REDELIVERED (recovering state): key=%s", key)
+            self._log.info("TABLE_EOF REDELIVERED (recovering state): key=%s trace=%s", key, eof.trace)
         else:
-            self._log.debug("TABLE_EOF received: key=%s", key)
+            self._log.info("TABLE_EOF received: key=%s trace=%s", key, eof.trace)
 
         with self._eof_ack_lock:
             if channel is not None and delivery_tag is not None:
@@ -485,19 +564,56 @@ class FilterRouter:
                 self._unacked_eofs[key].append((channel, delivery_tag))
 
         flush_info = None
-        with self._state_lock:
-            (recvd, _eof) = self._pending_eof.get(key, (0, eof))
-            self._pending_eof[key] = (recvd + 1, eof)
-            try:
-                self._persist_pending_eof()
-            except Exception as e:
-                self._log.error("Failed to persist pending EOF: %s", e)
-                return (True, False)
-            
-            flush_info = self._check_and_flush_eof(key)
+        try:
+            with self._state_lock:
+                # Mark as received to prevent double-counting on restart
+                self._received_eof_traces.add(trace_key)
+                try:
+                    self._persist_received_eof_traces()
+                except Exception as e:
+                    self._log.error("Failed to persist received EOF traces: %s", e)
+                    # Continue anyway - state is in memory
+                
+                (recvd, _eof) = self._pending_eof.get(key, (0, eof))
+                self._pending_eof[key] = (recvd + 1, eof)
+                try:
+                    self._persist_pending_eof()
+                except Exception as e:
+                    self._log.error("Failed to persist pending EOF: %s", e)
+                    # Don't return here - we still want to try to flush if possible
+                    # The state is in memory even if persistence failed
+                
+                flush_info = self._check_and_flush_eof(key)
 
-        if flush_info:
-            self._flush_eof(*flush_info)
+            if flush_info:
+                try:
+                    self._flush_eof(*flush_info)
+                except Exception as e:
+                    self._log.error("Failed to flush EOF: %s", e, exc_info=True)
+                    # Rollback received trace on flush failure - EOF will be redelivered
+                    with self._state_lock:
+                        self._received_eof_traces.discard(trace_key)
+                    # Don't ack - let it be redelivered
+                    raise
+                with self._state_lock:
+                    # Move all received trace keys for this key to processed (not just the current one)
+                    # This ensures all EOFs that contributed to the flush are marked as processed
+                    traces_to_move = {t for t in self._received_eof_traces if t[0] == key[0] and t[1] == key[1]}
+                    for t in traces_to_move:
+                        self._received_eof_traces.discard(t)
+                        self._processed_eof_traces.add(t)
+                    try:
+                        self._persist_received_eof_traces()
+                        self._persist_processed_eof_traces()
+                    except Exception as e:
+                        self._log.error("Failed to persist EOF traces after flush: %s", e)
+        except Exception as e:
+            self._log.error("Error processing EOF: %s", e, exc_info=True)
+            # Rollback received trace on error
+            with self._state_lock:
+                self._received_eof_traces.discard(trace_key)
+            # Don't ack on error - let it be redelivered
+            raise
 
         return (True, False)
 
@@ -585,11 +701,17 @@ class FilterRouter:
                 self._received_batches.pop(k, None)
             self._pending_increments.pop(canonical_key, None)
             
+            # Clean up received EOF traces for this key (they should already be in processed_eof_traces)
+            traces_to_remove = {t for t in self._received_eof_traces if t[0] == canonical_key[0] and t[1] == canonical_key[1]}
+            for t in traces_to_remove:
+                self._received_eof_traces.discard(t)
+            
             try:
                 self._persist_pending_batches()
                 self._persist_pending_eof()
                 self._persist_received_batches()
                 self._persist_pending_increments()
+                self._persist_received_eof_traces()
             except Exception as e:
                 self._log.warning("Failed to clean up persisted state after EOF: %s", e)
     
