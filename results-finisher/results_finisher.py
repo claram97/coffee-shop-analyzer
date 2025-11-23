@@ -582,12 +582,15 @@ class ResultsFinisher:
             out[store] = rows
         return out
 
-    def _cleanup_query_state(self, client_id: str, query_id: str):
+    def _cleanup_query_state(
+        self, client_id: str, query_id: str, *, remove_persisted: bool = True
+    ):
         with self.global_lock:
             key = (client_id, query_id)
             if key in self.active_queries:
                 del self.active_queries[key]
-        self._remove_persisted_query_files(client_id, query_id)
+        if remove_persisted:
+            self._remove_persisted_query_files(client_id, query_id)
         logger.info(
             "In-memory cleanup complete for query '%s' (client %s).",
             query_id,
@@ -786,15 +789,20 @@ class ResultsFinisher:
         self.input_client.stop_consuming()
         self.input_client.close()
         self.output_client.close()
-        self._cleanup_active_queries()
+        # Preserve persisted batches on shutdown so queries can be replayed
+        # when the container restarts. Only remove disk state when a query
+        # finishes successfully (see _cleanup_query_state defaults).
+        self._cleanup_active_queries(remove_persisted=False)
         logger.info("ResultsFinisher has stopped.")
 
-    def _cleanup_active_queries(self):
+    def _cleanup_active_queries(self, *, remove_persisted: bool = True):
         with self.global_lock:
             active = list(self.active_queries.keys())
         for client_id, query_id in active:
             try:
-                self._cleanup_query_state(client_id, query_id)
+                self._cleanup_query_state(
+                    client_id, query_id, remove_persisted=remove_persisted
+                )
             except Exception as exc:
                 logger.warning(
                     "Failed to cleanup query '%s' (client %s) during shutdown: %s",
