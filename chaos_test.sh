@@ -61,7 +61,7 @@ chaos_stop_container() {
     local container=$1
     
     echo "[$(date +'%H:%M:%S')] Stopping container: $container"
-    docker stop "$container" 2>/dev/null || true
+    docker kill "$container" 2>/dev/null || true
 }
 
 # Main chaos loop
