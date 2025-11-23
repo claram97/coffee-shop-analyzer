@@ -836,8 +836,13 @@ class RouterServer:
 
         def _cb(body: bytes, channel=None, delivery_tag=None, redelivered=False):
             if self._stop_event.is_set():
-                self._log.warning("Shutdown in progress, skipping incoming message.")
-                return True  # Auto-ack to avoid redelivery during shutdown
+                self._log.warning("Shutdown in progress, nacking incoming message.")
+                if channel is not None and delivery_tag is not None:
+                    try:
+                        channel.basic_nack(delivery_tag=delivery_tag, requeue=True)
+                    except Exception as e:
+                        self._log.warning("NACK failed during shutdown, message may redeliver later: %s", e)
+                return False
             try:
                 if len(body) < 1:
                     self._log.error("Received empty message")

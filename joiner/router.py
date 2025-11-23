@@ -214,8 +214,13 @@ class JoinerRouter:
         - Returns False: Delay ACK (will be done manually later)
         """
         if self._is_shutting_down or self._stop_event.is_set():
-            log.warning("Router is shutting down, skipping new message.")
-            return True  # Auto-ack to avoid redelivery during shutdown
+            log.warning("Router is shutting down, nacking new message.")
+            if channel is not None and delivery_tag is not None:
+                try:
+                    channel.basic_nack(delivery_tag=delivery_tag, requeue=True)
+                except Exception as e:
+                    log.warning("NACK failed during shutdown: %s", e)
+            return False
 
         envelope = Envelope()
         envelope.ParseFromString(raw)

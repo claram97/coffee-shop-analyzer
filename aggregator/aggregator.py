@@ -262,6 +262,8 @@ class Aggregator:
         logging.debug("Handling menu item message")
         try:
             if not message:
+                if channel and delivery_tag is not None:
+                    channel.basic_nack(delivery_tag=delivery_tag, requeue=True)
                 return False
             envelope = Envelope()
             envelope.ParseFromString(message)
@@ -286,12 +288,19 @@ class Aggregator:
             return False
         except Exception:
             logging.exception("Failed to handle menu item")
+            if channel and delivery_tag is not None:
+                try:
+                    channel.basic_nack(delivery_tag=delivery_tag, requeue=True)
+                except Exception:
+                    logging.exception("Failed to NACK menu item message")
             return False
 
     def _handle_store(self, message: bytes, channel=None, delivery_tag=None, redelivered=None) -> bool:
         logging.debug("Handling store message")
         try:
             if not message:
+                if channel and delivery_tag is not None:
+                    channel.basic_nack(delivery_tag=delivery_tag, requeue=True)
                 return False
             envelope = Envelope()
             envelope.ParseFromString(message)
@@ -316,12 +325,19 @@ class Aggregator:
             return False
         except Exception:
             logging.exception("Failed to handle store")
+            if channel and delivery_tag is not None:
+                try:
+                    channel.basic_nack(delivery_tag=delivery_tag, requeue=True)
+                except Exception:
+                    logging.exception("Failed to NACK store message")
             return False
 
     def _handle_transaction(self, message: bytes, channel=None, delivery_tag=None, redelivered=None):
         logging.debug("Handling transaction message")
         try:
             if not message:
+                if channel and delivery_tag is not None:
+                    channel.basic_nack(delivery_tag=delivery_tag, requeue=True)
                 return False
     
             envelope = Envelope()
@@ -392,6 +408,11 @@ class Aggregator:
             return False
         except Exception:
             logging.exception("Failed to handle transaction")
+            if channel and delivery_tag is not None:
+                try:
+                    channel.basic_nack(delivery_tag=delivery_tag, requeue=True)
+                except Exception:
+                    logging.exception("Failed to NACK transaction message")
             return False
 
     def _handle_transaction_item(self, message: bytes, channel=None, delivery_tag=None, redelivered=None):
@@ -457,6 +478,11 @@ class Aggregator:
             return False
         except Exception:
             logging.exception("Failed to handle transaction item")
+            if channel and delivery_tag is not None:
+                try:
+                    channel.basic_nack(delivery_tag=delivery_tag, requeue=True)
+                except Exception:
+                    logging.exception("Failed to NACK transaction item message")
             return False
 
     def _handle_user(self, message: bytes, channel=None, delivery_tag=None, redelivered=None) -> bool:
@@ -464,6 +490,8 @@ class Aggregator:
         try:
             if not message:
                 logging.error("Empty message received in user handler")
+                if channel and delivery_tag is not None:
+                    channel.basic_nack(delivery_tag=delivery_tag, requeue=True)
                 return False
             envelope = Envelope()
             envelope.ParseFromString(message)
@@ -488,4 +516,9 @@ class Aggregator:
             return False
         except Exception:
             logging.exception("Failed to handle user")
+            if channel and delivery_tag is not None:
+                try:
+                    channel.basic_nack(delivery_tag=delivery_tag, requeue=True)
+                except Exception:
+                    logging.exception("Failed to NACK user message")
             return False

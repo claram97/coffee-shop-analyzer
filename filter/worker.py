@@ -208,7 +208,7 @@ class FilterWorker:
         except Exception:
             logger.debug("raw preview unavailable")
         if self._stop_event.is_set():
-            logger.warning("Shutdown in progress, skipping message.")
+            logger.warning("Shutdown in progress, leaving message unacked for redelivery.")
             return
         t0 = time.perf_counter()
         env = Envelope()
