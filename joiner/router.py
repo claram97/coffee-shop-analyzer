@@ -1,8 +1,10 @@
 from __future__ import annotations
 
+import functools
 import hashlib
 import logging
 import threading
+import time
 from random import randint
 from typing import Any, Callable, Dict, List, Optional, Set, Tuple
 
@@ -151,6 +153,15 @@ class JoinerRouter:
         # Store unacked EOF messages: key=(table, client_id) -> list of (channel, delivery_tag)
         self._unacked_eofs: Dict[tuple[TableName, str], list] = {}
         self._eof_ack_lock = threading.Lock()
+
+        # Track unacked DATA_BATCH messages: key=delivery_tag -> (channel, client_id, batch_number, timestamp)
+        self._unacked_batches: Dict[int, tuple] = {}
+        self._batch_ack_lock = threading.Lock()
+        self._batch_ack_timeout = 30  # 30 seconds timeout
+        self._batch_ack_thread = None
+        
+        # Start background thread for timeout-based batch ACKs
+        self._start_batch_ack_thread()
         
         # In-memory batch deduplication: track received batches per (table, client_id, query_ids_tuple)
         # This mitigates duplicate batch propagation from aggregators (no persistence needed)
@@ -182,12 +193,12 @@ class JoinerRouter:
         
         dedup_key = (table, client_id, query_ids_tuple)
         
-        if batch_number in self._received_batches[dedup_key]:
-            log.warning(
-                "DUPLICATE batch detected and discarded in joiner router: table=%s bn=%s client=%s queries=%s",
-                table, batch_number, client_id, data_batch.query_ids
-            )
-            return True
+        # if batch_number in self._received_batches[dedup_key]:
+        #     log.warning(
+        #         "DUPLICATE batch detected and discarded in joiner router: table=%s bn=%s client=%s queries=%s",
+        #         table, batch_number, client_id, data_batch.query_ids
+        #     )
+        #     return True
         
         # Mark batch as received
         self._received_batches[dedup_key].add(batch_number)
@@ -200,6 +211,7 @@ class JoinerRouter:
     def shutdown(self):
         log.info("Shutting down JoinerRouter...")
         self._is_shutting_down = True
+        self.stop_batch_ack_thread()
         self._pool.shutdown()
         log.info("JoinerRouter shutdown complete.")
 
@@ -229,9 +241,34 @@ class JoinerRouter:
             # Check for duplicate batch and discard if already processed
             if self._is_duplicate_batch(db):
                 return True  # ACK duplicate batch
+            
+            # Store batch info for delayed ACK (will be acked after timeout)
+            if channel is not None and delivery_tag is not None:
+                with self._batch_ack_lock:
+                    self._unacked_batches[delivery_tag] = (
+                        channel, 
+                        db.client_id, 
+                        int(db.payload.batch_number), 
+                        time.time()
+                    )
+                log.debug("DATA_BATCH processed, delayed ACK: table=%s bn=%s client=%s tag=%s", 
+                              db.payload.name, db.payload.batch_number, db.client_id, delivery_tag)
+                
+                # Process the batch (send to workers)
+                # If this fails, exception will propagate and middleware will NACK
+                self._process_data_batch(db, raw)
+                
+                return False  # Delay ACK - will manually ack after timeout
+            else:
+                # No channel/tag (e.g. direct call), just process
+                self._process_data_batch(db, raw)
+                return True
         else:
             log.warning("Skipping message: unknown type")
             return True
+
+    def _process_data_batch(self, db: DataBatch, raw: bytes):
+        """Process a data batch: route to appropriate worker shard."""
 
         table = db.payload.name
         queries = db.query_ids
@@ -240,23 +277,23 @@ class JoinerRouter:
 
         if Query.Q1 in queries:
             self._publish(cfg, randint(0, cfg.joiner_shards - 1), raw)
-            return True
+            return
 
         if cfg is None:
             log.warning("no route cfg for table=%s", table)
-            return True
+            return
 
         log.debug("recv DataBatch table=%s queries=%s", table, queries)
 
         if is_broadcast_table(table):
             log.info("broadcast table=%s shards=%d", table, cfg.joiner_shards)
             self._broadcast(cfg, raw)
-            return True
+            return
 
         if len(db.payload.rows) == 0:
             log.debug("empty rows → shard=0 (metadata-only) table=%s", table)
             self._publish(cfg, shard=randint(0, cfg.agg_shards - 1), raw=raw)
-            return True
+            return
 
         buckets: Dict[int, List[Row]] = {}
         for shard in range(0, cfg.joiner_shards):
@@ -289,7 +326,7 @@ class JoinerRouter:
             ).SerializeToString()
             self._publish(cfg, shard, raw_sh)
         
-        return True
+            self._publish(cfg, shard, raw_sh)
 
     def _on_raw(self, raw: bytes):
         """Legacy method for backward compatibility."""
@@ -395,6 +432,97 @@ class JoinerRouter:
                     log.warning("Failed to ACK %d/%d EOF messages for key=%s - they will be redelivered", failed_count, len(ack_list), key)
                 
                 del self._unacked_eofs[key]
+
+    def _start_batch_ack_thread(self) -> None:
+        """Start background thread for timeout-based batch acknowledgment."""
+        self._batch_ack_thread = threading.Thread(
+            target=self._ack_old_batches,
+            daemon=True,
+            name="joiner-batch-ack-thread"
+        )
+        self._batch_ack_thread.start()
+        log.info("Batch ACK thread started (timeout=%ds)", self._batch_ack_timeout)
+    
+    def _ack_old_batches(self) -> None:
+        """
+        Background thread that periodically ACKs batches older than timeout.
+        """
+        check_interval = 5  # Check every 5 seconds
+        while not self._stop_event.is_set():
+            try:
+                time.sleep(check_interval)
+                now = time.time()
+                
+                with self._batch_ack_lock:
+                    # 1. Identify max_tags per channel for timed-out batches and invalid entries
+                    acks_by_channel = {} # channel -> max_tag
+                    to_remove = set()
+                    
+                    for delivery_tag, (channel, client_id, batch_number, timestamp) in self._unacked_batches.items():
+                        # Check for invalid channel first
+                        if channel is None:
+                             log.warning("Channel is None for batch client=%s bn=%s tag=%s - skipping ACK", client_id, batch_number, delivery_tag)
+                             to_remove.add(delivery_tag)
+                             continue
+                        if not hasattr(channel, 'is_open') or not channel.is_open:
+                             log.warning("Channel is closed for batch client=%s bn=%s tag=%s - message will be redelivered", client_id, batch_number, delivery_tag)
+                             to_remove.add(delivery_tag)
+                             continue
+
+                        age = now - timestamp
+                        if age > self._batch_ack_timeout:
+                            current_max = acks_by_channel.get(channel, 0)
+                            if delivery_tag > current_max:
+                                acks_by_channel[channel] = delivery_tag
+                    
+                    # 2. Schedule batched ACKs
+                    for channel, max_tag in acks_by_channel.items():
+                        try:
+                            # Use add_callback_threadsafe to ACK from background thread
+                            # multiple=True ACKs this tag and all prior unacked tags on this channel
+                            cb = functools.partial(channel.basic_ack, delivery_tag=max_tag, multiple=True)
+                            channel.connection.add_callback_threadsafe(cb)
+                            log.debug("Timeout batched ACK: max_tag=%s", max_tag)
+                        except Exception as e:
+                            log.error("Failed to schedule batched ACK max_tag=%s: %s", max_tag, e)
+                    
+                    # 3. Remove ACKed entries (<= max_tag) and invalid entries
+                    for delivery_tag, (channel, _, _, _) in self._unacked_batches.items():
+                        if channel in acks_by_channel:
+                            if delivery_tag <= acks_by_channel[channel]:
+                                to_remove.add(delivery_tag)
+                    
+                    for tag in to_remove:
+                        self._unacked_batches.pop(tag, None)
+                        
+            except Exception as e:
+                if not self._stop_event.is_set():
+                    log.error("Error in batch ACK thread: %s", e, exc_info=True)
+        
+        log.info("Batch ACK thread stopped")
+    
+    def stop_batch_ack_thread(self) -> None:
+        """Stop the batch ACK thread and ACK all pending batches."""
+        log.info("Stopping batch ACK thread...")
+        
+        if self._batch_ack_thread and self._batch_ack_thread.is_alive():
+            self._batch_ack_thread.join(timeout=10)
+        
+        # ACK all remaining batches on shutdown
+        with self._batch_ack_lock:
+            if self._unacked_batches:
+                log.info("ACKing %d remaining batches on shutdown", len(self._unacked_batches))
+                for delivery_tag, (channel, client_id, batch_number, _) in list(self._unacked_batches.items()):
+                    try:
+                        if channel and hasattr(channel, 'is_open') and channel.is_open:
+                            cb = functools.partial(channel.basic_ack, delivery_tag=delivery_tag)
+                            channel.connection.add_callback_threadsafe(cb)
+                            log.debug("Shutdown ACK batch: client=%s bn=%s tag=%s", client_id, batch_number, delivery_tag)
+                    except Exception as e:
+                        log.error("Failed to schedule ACK batch on shutdown client=%s bn=%s tag=%s: %s", client_id, batch_number, delivery_tag, e)
+                self._unacked_batches.clear()
+        
+        log.info("Batch ACK thread stopped and all batches ACKed")
 
     def _rk(self, cfg: TableRouteCfg, shard: int) -> str:
         return cfg.key_pattern.format(shard=int(shard))
@@ -507,5 +635,7 @@ class JoinerRouterServer:
                 self._router._on_raw(body)
             except Exception as e:
                 self._log.exception("Error in joiner-router callback: %s", e)
+                # Propagate exception so middleware can NACK
+                raise
 
         self._mw_in.start_consuming(_cb)

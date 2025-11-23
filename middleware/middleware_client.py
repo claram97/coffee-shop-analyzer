@@ -65,6 +65,7 @@ class MessageMiddlewareQueue(MessageMiddleware):
                 )
             )
             self._channel = self._connection.channel()
+            self._channel.confirm_delivery()
         except (pika.exceptions.AMQPConnectionError, OSError) as e:
             raise MessageMiddlewareDisconnectedError(
                 f"Could not connect to RabbitMQ on '{self._host}'"
@@ -92,6 +93,7 @@ class MessageMiddlewareQueue(MessageMiddleware):
             callback_wrapper = self._create_callback_wrapper(on_message_callback)
 
             try:
+                self._channel.basic_qos(prefetch_count=20)
                 self._consuming_thread = threading.Thread(
                     target=self._consume_loop, args=(callback_wrapper,), daemon=True
                 )
@@ -106,7 +108,19 @@ class MessageMiddlewareQueue(MessageMiddleware):
             )
 
             if self._stop_event.is_set():
-                logging.warning("DEBUG: Stop event is set, skipping message processing")
+                logging.warning("DEBUG: Stop event is set, NACKing message to requeue")
+                try:
+                    if ch and ch.is_open:
+                        ch.basic_nack(delivery_tag=method.delivery_tag, requeue=True)
+                    else:
+                        logging.error(
+                            f"DEBUG: Channel is closed, cannot NACK. Message will be redelivered when connection is restored."
+                        )
+                except Exception as nack_err:
+                    logging.error(
+                        f"DEBUG: Failed to NACK message (delivery_tag={method.delivery_tag}): {nack_err}. "
+                        f"Message will be redelivered when connection is restored."
+                    )
                 return
             try:
                 logging.debug(f"DEBUG: About to call on_message_callback")
@@ -124,13 +138,32 @@ class MessageMiddlewareQueue(MessageMiddleware):
 
                 # If callback returns True or None, ack immediately
                 # If callback returns False, don't ack (manual ack required)
-                should_ack = result if result is not None else True
-
-                if should_ack:
+                # If callback returns (True, False), it means processed but delayed ack
+                should_ack = True
+                ack_now = True
+                
+                if isinstance(result, tuple):
+                    should_ack, ack_now = result
+                elif result is not None:
+                    should_ack = result
+                
+                if should_ack and ack_now:
                     logging.debug(
                         f"DEBUG: Message processed successfully, sending ACK for delivery_tag: {method.delivery_tag}"
                     )
-                    ch.basic_ack(delivery_tag=method.delivery_tag)
+                    try:
+                        if ch and ch.is_open:
+                            ch.basic_ack(delivery_tag=method.delivery_tag)
+                        else:
+                            logging.error(
+                                f"DEBUG: Channel is closed, cannot ACK delivery_tag={method.delivery_tag}. "
+                                f"Message will be redelivered when connection is restored."
+                            )
+                    except Exception as ack_err:
+                        logging.error(
+                            f"DEBUG: Failed to ACK message (delivery_tag={method.delivery_tag}): {ack_err}. "
+                            f"Message will be redelivered when connection is restored."
+                        )
                 else:
                     logging.debug(
                         f"DEBUG: Message processed, ACK delayed (manual) for delivery_tag: {method.delivery_tag}"
@@ -139,14 +172,25 @@ class MessageMiddlewareQueue(MessageMiddleware):
                 logging.error(
                     f"DEBUG: Exception in message callback: {e}, sending NACK for delivery_tag: {method.delivery_tag}"
                 )
-                ch.basic_nack(delivery_tag=method.delivery_tag, requeue=True)
+                try:
+                    if ch and ch.is_open:
+                        ch.basic_nack(delivery_tag=method.delivery_tag, requeue=True)
+                    else:
+                        logging.error(
+                            f"DEBUG: Channel is closed, cannot NACK. Message will be redelivered when connection is restored."
+                        )
+                except Exception as nack_err:
+                    logging.error(
+                        f"DEBUG: Failed to NACK message (delivery_tag={method.delivery_tag}): {nack_err}. "
+                        f"Message will be redelivered when connection is restored."
+                    )
 
         return callback_wrapper
 
     def _consume_loop(self, callback_wrapper):
         try:
             self._consumer_tag = self._channel.basic_consume(
-                queue=self.queue_name, on_message_callback=callback_wrapper
+                queue=self.queue_name, on_message_callback=callback_wrapper, auto_ack=False
             )
 
             self._process_events_until_stopped()
@@ -213,12 +257,26 @@ class MessageMiddlewareQueue(MessageMiddleware):
             if not isinstance(message, bytes):
                 raise ValueError("Message must be bytes")
 
-            self._channel.basic_publish(
-                exchange="",
-                routing_key=self.queue_name,
-                body=message,
-                properties=pika.BasicProperties(delivery_mode=2),
-            )
+            # Retry logic for publisher confirms
+            retries = 60
+            backoff = 0.1
+            for attempt in range(retries):
+                try:
+                    self._channel.basic_publish(
+                        exchange="",
+                        routing_key=self.queue_name,
+                        body=message,
+                        properties=pika.BasicProperties(delivery_mode=2),
+                    )
+                    return  # Success
+                except pika.exceptions.NackError:
+                    logging.warning(f"Message NACKed by broker (attempt {attempt+1}/{retries})")
+                except pika.exceptions.UnroutableError:
+                    logging.warning(f"Message Unroutable (attempt {attempt+1}/{retries})")
+
+                time.sleep(backoff)
+                backoff = min(backoff * 2, 1.0)  # Cap backoff at 1 second
+            raise MessageMiddlewareMessageError("Message was not confirmed by broker after retries")
         except pika.exceptions.AMQPError as e:
             raise MessageMiddlewareMessageError("Error sending message") from e
 
@@ -276,7 +334,7 @@ class MessageMiddlewareExchange(MessageMiddleware):
                         routing_key=key,
                     )
                 if consumer:
-                    self._channel.basic_qos(prefetch_count=100)
+                    self._channel.basic_qos(prefetch_count=20)
                 logging.debug(
                     f"[MMX] ensured binding ex={self.exchange_name} q={self.queue_name} rk={self.route_keys}"
                 )
@@ -292,6 +350,7 @@ class MessageMiddlewareExchange(MessageMiddleware):
                 )
             )
             self._channel = self._connection.channel()
+            self._channel.confirm_delivery()
         except (pika.exceptions.AMQPConnectionError, OSError, Exception) as e:
             raise MessageMiddlewareDisconnectedError(
                 f"Could not connect to RabbitMQ on '{self._host}'"
@@ -333,7 +392,7 @@ class MessageMiddlewareExchange(MessageMiddleware):
                     )
                     raise
 
-            self._channel.basic_qos(prefetch_count=100)
+            self._channel.basic_qos(prefetch_count=20)
 
             self._stop_event.clear()
             callback_wrapper = self._create_callback_wrapper(on_message_callback)
@@ -350,8 +409,20 @@ class MessageMiddlewareExchange(MessageMiddleware):
 
             if self._stop_event.is_set():
                 logging.warning(
-                    "Exchange stop event is set, skipping message processing"
+                    "Exchange stop event is set, NACKing message to requeue"
                 )
+                try:
+                    if ch and ch.is_open:
+                        ch.basic_nack(delivery_tag=method.delivery_tag, requeue=True)
+                    else:
+                        logging.error(
+                            f"Channel is closed, cannot NACK. Message will be redelivered when connection is restored."
+                        )
+                except Exception as nack_err:
+                    logging.error(
+                        f"Failed to NACK message (delivery_tag={method.delivery_tag}): {nack_err}. "
+                        f"Message will be redelivered when connection is restored."
+                    )
                 return
 
             try:
@@ -370,13 +441,32 @@ class MessageMiddlewareExchange(MessageMiddleware):
 
                 # If callback returns True or None, ack immediately
                 # If callback returns False, don't ack (manual ack required)
-                should_ack = result if result is not None else True
+                # If callback returns (True, False), it means processed but delayed ack
+                should_ack = True
+                ack_now = True
+                
+                if isinstance(result, tuple):
+                    should_ack, ack_now = result
+                elif result is not None:
+                    should_ack = result
 
-                if should_ack:
+                if should_ack and ack_now:
                     logging.debug(
                         f"Exchange message processed, sending ACK for delivery_tag: {method.delivery_tag}"
                     )
-                    ch.basic_ack(delivery_tag=method.delivery_tag)
+                    try:
+                        if ch and ch.is_open:
+                            ch.basic_ack(delivery_tag=method.delivery_tag)
+                        else:
+                            logging.error(
+                                f"Channel is closed, cannot ACK delivery_tag={method.delivery_tag}. "
+                                f"Message will be redelivered when connection is restored."
+                            )
+                    except Exception as ack_err:
+                        logging.error(
+                            f"Failed to ACK message (delivery_tag={method.delivery_tag}): {ack_err}. "
+                            f"Message will be redelivered when connection is restored."
+                        )
                 else:
                     logging.debug(
                         f"Exchange message processed, ACK delayed (manual) for delivery_tag: {method.delivery_tag}"
@@ -386,7 +476,18 @@ class MessageMiddlewareExchange(MessageMiddleware):
                     f"Exception in exchange message callback: {e}, sending NACK",
                     exc_info=True,
                 )
-                ch.basic_nack(delivery_tag=method.delivery_tag, requeue=True)
+                try:
+                    if ch and ch.is_open:
+                        ch.basic_nack(delivery_tag=method.delivery_tag, requeue=True)
+                    else:
+                        logging.error(
+                            f"Channel is closed, cannot NACK. Message will be redelivered when connection is restored."
+                        )
+                except Exception as nack_err:
+                    logging.error(
+                        f"Failed to NACK message (delivery_tag={method.delivery_tag}): {nack_err}. "
+                        f"Message will be redelivered when connection is restored."
+                    )
 
         return callback_wrapper
 
@@ -394,7 +495,8 @@ class MessageMiddlewareExchange(MessageMiddleware):
         try:
             logging.debug(f"Starting consume loop on queue: {self.queue_name}")
             self._consumer_tag = self._channel.basic_consume(
-                queue=self.queue_name, on_message_callback=callback_wrapper
+                queue=self.queue_name, on_message_callback=callback_wrapper, auto_ack=False
+
             )
             logging.debug("Entering event processing loop")
             while not self._stop_event.is_set():
@@ -472,12 +574,27 @@ class MessageMiddlewareExchange(MessageMiddleware):
                 f"Publishing message to exchange {self.exchange_name} with routing key {self.default_routing_key}"
             )
             with self._send_lock:
-                self._channel.basic_publish(
-                    exchange=self.exchange_name,
-                    routing_key=self.default_routing_key,
-                    body=message,
-                    properties=pika.BasicProperties(delivery_mode=2),
-                )
+                # Retry logic for publisher confirms
+                retries = 60
+                backoff = 0.1
+                for attempt in range(retries):
+                    try:
+                        self._channel.basic_publish(
+                            exchange=self.exchange_name,
+                            routing_key=self.default_routing_key,
+                            body=message,
+                            properties=pika.BasicProperties(delivery_mode=2),
+                        )
+                        return  # Success (confirmed)
+                    except pika.exceptions.NackError:
+                        logging.warning(f"Message NACKed by broker (attempt {attempt+1}/{retries})")
+                    except pika.exceptions.UnroutableError:
+                        logging.warning(f"Message Unroutable (attempt {attempt+1}/{retries})")
+                    
+                    time.sleep(backoff)
+                    backoff = min(backoff * 2, 1.0)  # Cap backoff at 1 second
+                
+                raise MessageMiddlewareMessageError("Message was not confirmed by broker after retries")
         except pika.exceptions.AMQPError as e:
             logging.error(f"Error sending message to exchange: {e}")
             raise MessageMiddlewareMessageError("Error sending message") from e
