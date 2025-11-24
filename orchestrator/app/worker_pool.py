@@ -6,6 +6,8 @@ from common.processing import message_logger
 
 from middleware.middleware_client import MessageMiddlewareExchange
 from common.processing import create_filtered_data_batch_protocol2
+from protocol2.envelope_pb2 import Envelope, MessageType
+from protocol2.eof_message_pb2 import EOFMessage
 
 STATUS_TEXT_MAP = {0: "Continue", 1: "EOF", 2: "Cancel"}
 
@@ -55,6 +57,33 @@ def processing_worker_main(
         try:
             if isinstance(task, tuple) and len(task) == 3 and task[0] == "__eof__":
                 _, batch_bytes, client_id = task
+                # Parse the envelope, add worker ID to trace, and reserialize
+                try:
+                    env = Envelope()
+                    env.ParseFromString(batch_bytes)
+                    if env.type == MessageType.EOF_MESSAGE:
+                        # Add worker ID to trace field for deduplication
+                        # Format: "orch_worker_id"
+                        eof = env.eof
+                        if eof.trace:
+                            # Trace should be empty when worker receives it (fresh from orchestrator)
+                            # If it exists, log a warning but still set it to this worker's ID
+                            logging.warning(
+                                "action: worker_eof_trace_exists | worker: %d | existing_trace: %s",
+                                worker_idx,
+                                eof.trace,
+                            )
+                        # Set trace to this worker's ID (each worker has a unique ID)
+                        eof.trace = f"orch_{worker_idx}"
+                        batch_bytes = env.SerializeToString()
+                except Exception as e:
+                    logging.warning(
+                        "action: worker_eof_trace_update | result: fail | worker: %d | error: %s",
+                        worker_idx,
+                        e,
+                    )
+                    # Continue with original bytes if parsing fails
+                
                 # Broadcast EOF to all filter router replicas
                 for pid in range(num_routers):
                     rk = rk_fmt.format(pid=pid)
