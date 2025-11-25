@@ -21,7 +21,7 @@ ENV PYTHONPATH=${PYTHONPATH}:/protocol2
 
 # Copy requirements first for better Docker layer caching
 COPY results-finisher/requirements.txt .
-RUN pip install --no-cache-dir protobuf==6.32.1 && pip install --no-cache-dir -r requirements.txt
+RUN pip install --no-cache-dir protobuf==6.33.0 && pip install --no-cache-dir -r requirements.txt
 
 COPY protocol2 /protocol2
 

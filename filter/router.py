@@ -1,20 +1,23 @@
 from __future__ import annotations
 
 import logging
+import os
 import random
+import shutil
 import threading
 import time
 from collections import defaultdict
 from random import randint
 from typing import Dict, Optional
 
-from middleware.middleware_client import (MessageMiddlewareExchange,
-                                          MessageMiddlewareQueue)
+from middleware.middleware_client import (
+    MessageMiddlewareExchange,
+    MessageMiddlewareQueue,
+)
 from protocol2.databatch_pb2 import DataBatch, Query
 from protocol2.envelope_pb2 import Envelope, MessageType
 from protocol2.eof_message_pb2 import EOFMessage
-from protocol2.table_data_pb2 import (Row, TableData, TableName, TableSchema,
-                                      TableStatus)
+from protocol2.table_data_pb2 import Row, TableData, TableName, TableSchema, TableStatus
 from protocol2.table_data_utils import iterate_rows_as_dicts
 
 TABLE_NAME_TO_STR = {
@@ -109,36 +112,46 @@ class FilterRouter:
         self._log = logging.getLogger("filter-router")
         self._orch_workers = orch_workers
         self._router_id = router_id
-        
+
         # Store unacked EOF messages: key=(table, client_id) -> list of (channel, delivery_tag)
         self._unacked_eofs: Dict[tuple[TableName, str], list] = {}
         self._eof_ack_lock = threading.Lock()
-        
+
         # Batch deduplication: track received batch numbers per (table, client_id, query_ids_tuple)
         # In-memory only (no persistence)
         # Use regular dict instead of defaultdict to ensure each key gets its own set
         self._received_batches: Dict[tuple[int, str, tuple], set[int]] = {}
-        
+
         # Track pending EOFs for LIGHT_TABLES only: key=(table, client_id) -> (set of worker_ids, EOFMessage)
         # Only menu_items and stores tables need EOF broadcasting
         # Worker IDs are extracted from the trace field (format: "orch_worker_id")
         self._pending_eof: Dict[tuple[TableName, str], tuple[set[str], EOFMessage]] = {}
         self._state_lock = threading.Lock()
 
-
-    def process_message(self, msg: Envelope, channel=None, delivery_tag=None, redelivered=False) -> tuple[bool, bool]:
+    def process_message(
+        self, msg: Envelope, channel=None, delivery_tag=None, redelivered=False
+    ) -> tuple[bool, bool]:
         """
         Process a message and return (should_ack, ack_now).
         - should_ack: True if message should eventually be acked
         - ack_now: True if should ack immediately, False if should delay ack
         """
-        self._log.debug("Processing message: %r, message type: %r, redelivered: %r", msg, msg.type, redelivered)
+        self._log.debug(
+            "Processing message: %r, message type: %r, redelivered: %r",
+            msg,
+            msg.type,
+            redelivered,
+        )
         if msg.type == MessageType.DATA_BATCH:
             self._handle_data(msg.data_batch)
             return (True, True)  # Regular messages: ack immediately
         elif msg.type == MessageType.EOF_MESSAGE:
             # EOF messages: delay ack until fully processed
             return self._handle_table_eof(msg.eof, channel, delivery_tag, redelivered)
+        elif msg.type == MessageType.CLEAN_UP_MESSAGE:
+            # Client cleanup: clean all state for the client
+            self._handle_client_cleanup(msg.clean_up)
+            return (True, True)  # Ack immediately
         else:
             self._log.warning("Unknown message type: %r", type(msg))
             return (True, True)
@@ -153,45 +166,48 @@ class FilterRouter:
         if batch.payload is None:
             self._log.warning("Cannot check duplicate: batch has no payload")
             return False
-            
+
         # Convert protobuf enum to int for consistent hashing in tuple key
         table = int(batch.payload.name)
         # Ensure client_id is a string and not None
         client_id = str(batch.client_id) if batch.client_id else ""
         batch_number = int(batch.payload.batch_number)
-        
+
         # Convert protobuf repeated field to list of integers for proper comparison
         queries = [int(q) for q in batch.query_ids]
         query_ids_tuple = tuple(sorted(queries))
-        
+
         # Create immutable key tuple - ensure all elements are hashable
         dedup_key = (table, client_id, query_ids_tuple)
-        
+
         # Validate key is hashable
         try:
             hash(dedup_key)
         except TypeError as e:
             self._log.error("Dedup key is not hashable: %s error=%s", dedup_key, e)
             return False
-        
+
         with self._state_lock:
             # Get or create a set for this key - ensure each key gets its own independent set
             if dedup_key not in self._received_batches:
                 self._received_batches[dedup_key] = set()
             received_set = self._received_batches[dedup_key]
-            
-            if batch_number in received_set:
-                self._log.warning(
-                    "DUPLICATE batch detected and discarded: table=%s bn=%s client=%s queries=%s",
-                    table, batch_number, client_id, queries
-                )
-                return True
-            
+
+            # if batch_number in received_set:
+            #     self._log.warning(
+            #         "DUPLICATE batch detected and discarded: table=%s bn=%s client=%s queries=%s",
+            #         table, batch_number, client_id, queries
+            #     )
+            #     return True
+
             # Mark batch as received
             received_set.add(batch_number)
             self._log.debug(
                 "Batch marked as received: table=%s bn=%s client=%s queries=%s",
-                table, batch_number, client_id, queries
+                table,
+                batch_number,
+                client_id,
+                queries,
             )
             return False
 
@@ -208,31 +224,46 @@ class FilterRouter:
 
         self._log.debug(
             "recv DataBatch table=%s queries=%s mask=%s bn=%s cid=%s",
-            table, queries, bin(mask), bn, cid
+            table,
+            queries,
+            bin(mask),
+            bn,
+            cid,
         )
 
         try:
             total_steps = self._pol.total_steps(table, queries)
             next_step = first_zero_bit(mask, total_steps)
-            if next_step is not None and self._pol.steps_remaining(table, queries, steps_done=next_step):
+            if next_step is not None and self._pol.steps_remaining(
+                table, queries, steps_done=next_step
+            ):
                 new_mask = set_bit(mask, next_step)
                 batch.filter_steps = new_mask
-                self._log.debug("→ filters step=%d table=%s new_mask=%s", next_step, table, bin(new_mask))
+                self._log.debug(
+                    "→ filters step=%d table=%s new_mask=%s",
+                    next_step,
+                    table,
+                    bin(new_mask),
+                )
                 self._p.send_to_filters_pool(batch)
                 return
 
             dup_count = int(self._pol.get_duplication_count(queries) or 1)
             if dup_count > 1:
-                self._log.debug("Fan-out x%d table=%s queries=%s", dup_count, table, queries)
+                self._log.debug(
+                    "Fan-out x%d table=%s queries=%s", dup_count, table, queries
+                )
                 fanout_batches = []
                 for i in range(dup_count):
-                    new_queries = self._pol.get_new_batch_queries(table, queries, copy_number=i) or list(queries)
+                    new_queries = self._pol.get_new_batch_queries(
+                        table, queries, copy_number=i
+                    ) or list(queries)
                     b = DataBatch()
                     b.CopyFrom(batch)
                     b.query_ids.clear()
                     b.query_ids.extend(new_queries)
                     fanout_batches.append(b)
-                
+
                 for b in fanout_batches:
                     self._handle_data(b)
                 return
@@ -258,9 +289,11 @@ class FilterRouter:
         num_parts = max(1, int(self._cfg.aggregators))
         self._p.send_to_aggregator_partition(randint(0, num_parts - 1), batch)
 
-    def _handle_table_eof(self, eof: EOFMessage, channel=None, delivery_tag=None, redelivered=False) -> tuple[bool, bool]:
+    def _handle_table_eof(
+        self, eof: EOFMessage, channel=None, delivery_tag=None, redelivered=False
+    ) -> tuple[bool, bool]:
         key = (eof.table, eof.client_id)
-        
+
         if redelivered:
             self._log.info("TABLE_EOF REDELIVERED: key=%s trace=%s", key, eof.trace)
         else:
@@ -298,40 +331,48 @@ class FilterRouter:
                     if not worker_id:
                         # Fallback: use the entire trace as worker_id if no "orch_" prefix found
                         worker_id = eof.trace
-            
+
             if not worker_id:
                 # Fallback: if no trace, use a default identifier (shouldn't happen with fix, but handle gracefully)
-                self._log.warning("EOF without trace field, using fallback deduplication: key=%s", key)
+                self._log.warning(
+                    "EOF without trace field, using fallback deduplication: key=%s", key
+                )
                 worker_id = f"unknown_{hash(eof.SerializeToString()) % 10000}"
-            
+
             # Get or create the set of received worker IDs for this key
             (recvd_workers, _eof) = self._pending_eof.get(key, (set(), eof))
-            
+
             # Check if this worker ID was already received (deduplication)
             if worker_id in recvd_workers:
                 self._log.warning(
                     "Duplicate EOF ignored: key=%s worker_id=%s (already received from this worker)",
-                    key, worker_id
+                    key,
+                    worker_id,
                 )
                 # Still return delay ack to ensure proper cleanup
                 return (True, False)
-            
+
             # Add this worker ID to the set
             recvd_workers.add(worker_id)
             self._pending_eof[key] = (recvd_workers, eof)
-            
+
             # Check if we've received EOF from all orchestrator workers
             if len(recvd_workers) >= self._orch_workers:
                 flush_info = (key, max(1, int(self._cfg.aggregators)))
                 self._pending_eof.pop(key, None)
                 self._log.info(
                     "TABLE_EOF complete: key=%s received from %d/%d workers",
-                    key, len(recvd_workers), self._orch_workers
+                    key,
+                    len(recvd_workers),
+                    self._orch_workers,
                 )
             else:
                 self._log.debug(
                     "TABLE_EOF deferred: key=%s received from %d/%d workers (worker_id=%s)",
-                    key, len(recvd_workers), self._orch_workers, worker_id
+                    key,
+                    len(recvd_workers),
+                    self._orch_workers,
+                    worker_id,
                 )
 
         if flush_info:
@@ -351,30 +392,151 @@ class FilterRouter:
             except Exception as e:
                 self._log.error(
                     "send_table_eof_to_aggregator_partition failed part=%d key=%s: %s",
-                    part, key, e
+                    part,
+                    key,
+                    e,
                 )
-        
+
         self._ack_eof(key)
-        
+
         # Clean up deduplication state for this table/client
         with self._state_lock:
-            keys_to_remove = [k for k in self._received_batches.keys() 
-                            if k[0] == key[0] and k[1] == key[1]]
+            keys_to_remove = [
+                k
+                for k in self._received_batches.keys()
+                if k[0] == key[0] and k[1] == key[1]
+            ]
             for k in keys_to_remove:
                 self._received_batches.pop(k, None)
-    
+
     def _ack_eof(self, key: tuple[TableName, str]) -> None:
         """Acknowledge all EOF messages for this key after they have been fully processed."""
         with self._eof_ack_lock:
             ack_list = self._unacked_eofs.get(key, [])
             if ack_list:
-                self._log.info("ACKing %d TABLE_EOF messages: key=%s", len(ack_list), key)
+                self._log.info(
+                    "ACKing %d TABLE_EOF messages: key=%s", len(ack_list), key
+                )
                 for channel, delivery_tag in ack_list:
                     try:
                         channel.basic_ack(delivery_tag=delivery_tag)
                     except Exception as e:
-                        self._log.error("Failed to ACK EOF key=%s delivery_tag=%s: %s", key, delivery_tag, e)
+                        self._log.error(
+                            "Failed to ACK EOF key=%s delivery_tag=%s: %s",
+                            key,
+                            delivery_tag,
+                            e,
+                        )
                 del self._unacked_eofs[key]
+
+    def _cleanup_client_state(self, client_id: str) -> None:
+        """
+        Clean all in-memory and persisted state for a given client_id.
+        This includes:
+        - Unacked EOF messages
+        - Received batch deduplication state
+        - Pending EOF state
+        - Any persisted state on disk
+        """
+        if not client_id:
+            self._log.warning("_cleanup_client_state called with empty client_id")
+            return
+
+        self._log.info(
+            "action: cleanup_client_state | result: starting | client_id: %s", client_id
+        )
+
+        # Clean unacked EOFs
+        with self._eof_ack_lock:
+            keys_to_remove = [
+                key for key in self._unacked_eofs.keys() if key[1] == client_id
+            ]
+            for key in keys_to_remove:
+                # Try to ack any pending EOFs before removing
+                ack_list = self._unacked_eofs.get(key, [])
+                if ack_list:
+                    self._log.debug(
+                        "ACKing %d unacked EOFs during cleanup: key=%s",
+                        len(ack_list),
+                        key,
+                    )
+                    for channel, delivery_tag in ack_list:
+                        try:
+                            channel.basic_ack(delivery_tag=delivery_tag)
+                        except Exception as e:
+                            self._log.warning(
+                                "Failed to ACK EOF during cleanup key=%s: %s", key, e
+                            )
+                del self._unacked_eofs[key]
+
+        # Clean received batches deduplication state
+        with self._state_lock:
+            # Remove all entries where client_id matches (second element of tuple key)
+            keys_to_remove = [
+                key for key in self._received_batches.keys() if key[1] == client_id
+            ]
+            for key in keys_to_remove:
+                del self._received_batches[key]
+
+            # Clean pending EOF state
+            keys_to_remove = [
+                key for key in self._pending_eof.keys() if key[1] == client_id
+            ]
+            for key in keys_to_remove:
+                del self._pending_eof[key]
+
+        # Clean persisted state if it exists
+        # Note: Currently filter router doesn't persist state, but this is here for future-proofing
+        # If persistence is added later, this is where it should be cleaned
+        state_dir = os.getenv("FILTER_ROUTER_STATE_DIR")
+        if state_dir and os.path.exists(state_dir):
+            try:
+                # Look for any files/directories related to this client_id
+                for item in os.listdir(state_dir):
+                    if client_id in item:
+                        item_path = os.path.join(state_dir, item)
+                        try:
+                            if os.path.isfile(item_path):
+                                os.remove(item_path)
+                                self._log.debug("Removed persisted file: %s", item_path)
+                            elif os.path.isdir(item_path):
+                                shutil.rmtree(item_path)
+                                self._log.debug(
+                                    "Removed persisted directory: %s", item_path
+                                )
+                        except Exception as e:
+                            self._log.warning(
+                                "Failed to remove persisted state %s: %s", item_path, e
+                            )
+            except Exception as e:
+                self._log.warning("Failed to clean persisted state directory: %s", e)
+
+        self._log.info(
+            "action: cleanup_client_state | result: success | client_id: %s", client_id
+        )
+
+    def _handle_client_cleanup(self, cleanup_msg) -> None:
+        """Handle client cleanup message from orchestrator."""
+        client_id = cleanup_msg.client_id if cleanup_msg.client_id else ""
+        if not client_id:
+            self._log.warning("Received client_cleanup message with empty client_id")
+            return
+
+        # Clean local state first
+        self._cleanup_client_state(client_id)
+
+        # Only forward if this is router ID 0 (to avoid duplicate messages)
+        if self._router_id == 0:
+            # Forward to a random aggregator (aggregators are stateless and will broadcast to joiners)
+            num_parts = max(1, int(self._cfg.aggregators))
+            random_partition = randint(0, num_parts - 1)
+            self._p.send_cleanup_to_aggregator_partition(random_partition, cleanup_msg)
+        else:
+            self._log.debug(
+                "action: cleanup_forward | result: skipped | client_id: %s | router_id: %d (only router 0 forwards)",
+                client_id,
+                self._router_id,
+            )
 
 
 class ExchangeBusProducer:
@@ -538,6 +700,7 @@ class ExchangeBusProducer:
                 int(partition_id),
                 e,
             )
+            raise
 
     def requeue_to_router(self, batch: DataBatch) -> None:
         env = Envelope(type=MessageType.DATA_BATCH, data_batch=batch)
@@ -563,7 +726,10 @@ class ExchangeBusProducer:
             payload = env.SerializeToString()
             k = self._key_for(key[0], int(partition_id))
             self._log.info(
-                "publish TABLE_EOF → aggregator key=%s part=%d trace=%s", key, int(partition_id), trace
+                "publish TABLE_EOF → aggregator key=%s part=%d trace=%s",
+                key,
+                int(partition_id),
+                trace,
             )
             self._send_with_retry(k, payload)
         except Exception as e:
@@ -571,6 +737,33 @@ class ExchangeBusProducer:
                 "aggregator TABLE_EOF send failed key=%s part=%d: %s",
                 key,
                 int(partition_id),
+                e,
+            )
+
+    def send_cleanup_to_aggregator_partition(
+        self, partition_id: int, cleanup_msg
+    ) -> None:
+        """
+        Send client cleanup message to a random aggregator partition.
+        The aggregator will broadcast this to joiner routers.
+        """
+        # Use MENU_ITEMS table exchange for routing, table does not matter, and light tables queues are less saturated
+        table = TableName.MENU_ITEMS
+        key = self._key_for(table, int(partition_id))
+        try:
+            env = Envelope(type=MessageType.CLEAN_UP_MESSAGE, clean_up=cleanup_msg)
+            payload = env.SerializeToString()
+            self._log.info(
+                "publish CLEAN_UP_MESSAGE → aggregator part=%d client_id=%s",
+                int(partition_id),
+                cleanup_msg.client_id,
+            )
+            self._send_with_retry(key, payload)
+        except Exception as e:
+            self._log.error(
+                "aggregator CLEAN_UP_MESSAGE send failed part=%d client_id=%s: %s",
+                int(partition_id),
+                cleanup_msg.client_id,
                 e,
             )
 
@@ -609,7 +802,10 @@ class RouterServer:
                     try:
                         channel.basic_nack(delivery_tag=delivery_tag, requeue=True)
                     except Exception as e:
-                        self._log.warning("NACK failed during shutdown, message may redeliver later: %s", e)
+                        self._log.warning(
+                            "NACK failed during shutdown, message may redeliver later: %s",
+                            e,
+                        )
                 return False
             try:
                 if len(body) < 1:
@@ -617,7 +813,9 @@ class RouterServer:
                     return True  # Ack empty messages
                 msg = Envelope()
                 msg.ParseFromString(body)
-                should_ack, ack_now = self._router.process_message(msg, channel, delivery_tag, redelivered)
+                should_ack, ack_now = self._router.process_message(
+                    msg, channel, delivery_tag, redelivered
+                )
                 return ack_now  # Return whether to ack immediately
             except Exception as e:
                 self._log.exception("Error in router callback: %s", e)

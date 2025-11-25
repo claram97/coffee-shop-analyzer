@@ -223,6 +223,7 @@ class FilterWorker:
                 self._send_to_router(raw, None)
             except Exception:
                 logger.warning("Failed to re-send raw message after parse error")
+                raise  # Re-raise to cause NACK and redelivery
             return
         if env.type != MessageType.DATA_BATCH:
             logger.warning("Expected databatch, got %s", env.type)

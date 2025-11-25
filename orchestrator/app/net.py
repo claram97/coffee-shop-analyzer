@@ -16,6 +16,7 @@ from common.network import MessageHandler, ResponseHandler, ServerManager
 from middleware.middleware_client import MessageMiddlewareExchange
 from protocol2.envelope_pb2 import Envelope, MessageType
 from protocol2.eof_message_pb2 import EOFMessage as PB_EOFMessage
+from protocol2.clean_up_message_pb2 import CleanUpMessage
 from protocol.constants import Opcodes
 from protocol.messages import Finished
 
@@ -108,6 +109,9 @@ class Orchestrator:
         with self._client_states_lock:
             if client_id and client_id in self._client_states:
                 self._client_states.pop(client_id)
+        # Broadcast client_cleanup to all filter router replicas when client disconnects
+        if client_id:
+            self._broadcast_client_cleanup(client_id)
 
     def _publisher_for_rk(self, rk: str) -> MessageMiddlewareExchange:
         pub = self._publishers.get(rk)
@@ -130,6 +134,30 @@ class Orchestrator:
         for pid in range(self._num_routers):
             rk = self._fr_rk_fmt.format(pid=pid)
             self._publisher_for_rk(rk).send(raw)
+
+    def _broadcast_client_cleanup(self, client_id: str):
+        """Broadcast client_cleanup message to all filter router replicas."""
+        if not client_id:
+            return
+        
+        cleanup_msg = CleanUpMessage()
+        cleanup_msg.client_id = client_id
+        
+        env = Envelope()
+        env.type = MessageType.CLEAN_UP_MESSAGE
+        env.clean_up.CopyFrom(cleanup_msg)
+        
+        payload = env.SerializeToString()
+        
+        logging.info(
+            "action: broadcast_client_cleanup | result: broadcasting | client_id: %s | replicas: %d",
+            client_id,
+            self._num_routers,
+        )
+        
+        for pid in range(self._num_routers):
+            rk = self._fr_rk_fmt.format(pid=pid)
+            self._publisher_for_rk(rk).send(payload)
 
     def _setup_message_processors(self):
         """Setup message processors for different message types."""
@@ -213,6 +241,8 @@ class Orchestrator:
                 self._client_states.pop(client_id)
                 with self._client_ids_lock:
                     self._client_ids.pop(sock, None)
+                # Broadcast client_cleanup to all filter router replicas
+                self._broadcast_client_cleanup(client_id)
 
     def _cleanup_all_clients(self):
         """Clean up all remaining clients on shutdown."""

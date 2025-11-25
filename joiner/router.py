@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import hashlib
 import logging
+import os
+import shutil
 import threading
 from random import randint
 from typing import Any, Callable, Dict, List, Optional, Set, Tuple
@@ -151,12 +153,15 @@ class JoinerRouter:
         # Store unacked EOF messages: key=(table, client_id) -> list of (channel, delivery_tag)
         self._unacked_eofs: Dict[tuple[TableName, str], list] = {}
         self._eof_ack_lock = threading.Lock()
-        
+
         # In-memory batch deduplication: track received batches per (table, client_id, query_ids_tuple)
         # This mitigates duplicate batch propagation from aggregators (no persistence needed)
         from collections import defaultdict
-        self._received_batches: Dict[tuple[TableName, str, tuple], set[int]] = defaultdict(set)
-        
+
+        self._received_batches: Dict[tuple[TableName, str, tuple], set[int]] = (
+            defaultdict(set)
+        )
+
         log.info(
             "JoinerRouter init: tables=%s",
             {
@@ -179,21 +184,24 @@ class JoinerRouter:
         client_id = data_batch.client_id
         batch_number = data_batch.payload.batch_number
         query_ids_tuple = tuple(sorted(data_batch.query_ids))
-        
+
         dedup_key = (table, client_id, query_ids_tuple)
-        
-        if batch_number in self._received_batches[dedup_key]:
-            log.warning(
-                "DUPLICATE batch detected and discarded in joiner router: table=%s bn=%s client=%s queries=%s",
-                table, batch_number, client_id, data_batch.query_ids
-            )
-            return True
-        
+
+        # if batch_number in self._received_batches[dedup_key]:
+        #     log.warning(
+        #         "DUPLICATE batch detected and discarded in joiner router: table=%s bn=%s client=%s queries=%s",
+        #         table, batch_number, client_id, data_batch.query_ids
+        #     )
+        #     return True
+
         # Mark batch as received
         self._received_batches[dedup_key].add(batch_number)
         log.debug(
             "Batch marked as received: table=%s bn=%s client=%s queries=%s",
-            table, batch_number, client_id, data_batch.query_ids
+            table,
+            batch_number,
+            client_id,
+            data_batch.query_ids,
         )
         return False
 
@@ -207,7 +215,9 @@ class JoinerRouter:
         log.info("JoinerRouter consuming…")
         self._in.start_consuming(self._on_raw_with_ack)
 
-    def _on_raw_with_ack(self, raw: bytes, channel=None, delivery_tag=None, redelivered=False):
+    def _on_raw_with_ack(
+        self, raw: bytes, channel=None, delivery_tag=None, redelivered=False
+    ):
         """
         Process a message and return whether to ACK immediately.
         - Returns True: ACK immediately
@@ -226,11 +236,17 @@ class JoinerRouter:
         envelope.ParseFromString(raw)
 
         if envelope.type == MessageType.EOF_MESSAGE:
-            return self._handle_partition_eof_like(envelope.eof, raw, channel, delivery_tag, redelivered)
+            return self._handle_partition_eof_like(
+                envelope.eof, raw, channel, delivery_tag, redelivered
+            )
+
+        if envelope.type == MessageType.CLEAN_UP_MESSAGE:
+            self._handle_client_cleanup(envelope.clean_up)
+            return True
 
         if envelope.type == MessageType.DATA_BATCH:
             db = envelope.data_batch
-            
+
             # Check for duplicate batch and discard if already processed
             if self._is_duplicate_batch(db):
                 return True  # ACK duplicate batch
@@ -293,17 +309,24 @@ class JoinerRouter:
                 type=MessageType.DATA_BATCH, data_batch=db_sh
             ).SerializeToString()
             self._publish(cfg, shard, raw_sh)
-        
+
         return True
 
     def _on_raw(self, raw: bytes):
         """Legacy method for backward compatibility."""
         self._on_raw_with_ack(raw)
 
-    def _handle_partition_eof_like(self, eof: EOFMessage, raw_env: bytes, channel=None, delivery_tag=None, redelivered=False) -> bool:
+    def _handle_partition_eof_like(
+        self,
+        eof: EOFMessage,
+        raw_env: bytes,
+        channel=None,
+        delivery_tag=None,
+        redelivered=False,
+    ) -> bool:
         """
         Handle EOF message. Returns whether to ACK immediately.
-        - Returns True: ACK immediately  
+        - Returns True: ACK immediately
         - Returns False: Delay ACK (will be done manually after forwarding to workers)
         """
         table = eof.table
@@ -365,17 +388,17 @@ class JoinerRouter:
             env_updated = Envelope(type=MessageType.EOF_MESSAGE, eof=eof_updated)
             raw_updated = env_updated.SerializeToString()
             self._broadcast(cfg, raw_updated, shards=cfg.joiner_shards)
-            
+
             # Now ACK the EOF message since we've successfully forwarded it
             self._ack_eof(key)
-            
+
             # Use safe pops in case concurrent callbacks already cleared these.
             self._pending_eofs.pop(key, None)
             self._part_counter.pop(key, None)
-        
+
         # Return False to delay ACK until fully processed
         return False
-    
+
     def _ack_eof(self, key: tuple[TableName, str]) -> None:
         """Acknowledge all EOF messages for this key after they have been fully processed."""
         with self._eof_ack_lock:
@@ -387,19 +410,152 @@ class JoinerRouter:
                 for channel, delivery_tag in ack_list:
                     try:
                         if not channel:
-                            log.warning("Channel is None for EOF key=%s delivery_tag=%s - skipping ACK", key, delivery_tag)
+                            log.warning(
+                                "Channel is None for EOF key=%s delivery_tag=%s - skipping ACK",
+                                key,
+                                delivery_tag,
+                            )
                             failed_count += 1
                             continue
                         channel.basic_ack(delivery_tag=delivery_tag)
                         acked_count += 1
                     except Exception as e:
-                        log.warning("Failed to ACK EOF key=%s delivery_tag=%s (will be redelivered): %s", key, delivery_tag, e)
+                        log.warning(
+                            "Failed to ACK EOF key=%s delivery_tag=%s (will be redelivered): %s",
+                            key,
+                            delivery_tag,
+                            e,
+                        )
                         failed_count += 1
-                
+
                 if failed_count > 0:
-                    log.warning("Failed to ACK %d/%d EOF messages for key=%s - they will be redelivered", failed_count, len(ack_list), key)
-                
+                    log.warning(
+                        "Failed to ACK %d/%d EOF messages for key=%s - they will be redelivered",
+                        failed_count,
+                        len(ack_list),
+                        key,
+                    )
+
                 del self._unacked_eofs[key]
+
+    def _cleanup_client_state(self, client_id: str) -> None:
+        """
+        Clean all in-memory and persisted state for a given client_id.
+        This includes:
+        - Unacked EOF messages
+        - Pending EOF state
+        - Partition counter state
+        - Received batch deduplication state
+        - Any persisted state on disk
+        """
+        if not client_id:
+            log.warning("_cleanup_client_state called with empty client_id")
+            return
+
+        log.info(
+            "action: cleanup_client_state | result: starting | client_id: %s", client_id
+        )
+
+        # Clean unacked EOFs
+        with self._eof_ack_lock:
+            keys_to_remove = [
+                key for key in self._unacked_eofs.keys() if key[1] == client_id
+            ]
+            for key in keys_to_remove:
+                # Try to ack any pending EOFs before removing
+                ack_list = self._unacked_eofs.get(key, [])
+                if ack_list:
+                    log.debug(
+                        "ACKing %d unacked EOFs during cleanup: key=%s",
+                        len(ack_list),
+                        key,
+                    )
+                    for channel, delivery_tag in ack_list:
+                        try:
+                            if channel:
+                                channel.basic_ack(delivery_tag=delivery_tag)
+                        except Exception as e:
+                            log.warning(
+                                "Failed to ACK EOF during cleanup key=%s: %s", key, e
+                            )
+                del self._unacked_eofs[key]
+
+        # Clean pending EOFs and partition counters
+        keys_to_remove = [
+            key for key in self._pending_eofs.keys() if key[1] == client_id
+        ]
+        for key in keys_to_remove:
+            self._pending_eofs.pop(key, None)
+            self._part_counter.pop(key, None)
+
+        # Clean received batches deduplication state
+        # Remove all entries where client_id matches (second element of tuple key)
+        keys_to_remove = [
+            key for key in self._received_batches.keys() if key[1] == client_id
+        ]
+        for key in keys_to_remove:
+            del self._received_batches[key]
+
+        # Clean persisted state if it exists
+        # Note: Joiner router doesn't typically persist state, but this is here for future-proofing
+        state_dir = os.getenv("JOINER_ROUTER_STATE_DIR")
+        if state_dir and os.path.exists(state_dir):
+            try:
+                # Look for any files/directories related to this client_id
+                for item in os.listdir(state_dir):
+                    if client_id in item:
+                        item_path = os.path.join(state_dir, item)
+                        try:
+                            if os.path.isfile(item_path):
+                                os.remove(item_path)
+                                log.debug("Removed persisted file: %s", item_path)
+                            elif os.path.isdir(item_path):
+                                shutil.rmtree(item_path)
+                                log.debug("Removed persisted directory: %s", item_path)
+                        except Exception as e:
+                            log.warning(
+                                "Failed to remove persisted state %s: %s", item_path, e
+                            )
+            except Exception as e:
+                log.warning("Failed to clean persisted state directory: %s", e)
+
+        log.info(
+            "action: cleanup_client_state | result: success | client_id: %s", client_id
+        )
+
+    def _handle_client_cleanup(self, cleanup_msg) -> None:
+        """Handle client cleanup message from aggregator."""
+        client_id = cleanup_msg.client_id if cleanup_msg.client_id else ""
+        if not client_id:
+            log.warning("Received client_cleanup message with empty client_id")
+            return
+
+        # Clean local state first
+        self._cleanup_client_state(client_id)
+
+        # Only forward if this is router ID 0 (to avoid duplicate messages)
+        if self._router_id == 0:
+            # Broadcast cleanup message to all joiner workers via menu_items exchange
+            menu_cfg = self._cfg.get(TableName.MENU_ITEMS)
+            if menu_cfg:
+                env = Envelope(type=MessageType.CLEAN_UP_MESSAGE, clean_up=cleanup_msg)
+                raw = env.SerializeToString()
+                log.info(
+                    "action: broadcast_cleanup_to_workers | result: broadcasting | client_id: %s | table: menu_items | shards: %d",
+                    client_id,
+                    menu_cfg.joiner_shards,
+                )
+                self._broadcast(menu_cfg, raw, shards=menu_cfg.joiner_shards)
+            else:
+                log.warning(
+                    "No route config found for menu_items, cannot broadcast cleanup message"
+                )
+        else:
+            log.debug(
+                "action: cleanup_forward | result: skipped | client_id: %s | router_id: %d (only router 0 forwards)",
+                client_id,
+                self._router_id,
+            )
 
     def _rk(self, cfg: TableRouteCfg, shard: int) -> str:
         return cfg.key_pattern.format(shard=int(shard))
@@ -414,8 +570,17 @@ class JoinerRouter:
                 rk,
                 e,
             )
-            pub2 = self._pool.get_pub(ex, rk)
-            pub2.send(raw)
+            try:
+                pub2 = self._pool.get_pub(ex, rk)
+                pub2.send(raw)
+            except Exception as e2:
+                log.error(
+                    "send failed after retry ex=%s rk=%s: %s",
+                    ex,
+                    rk,
+                    e2,
+                )
+                raise  # Re-raise to propagate failure
 
     def _publish(self, cfg: TableRouteCfg, shard: int, raw: bytes):
         rk = self._rk(cfg, shard)
@@ -427,12 +592,13 @@ class JoinerRouter:
     def _broadcast(self, cfg: TableRouteCfg, raw: bytes, shards: Optional[int] = None):
         if shards is None:
             shards = cfg.joiner_shards
+        # Track successful sends - if any fail, we'll raise to trigger redelivery
         for shard in range(int(shards)):
             rk = self._rk(cfg, shard)
             ex = cfg.exchange_name
             pub = self._pool.get_pub(ex, rk)
             log.debug("broadcast ex=%s rk=%s size=%d", ex, rk, len(raw))
-            self._safe_send(pub, raw, ex, rk)
+            self._safe_send(pub, raw, ex, rk)  # Will raise if send fails
 
 
 def build_route_cfg_from_config(cfg: "Config") -> Dict[int, TableRouteCfg]:
@@ -507,10 +673,17 @@ class JoinerRouterServer:
             getattr(self._mw_in, "_queue", "?"),
         )
 
-        def _cb(body: bytes):
+        def _cb(body: bytes, channel=None, delivery_tag=None, redelivered=False):
             try:
-                self._router._on_raw(body)
+                if len(body) < 1:
+                    self._log.error("Received empty message")
+                    return True  # Ack empty messages
+                should_ack = self._router._on_raw_with_ack(
+                    body, channel, delivery_tag, redelivered
+                )
+                return should_ack  # Return whether to ack immediately
             except Exception as e:
                 self._log.exception("Error in joiner-router callback: %s", e)
+                return False  # NACK to trigger redelivery on errors
 
         self._mw_in.start_consuming(_cb)

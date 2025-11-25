@@ -114,6 +114,20 @@ class ResultsFinisher:
                 channel.basic_nack(delivery_tag=delivery_tag, requeue=True)
             return False
 
+        if envelope.type == MessageType.CLEAN_UP_MESSAGE:
+            if manual_ack:
+                channel.basic_ack(delivery_tag=delivery_tag)
+            try:
+                cleanup_msg = envelope.clean_up
+                self._handle_client_cleanup(cleanup_msg)
+            except Exception as exc:
+                logger.error(
+                    "Failed to handle client cleanup message: %s",
+                    exc,
+                    exc_info=True,
+                )
+            return False
+
         if envelope.type != MessageType.DATA_BATCH:
             logger.warning(
                 "Received envelope with unsupported type %s, ignoring.",
@@ -810,3 +824,139 @@ class ResultsFinisher:
                     client_id,
                     exc,
                 )
+
+    def _handle_client_cleanup(self, cleanup_msg) -> None:
+        """Handle client cleanup message from orchestrator."""
+        client_id = cleanup_msg.client_id if cleanup_msg.client_id else ""
+        if not client_id:
+            logger.warning("Received client_cleanup message with empty client_id")
+            return
+
+        logger.info(
+            "action: handle_client_cleanup | result: starting | client_id: %s",
+            client_id,
+        )
+        self._cleanup_client_state(client_id)
+        logger.info(
+            "action: handle_client_cleanup | result: success | client_id: %s",
+            client_id,
+        )
+
+    def _cleanup_client_state(self, client_id: str) -> None:
+        """
+        Clean all in-memory and persisted state for a given client_id.
+        This includes:
+        - Active queries in memory
+        - All persisted manifests and batch files for the client
+        """
+        if not client_id:
+            logger.warning("_cleanup_client_state called with empty client_id")
+            return
+
+        logger.info(
+            "action: cleanup_client_state | result: starting | client_id: %s",
+            client_id,
+        )
+
+        # Clean in-memory active queries
+        with self.global_lock:
+            keys_to_remove = [
+                key for key in self.active_queries.keys() if key[0] == client_id
+            ]
+            for key in keys_to_remove:
+                del self.active_queries[key]
+                logger.debug(
+                    "Removed active query '%s' (client %s) from memory",
+                    key[1],
+                    client_id,
+                )
+
+        # Clean persisted state
+        # Find all manifest files for this client_id
+        manifest_prefix = f"{client_id}__"
+        manifest_dir = self.persistence.manifest_dir
+
+        if not os.path.exists(manifest_dir):
+            logger.debug(
+                "Manifest directory does not exist, skipping persisted cleanup for client %s",
+                client_id,
+            )
+            return
+
+        try:
+            manifest_files = [
+                f
+                for f in os.listdir(manifest_dir)
+                if f.startswith(manifest_prefix) and f.endswith(".json")
+            ]
+
+            for manifest_file in manifest_files:
+                # Extract query_id from filename: {client_id}__{query_id}.json
+                query_id = manifest_file[len(manifest_prefix) : -5]  # Remove prefix and .json
+
+                try:
+                    # Load manifest and delete all associated batch files
+                    entries = self.persistence.load_manifest(client_id, query_id)
+                    for entry in entries:
+                        data_file = entry.get("data_file")
+                        meta_file = entry.get("meta_file")
+                        if data_file:
+                            data_path = os.path.join(
+                                self.persistence.batches_dir, data_file
+                            )
+                            if os.path.exists(data_path):
+                                try:
+                                    os.remove(data_path)
+                                    logger.debug(
+                                        "Deleted batch data file: %s", data_path
+                                    )
+                                except OSError as e:
+                                    logger.warning(
+                                        "Failed to delete batch data file %s: %s",
+                                        data_path,
+                                        e,
+                                    )
+                        if meta_file:
+                            meta_path = os.path.join(
+                                self.persistence.batches_dir, meta_file
+                            )
+                            if os.path.exists(meta_path):
+                                try:
+                                    os.remove(meta_path)
+                                    logger.debug(
+                                        "Deleted batch meta file: %s", meta_path
+                                    )
+                                except OSError as e:
+                                    logger.warning(
+                                        "Failed to delete batch meta file %s: %s",
+                                        meta_path,
+                                        e,
+                                    )
+
+                    # Delete the manifest file
+                    self.persistence.delete_manifest(client_id, query_id)
+                    logger.debug(
+                        "Deleted manifest for query '%s' (client %s)",
+                        query_id,
+                        client_id,
+                    )
+                except Exception as e:
+                    logger.warning(
+                        "Failed to cleanup manifest %s for client %s: %s",
+                        manifest_file,
+                        client_id,
+                        e,
+                    )
+
+            logger.info(
+                "action: cleanup_client_state | result: success | client_id: %s | manifests_cleaned: %d",
+                client_id,
+                len(manifest_files),
+            )
+        except Exception as e:
+            logger.error(
+                "Failed to cleanup persisted state for client %s: %s",
+                client_id,
+                e,
+                exc_info=True,
+            )

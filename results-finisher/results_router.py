@@ -63,6 +63,41 @@ class ResultsRouter:
         target_index = hash_value % self.finisher_count
         return self.output_queue_names[target_index]
 
+    def _broadcast_cleanup_to_finishers(self, raw: bytes):
+        """
+        Broadcast client cleanup message to all results finisher queues.
+        """
+        try:
+            envelope = Envelope()
+            envelope.ParseFromString(raw)
+            cleanup_msg = envelope.clean_up
+            client_id = cleanup_msg.client_id if cleanup_msg.client_id else ""
+            
+            logger.info(
+                "action: broadcast_cleanup_to_finishers | result: broadcasting | client_id: %s | finishers: %d",
+                client_id,
+                len(self.output_clients),
+            )
+            
+            for queue_name, client in self.output_clients.items():
+                try:
+                    client.send(raw)
+                    logger.debug(
+                        "Forwarded CLEAN_UP_MESSAGE to results finisher queue=%s client_id=%s",
+                        queue_name,
+                        client_id,
+                    )
+                except Exception as e:
+                    logger.error(
+                        "Failed to send cleanup message to finisher queue=%s: %s",
+                        queue_name,
+                        e,
+                    )
+                    raise  # Re-raise to cause NACK and redelivery
+        except Exception:
+            logger.exception("Failed to broadcast cleanup to finishers")
+            raise
+
     # Deduplication method removed - router no longer deduplicates
     # def _is_duplicate_batch(self, data_batch) -> bool:
     #     """
@@ -109,6 +144,13 @@ class ResultsRouter:
             # The primary responsibility is to route DataBatch messages.
             envelope = Envelope()
             envelope.ParseFromString(body)
+
+            if envelope.type == MessageType.CLEAN_UP_MESSAGE:
+                # Broadcast cleanup message to all results finishers
+                self._broadcast_cleanup_to_finishers(body)
+                if manual_ack:
+                    channel.basic_ack(delivery_tag=delivery_tag)
+                return False
 
             if envelope.type != MessageType.DATA_BATCH:
                 logger.warning(

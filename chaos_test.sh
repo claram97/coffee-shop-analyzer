@@ -82,7 +82,7 @@ for i in $(seq 1 "$NUM_EVENTS"); do
     
     # Wait random time before next stop event (0-10 seconds)
     if [[ $i -lt $NUM_EVENTS ]]; then
-        wait_time=$((RANDOM % 10))
+        wait_time=$((RANDOM % 20 + 10))
         echo "[$(date +'%H:%M:%S')] Waiting $wait_time seconds before next chaos event..."
         sleep "$wait_time"
     fi

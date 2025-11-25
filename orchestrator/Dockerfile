@@ -2,7 +2,7 @@ FROM python:3.9.7-slim
 
 # Upgrade pip and install runtime dependencies required by orchestrator
 RUN pip install --no-cache-dir --upgrade pip setuptools wheel && \
-	pip install --no-cache-dir pika protobuf==6.32.1
+	pip install --no-cache-dir pika protobuf==6.33.0
 
 # Copy orchestrator code
 COPY orchestrator /
