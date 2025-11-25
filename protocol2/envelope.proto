@@ -11,6 +11,7 @@ import "election_answer_message.proto";
 import "coordinator_message.proto";
 import "heartbeat_message.proto";
 import "heartbeat_ack_message.proto";
+import "clean_up_message.proto";
 
 
 enum MessageType {
@@ -24,6 +25,7 @@ enum MessageType {
   COORDINATOR = 7;
   HEARTBEAT = 8;
   HEARTBEAT_ACK = 9;
+  CLEAN_UP_MESSAGE = 10;
 }
 
 
@@ -40,5 +42,6 @@ message Envelope {
     Coordinator coordinator = 8;
     Heartbeat heartbeat = 9;
     HeartbeatAck heartbeat_ack = 10;
+    CleanUpMessage clean_up = 11;
   }
 }
