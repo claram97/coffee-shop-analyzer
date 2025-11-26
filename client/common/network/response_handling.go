@@ -3,7 +3,6 @@ package common
 import (
 	"bufio"
 	"context"
-	"encoding/binary"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -11,14 +10,12 @@ import (
 	"net"
 	"os"
 	"path/filepath"
-	"strconv"
 	"strings"
 	"time"
 
 	"github.com/op/go-logging"
 
 	protocol "github.com/7574-sistemas-distribuidos/docker-compose-init/client/protocol"
-	"github.com/google/uuid"
 )
 
 // ResponseHandler handles server response communication
@@ -89,20 +86,15 @@ func (rh *ResponseHandler) handleQueryResult(dataBatch *protocol.DataBatch) {
 	// Log based on the inner message opcode
 	switch dataBatch.OpCode {
 	case protocol.OpCodeQueryResult1:
-		rh.log.Info("action: query_result_received | result: success | type: filtered_transactions")
-		rh.log.Debug("Query 1 result: Morning high-value transactions")
+		rh.log.Info("action: query_result_received | Query: 1 |  Detail: Morning high-value transactions | result: success | type: filtered_transactions")
 	case protocol.OpCodeQueryResult2:
-		rh.log.Info("action: query_result_received | result: success | type: product_metrics")
-		rh.log.Debug("Query 2 result: Product ranking by sales quantity and revenue")
+		rh.log.Info("action: query_result_received | Query: 2 |  Detail: Product ranking by sales quantity and revenue | result: success | type: product_metrics")
 	case protocol.OpCodeQueryResult3:
-		rh.log.Info("action: query_result_received | result: success | type: tpv_analysis")
-		rh.log.Debug("Query 3 result: Total Processing Volume by store and semester")
+		rh.log.Info("action: query_result_received | Query: 3 |  Detail: Total Processing Volume by store and semester | result: success | type: tpv_analysis")
 	case protocol.OpCodeQueryResult4:
-		rh.log.Info("action: query_result_received | result: success | type: top_customers")
-		rh.log.Debug("Query 4 result: Top 3 customers by purchase count per store")
+		rh.log.Info("action: query_result_received | Query: 4 |  Detail: Top 3 customers by purchase count per store | result: success | type: top_customers")
 	case protocol.OpCodeQueryResultError:
 		rh.log.Error("action: query_result_received | result: error | type: query_error")
-		rh.log.Debug("Query execution failed with an error")
 	default:
 		rh.log.Warning("action: query_result_received | result: unknown_type | opcode: %d", dataBatch.OpCode)
 	}
@@ -160,20 +152,15 @@ func (rh *ResponseHandler) handleQueryResultTable(queryResult *protocol.QueryRes
 	// Log based on the opcode
 	switch queryResult.OpCode {
 	case protocol.OpCodeQueryResult1:
-		rh.log.Info("action: query_result_received | result: success | type: filtered_transactions")
-		rh.log.Debug("Query 1 result: Morning high-value transactions")
+		rh.log.Info("action: query_result_received | Query: 1 | detail: morning high-value transactions |result: success | type: filtered_transactions")
 	case protocol.OpCodeQueryResult2:
-		rh.log.Info("action: query_result_received | result: success | type: product_metrics")
-		rh.log.Debug("Query 2 result: Product ranking by sales quantity and revenue")
+		rh.log.Info("action: query_result_received | Query: 2 | detail: product ranking by sales quantity and revenue | result: success | type: product_metrics")
 	case protocol.OpCodeQueryResult3:
-		rh.log.Info("action: query_result_received | result: success | type: tpv_analysis")
-		rh.log.Debug("Query 3 result: Total Processing Volume by store and semester")
+		rh.log.Info("action: query_result_received | Query: 3 | detail: total processing volume by store and semester | result: success | type: tpv_analysis")
 	case protocol.OpCodeQueryResult4:
-		rh.log.Info("action: query_result_received | result: success | type: top_customers")
-		rh.log.Debug("Query 4 result: Top 3 customers by purchase count per store")
+		rh.log.Info("action: query_result_received | Query: 4 | detail: top 3 customers by purchase count per store | result: success | type: top_customers")
 	case protocol.OpCodeQueryResultError:
 		rh.log.Error("action: query_result_received | result: error | type: query_error")
-		rh.log.Debug("Query execution failed with an error")
 	default:
 		rh.log.Warning("action: query_result_received | result: unknown_type | opcode: %d", queryResult.OpCode)
 	}
@@ -305,23 +292,4 @@ func (fms *FinishedMessageSender) SendFinished() {
 	}
 
 	fms.log.Infof("action: send_finished | result: success")
-}
-
-//lint:ignore U1000 kept for compatibility with potential callers outside current build
-func deriveFinishedAgencyID(rawID string) (int32, error) {
-	trimmed := strings.TrimSpace(rawID)
-	if trimmed == "" {
-		return 0, fmt.Errorf("client id empty")
-	}
-
-	if numeric, err := strconv.Atoi(trimmed); err == nil {
-		return int32(numeric), nil
-	}
-
-	parsed, err := uuid.Parse(trimmed)
-	if err != nil {
-		return 0, fmt.Errorf("invalid client id for FINISHED message: %w", err)
-	}
-
-	return int32(binary.BigEndian.Uint32(parsed[0:4])), nil
 }

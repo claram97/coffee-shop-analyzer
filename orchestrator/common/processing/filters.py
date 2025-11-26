@@ -4,8 +4,15 @@ columns required for downstream processing and analysis. This helps reduce data
 size and complexity by creating leaner data representations.
 """
 
-from typing import List, Dict, Any
-from protocol.entities import RawMenuItems, RawStore, RawTransactionItem, RawTransaction, RawUser
+from typing import Any, Dict, List
+
+from protocol.entities import (
+    RawMenuItems,
+    RawStore,
+    RawTransaction,
+    RawTransactionItem,
+    RawUser,
+)
 
 
 def _return_if_dict_list(rows):
@@ -39,7 +46,7 @@ def filter_menu_items_columns(rows: List[RawMenuItems]) -> List[Dict]:
 
     return [
         {
-            "product_id": row.product_id,
+            "item_id": row.item_id,
             "name": row.name,
             "price": row.price,
         }
@@ -127,6 +134,8 @@ def filter_transactions_columns(rows: List[RawTransaction]) -> List[Dict]:
             "transaction_id": row.transaction_id,
             "store_id": row.store_id,
             "user_id": row.user_id,
+            "original_amount": row.original_amount,
+            "discount_applied": row.discount_applied,
             "final_amount": row.final_amount,
             "created_at": row.created_at,
         }

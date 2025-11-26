@@ -2,14 +2,14 @@ import logging
 import multiprocessing as mp
 from typing import Dict
 
-from protocol.constants import Opcodes
-
-from common.processing import create_filtered_data_batch, message_logger
+from common.processing import message_logger
 
 from middleware.middleware_client import MessageMiddlewareExchange
+from common.processing import create_filtered_data_batch_protocol2
+from protocol2.envelope_pb2 import Envelope, MessageType
+from protocol2.eof_message_pb2 import EOFMessage
 
 STATUS_TEXT_MAP = {0: "Continue", 1: "EOF", 2: "Cancel"}
-
 
 def processing_worker_main(
     task_queue: mp.Queue,
@@ -27,7 +27,7 @@ def processing_worker_main(
     )
 
     publishers: Dict[str, MessageMiddlewareExchange] = {}
-
+    
     def _publisher_for_rk(rk: str) -> MessageMiddlewareExchange:
         pub = publishers.get(rk)
         if pub is None:
@@ -50,13 +50,40 @@ def processing_worker_main(
         if task is None:
             logging.info("action: worker_stop | worker: %d", worker_idx)
             break
-
+        
         # Tasks can be either:
         # - (msg_object, client_id)  -> normal processing (existing flow)
         # - ("__eof__", message_bytes, client_id) -> EOF marker with raw bytes
         try:
             if isinstance(task, tuple) and len(task) == 3 and task[0] == "__eof__":
                 _, batch_bytes, client_id = task
+                # Parse the envelope, add worker ID to trace, and reserialize
+                try:
+                    env = Envelope()
+                    env.ParseFromString(batch_bytes)
+                    if env.type == MessageType.EOF_MESSAGE:
+                        # Add worker ID to trace field for deduplication
+                        # Format: "orch_worker_id"
+                        eof = env.eof
+                        if eof.trace:
+                            # Trace should be empty when worker receives it (fresh from orchestrator)
+                            # If it exists, log a warning but still set it to this worker's ID
+                            logging.warning(
+                                "action: worker_eof_trace_exists | worker: %d | existing_trace: %s",
+                                worker_idx,
+                                eof.trace,
+                            )
+                        # Set trace to this worker's ID (each worker has a unique ID)
+                        eof.trace = f"orch_{worker_idx}"
+                        batch_bytes = env.SerializeToString()
+                except Exception as e:
+                    logging.warning(
+                        "action: worker_eof_trace_update | result: fail | worker: %d | error: %s",
+                        worker_idx,
+                        e,
+                    )
+                    # Continue with original bytes if parsing fails
+                
                 # Broadcast EOF to all filter router replicas
                 for pid in range(num_routers):
                     rk = rk_fmt.format(pid=pid)
@@ -70,16 +97,19 @@ def processing_worker_main(
                 continue
 
             msg, client_id = task
+
             setattr(msg, "client_id", client_id)
             status_value = getattr(msg, "batch_status", 0)
             status_text = STATUS_TEXT_MAP.get(status_value, f"Unknown({status_value})")
 
             message_logger.write_original_message(msg, status_text)
 
-            filtered_batch = create_filtered_data_batch(msg, client_id)
-            batch_bytes = filtered_batch.to_bytes()
+            # Build a protocol2 Envelope containing a DataBatch (TableData payload)
+            env = create_filtered_data_batch_protocol2(msg, client_id)
+            batch_bytes = env.SerializeToString()
 
-            batch_number = int(getattr(filtered_batch, "batch_number", 0) or 0)
+            # batch_number is stored in the TableData payload
+            batch_number = int(getattr(env.data_batch.payload, "batch_number", 0) or 0)
             pid = 0 if num_routers <= 1 else batch_number % num_routers
             rk = rk_fmt.format(pid=pid)
 

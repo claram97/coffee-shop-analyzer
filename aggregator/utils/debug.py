@@ -49,7 +49,7 @@ def log_query2_results(aggregated_data: Dict) -> None:
             f'{zero_quantity_items} zero out of {total_items} items'
         )
     else:
-        logging.info('Q2 Quantity Metrics: All items have valid quantity values')
+        logging.debug('Q2 Quantity Metrics: All items have valid quantity values')
         
     logging.debug('')
 

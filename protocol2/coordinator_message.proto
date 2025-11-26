@@ -1,0 +1,7 @@
+syntax = "proto3";
+
+package protocol;
+
+message Coordinator {
+  uint32 new_leader = 1;
+}

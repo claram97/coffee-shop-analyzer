@@ -64,6 +64,31 @@ def _read_routers(cp: configparser.ConfigParser):
     return {"fr_routers": filter, "j_routers": joiner, "results_routers": finisher}
 
 
+def _read_election_ports(cp: configparser.ConfigParser):
+    if "election_ports" not in cp:
+        # Return defaults if section missing
+        return {
+            "filter_workers": 9100,
+            "filter_routers": 9200,
+            "aggregators": 9300,
+            "joiner_workers": 9400,
+            "joiner_routers": 9500,
+            "results_workers": 9600,
+            "results_routers": 9700,
+        }
+    
+    ep = cp["election_ports"]
+    return {
+        "filter_workers": ep.getint("filter_workers", 9100),
+        "filter_routers": ep.getint("filter_routers", 9200),
+        "aggregators": ep.getint("aggregators", 9300),
+        "joiner_workers": ep.getint("joiner_workers", 9400),
+        "joiner_routers": ep.getint("joiner_routers", 9500),
+        "results_workers": ep.getint("results_workers", 9600),
+        "results_routers": ep.getint("results_routers", 9700),
+    }
+
+
 def cmd_workers(cp: configparser.ConfigParser, fmt: str):
     w = _read_workers(cp)
     if fmt == "plain":
@@ -120,6 +145,30 @@ def cmd_routers(cp: configparser.ConfigParser, fmt: str):
         _die(f"unknown format: {fmt}")
 
 
+def cmd_election_ports(cp: configparser.ConfigParser, fmt: str):
+    ep = _read_election_ports(cp)
+    if fmt == "plain":
+        print(
+            ep["filter_workers"],
+            ep["filter_routers"],
+            ep["aggregators"],
+            ep["joiner_workers"],
+            ep["joiner_routers"],
+            ep["results_workers"],
+            ep["results_routers"],
+        )
+    elif fmt == "env":
+        print(f"ELECTION_PORT_FILTER_WORKERS={ep['filter_workers']}")
+        print(f"ELECTION_PORT_FILTER_ROUTERS={ep['filter_routers']}")
+        print(f"ELECTION_PORT_AGGREGATORS={ep['aggregators']}")
+        print(f"ELECTION_PORT_JOINER_WORKERS={ep['joiner_workers']}")
+        print(f"ELECTION_PORT_JOINER_ROUTERS={ep['joiner_routers']}")
+        print(f"ELECTION_PORT_RESULTS_WORKERS={ep['results_workers']}")
+        print(f"ELECTION_PORT_RESULTS_ROUTERS={ep['results_routers']}")
+    else:
+        _die(f"unknown format: {fmt}")
+
+
 def cmd_all_env(cp: configparser.ConfigParser):
     w = _read_workers(cp)
     b = _read_broker(cp)
@@ -169,6 +218,9 @@ def main():
     spb = sub.add_parser("broker", help="Print RabbitMQ connection info")
     spb.add_argument("--format", choices=["plain", "env", "json"], default="env")
 
+    spe = sub.add_parser("election_ports", help="Print election port configuration")
+    spe.add_argument("--format", choices=["plain", "env"], default="env")
+
     sub.add_parser("all-env", help="Print all needed env vars for docker-compose")
 
     args = p.parse_args()
@@ -180,6 +232,8 @@ def main():
         cmd_broker(cp, args.format)
     elif args.cmd == "routers":
         cmd_routers(cp, args.format)
+    elif args.cmd == "election_ports":
+        cmd_election_ports(cp, args.format)
     elif args.cmd == "all-env":
         cmd_all_env(cp)
     else:

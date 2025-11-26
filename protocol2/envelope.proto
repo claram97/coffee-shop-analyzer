@@ -1,0 +1,47 @@
+syntax = "proto3";
+
+package protocol;
+
+import "databatch.proto";
+import "eof_message.proto";
+import "table_data.proto";
+import "query_result.proto";
+import "election_message.proto";
+import "election_answer_message.proto";
+import "coordinator_message.proto";
+import "heartbeat_message.proto";
+import "heartbeat_ack_message.proto";
+import "clean_up_message.proto";
+
+
+enum MessageType {
+  UNKNOWN = 0;
+  DATA_BATCH = 1;
+  EOF_MESSAGE = 2;
+  TABLE_DATA = 3;
+  QUERY_RESULT = 4;
+  ELECTION = 5;
+  ELECTION_ANSWER = 6;
+  COORDINATOR = 7;
+  HEARTBEAT = 8;
+  HEARTBEAT_ACK = 9;
+  CLEAN_UP_MESSAGE = 10;
+}
+
+
+message Envelope {
+  MessageType type = 1;
+
+  oneof payload {
+    DataBatch data_batch = 2;
+    EOFMessage eof = 3;
+    TableData table = 4;
+    QueryResult query_result = 5;
+    Election election = 6;
+    ElectionAnswer election_answeer = 7;
+    Coordinator coordinator = 8;
+    Heartbeat heartbeat = 9;
+    HeartbeatAck heartbeat_ack = 10;
+    CleanUpMessage clean_up = 11;
+  }
+}

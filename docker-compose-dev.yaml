@@ -23,7 +23,7 @@ services:
       nofile:
         soft: 65536
         hard: 65536
-        
+
   orchestrator:
     container_name: orchestrator
     build:
@@ -36,7 +36,7 @@ services:
       - RABBITMQ_HOST=rabbitmq
       - ORCH_TO_FR_EXCHANGE=fr.ex
       - ORCH_TO_FR_RK_FMT=fr.{pid:02d}
-      - FILTER_ROUTER_COUNT=8
+      - FILTER_ROUTER_COUNT=6
       - ORCH_PROCESS_COUNT=8
       - ORCH_PROCESS_QUEUE_SIZE=256
       - ORCH_PROCESS_QUEUE_TIMEOUT=10.0
@@ -59,10 +59,33 @@ services:
       - LOG_LEVEL=INFO
       - CONFIG_PATH=/config/config.ini
       - FILTER_ROUTER_INDEX=0
+      - ELECTION_PORT=9200
+      - HEARTBEAT_INTERVAL_SECONDS=0.5
+      - HEARTBEAT_TIMEOUT_SECONDS=0.5
+      - HEARTBEAT_MAX_MISSES=3
+      - HEARTBEAT_STARTUP_GRACE_SECONDS=3.0
+      - HEARTBEAT_ELECTION_COOLDOWN_SECONDS=5.0
+      - HEARTBEAT_COOLDOWN_JITTER_SECONDS=0.2
+      - FOLLOWER_DOWN_TIMEOUT_SECONDS=6.0
+      - FOLLOWER_RESTART_COOLDOWN_SECONDS=20.0
+      - FOLLOWER_RECOVERY_GRACE_SECONDS=6.0
+      - FOLLOWER_MAX_RESTART_ATTEMPTS=100
+      - FOLLOWER_MAX_RESTART_ATTEMPTS=100
+      - FOLLOWER_DOWN_TIMEOUT_SECONDS=6.0
+      - FOLLOWER_RESTART_COOLDOWN_SECONDS=20.0
+      - FOLLOWER_RECOVERY_GRACE_SECONDS=6.0
+      - FOLLOWER_MAX_RESTART_ATTEMPTS=100
+      - FOLLOWER_MAX_RESTART_ATTEMPTS=100
+      - FOLLOWER_MAX_RESTART_ATTEMPTS=100
+      - FOLLOWER_MAX_RESTART_ATTEMPTS=100
+      - FOLLOWER_MAX_RESTART_ATTEMPTS=100
+      - FILTER_ROUTER_STATE_DIR=/tmp/filter_router_state
     networks:
       - testing_net
     volumes:
       - ./app_config/config.ini:/config/config.ini:ro
+      - /var/run/docker.sock:/var/run/docker.sock
+      - ./filter_router_state/router-0:/tmp/filter_router_state
     depends_on:
       rabbitmq:
         condition: service_healthy
@@ -78,10 +101,33 @@ services:
       - LOG_LEVEL=INFO
       - CONFIG_PATH=/config/config.ini
       - FILTER_ROUTER_INDEX=1
+      - ELECTION_PORT=9201
+      - HEARTBEAT_INTERVAL_SECONDS=0.5
+      - HEARTBEAT_TIMEOUT_SECONDS=0.5
+      - HEARTBEAT_MAX_MISSES=3
+      - HEARTBEAT_STARTUP_GRACE_SECONDS=3.0
+      - HEARTBEAT_ELECTION_COOLDOWN_SECONDS=5.0
+      - HEARTBEAT_COOLDOWN_JITTER_SECONDS=0.2
+      - FOLLOWER_DOWN_TIMEOUT_SECONDS=6.0
+      - FOLLOWER_RESTART_COOLDOWN_SECONDS=20.0
+      - FOLLOWER_RECOVERY_GRACE_SECONDS=6.0
+      - FOLLOWER_MAX_RESTART_ATTEMPTS=100
+      - FOLLOWER_MAX_RESTART_ATTEMPTS=100
+      - FOLLOWER_DOWN_TIMEOUT_SECONDS=6.0
+      - FOLLOWER_RESTART_COOLDOWN_SECONDS=20.0
+      - FOLLOWER_RECOVERY_GRACE_SECONDS=6.0
+      - FOLLOWER_MAX_RESTART_ATTEMPTS=100
+      - FOLLOWER_MAX_RESTART_ATTEMPTS=100
+      - FOLLOWER_MAX_RESTART_ATTEMPTS=100
+      - FOLLOWER_MAX_RESTART_ATTEMPTS=100
+      - FOLLOWER_MAX_RESTART_ATTEMPTS=100
+      - FILTER_ROUTER_STATE_DIR=/tmp/filter_router_state
     networks:
       - testing_net
     volumes:
       - ./app_config/config.ini:/config/config.ini:ro
+      - /var/run/docker.sock:/var/run/docker.sock
+      - ./filter_router_state/router-1:/tmp/filter_router_state
     depends_on:
       rabbitmq:
         condition: service_healthy
@@ -97,10 +143,33 @@ services:
       - LOG_LEVEL=INFO
       - CONFIG_PATH=/config/config.ini
       - FILTER_ROUTER_INDEX=2
+      - ELECTION_PORT=9202
+      - HEARTBEAT_INTERVAL_SECONDS=0.5
+      - HEARTBEAT_TIMEOUT_SECONDS=0.5
+      - HEARTBEAT_MAX_MISSES=3
+      - HEARTBEAT_STARTUP_GRACE_SECONDS=3.0
+      - HEARTBEAT_ELECTION_COOLDOWN_SECONDS=5.0
+      - HEARTBEAT_COOLDOWN_JITTER_SECONDS=0.2
+      - FOLLOWER_DOWN_TIMEOUT_SECONDS=6.0
+      - FOLLOWER_RESTART_COOLDOWN_SECONDS=20.0
+      - FOLLOWER_RECOVERY_GRACE_SECONDS=6.0
+      - FOLLOWER_MAX_RESTART_ATTEMPTS=100
+      - FOLLOWER_MAX_RESTART_ATTEMPTS=100
+      - FOLLOWER_DOWN_TIMEOUT_SECONDS=6.0
+      - FOLLOWER_RESTART_COOLDOWN_SECONDS=20.0
+      - FOLLOWER_RECOVERY_GRACE_SECONDS=6.0
+      - FOLLOWER_MAX_RESTART_ATTEMPTS=100
+      - FOLLOWER_MAX_RESTART_ATTEMPTS=100
+      - FOLLOWER_MAX_RESTART_ATTEMPTS=100
+      - FOLLOWER_MAX_RESTART_ATTEMPTS=100
+      - FOLLOWER_MAX_RESTART_ATTEMPTS=100
+      - FILTER_ROUTER_STATE_DIR=/tmp/filter_router_state
     networks:
       - testing_net
     volumes:
       - ./app_config/config.ini:/config/config.ini:ro
+      - /var/run/docker.sock:/var/run/docker.sock
+      - ./filter_router_state/router-2:/tmp/filter_router_state
     depends_on:
       rabbitmq:
         condition: service_healthy
@@ -116,10 +185,33 @@ services:
       - LOG_LEVEL=INFO
       - CONFIG_PATH=/config/config.ini
       - FILTER_ROUTER_INDEX=3
+      - ELECTION_PORT=9203
+      - HEARTBEAT_INTERVAL_SECONDS=0.5
+      - HEARTBEAT_TIMEOUT_SECONDS=0.5
+      - HEARTBEAT_MAX_MISSES=3
+      - HEARTBEAT_STARTUP_GRACE_SECONDS=3.0
+      - HEARTBEAT_ELECTION_COOLDOWN_SECONDS=5.0
+      - HEARTBEAT_COOLDOWN_JITTER_SECONDS=0.2
+      - FOLLOWER_DOWN_TIMEOUT_SECONDS=6.0
+      - FOLLOWER_RESTART_COOLDOWN_SECONDS=20.0
+      - FOLLOWER_RECOVERY_GRACE_SECONDS=6.0
+      - FOLLOWER_MAX_RESTART_ATTEMPTS=100
+      - FOLLOWER_MAX_RESTART_ATTEMPTS=100
+      - FOLLOWER_DOWN_TIMEOUT_SECONDS=6.0
+      - FOLLOWER_RESTART_COOLDOWN_SECONDS=20.0
+      - FOLLOWER_RECOVERY_GRACE_SECONDS=6.0
+      - FOLLOWER_MAX_RESTART_ATTEMPTS=100
+      - FOLLOWER_MAX_RESTART_ATTEMPTS=100
+      - FOLLOWER_MAX_RESTART_ATTEMPTS=100
+      - FOLLOWER_MAX_RESTART_ATTEMPTS=100
+      - FOLLOWER_MAX_RESTART_ATTEMPTS=100
+      - FILTER_ROUTER_STATE_DIR=/tmp/filter_router_state
     networks:
       - testing_net
     volumes:
       - ./app_config/config.ini:/config/config.ini:ro
+      - /var/run/docker.sock:/var/run/docker.sock
+      - ./filter_router_state/router-3:/tmp/filter_router_state
     depends_on:
       rabbitmq:
         condition: service_healthy
@@ -135,10 +227,33 @@ services:
       - LOG_LEVEL=INFO
       - CONFIG_PATH=/config/config.ini
       - FILTER_ROUTER_INDEX=4
+      - ELECTION_PORT=9204
+      - HEARTBEAT_INTERVAL_SECONDS=0.5
+      - HEARTBEAT_TIMEOUT_SECONDS=0.5
+      - HEARTBEAT_MAX_MISSES=3
+      - HEARTBEAT_STARTUP_GRACE_SECONDS=3.0
+      - HEARTBEAT_ELECTION_COOLDOWN_SECONDS=5.0
+      - HEARTBEAT_COOLDOWN_JITTER_SECONDS=0.2
+      - FOLLOWER_DOWN_TIMEOUT_SECONDS=6.0
+      - FOLLOWER_RESTART_COOLDOWN_SECONDS=20.0
+      - FOLLOWER_RECOVERY_GRACE_SECONDS=6.0
+      - FOLLOWER_MAX_RESTART_ATTEMPTS=100
+      - FOLLOWER_MAX_RESTART_ATTEMPTS=100
+      - FOLLOWER_DOWN_TIMEOUT_SECONDS=6.0
+      - FOLLOWER_RESTART_COOLDOWN_SECONDS=20.0
+      - FOLLOWER_RECOVERY_GRACE_SECONDS=6.0
+      - FOLLOWER_MAX_RESTART_ATTEMPTS=100
+      - FOLLOWER_MAX_RESTART_ATTEMPTS=100
+      - FOLLOWER_MAX_RESTART_ATTEMPTS=100
+      - FOLLOWER_MAX_RESTART_ATTEMPTS=100
+      - FOLLOWER_MAX_RESTART_ATTEMPTS=100
+      - FILTER_ROUTER_STATE_DIR=/tmp/filter_router_state
     networks:
       - testing_net
     volumes:
       - ./app_config/config.ini:/config/config.ini:ro
+      - /var/run/docker.sock:/var/run/docker.sock
+      - ./filter_router_state/router-4:/tmp/filter_router_state
     depends_on:
       rabbitmq:
         condition: service_healthy
@@ -154,48 +269,33 @@ services:
       - LOG_LEVEL=INFO
       - CONFIG_PATH=/config/config.ini
       - FILTER_ROUTER_INDEX=5
+      - ELECTION_PORT=9205
+      - HEARTBEAT_INTERVAL_SECONDS=0.5
+      - HEARTBEAT_TIMEOUT_SECONDS=0.5
+      - HEARTBEAT_MAX_MISSES=3
+      - HEARTBEAT_STARTUP_GRACE_SECONDS=3.0
+      - HEARTBEAT_ELECTION_COOLDOWN_SECONDS=5.0
+      - HEARTBEAT_COOLDOWN_JITTER_SECONDS=0.2
+      - FOLLOWER_DOWN_TIMEOUT_SECONDS=6.0
+      - FOLLOWER_RESTART_COOLDOWN_SECONDS=20.0
+      - FOLLOWER_RECOVERY_GRACE_SECONDS=6.0
+      - FOLLOWER_MAX_RESTART_ATTEMPTS=100
+      - FOLLOWER_MAX_RESTART_ATTEMPTS=100
+      - FOLLOWER_DOWN_TIMEOUT_SECONDS=6.0
+      - FOLLOWER_RESTART_COOLDOWN_SECONDS=20.0
+      - FOLLOWER_RECOVERY_GRACE_SECONDS=6.0
+      - FOLLOWER_MAX_RESTART_ATTEMPTS=100
+      - FOLLOWER_MAX_RESTART_ATTEMPTS=100
+      - FOLLOWER_MAX_RESTART_ATTEMPTS=100
+      - FOLLOWER_MAX_RESTART_ATTEMPTS=100
+      - FOLLOWER_MAX_RESTART_ATTEMPTS=100
+      - FILTER_ROUTER_STATE_DIR=/tmp/filter_router_state
     networks:
       - testing_net
     volumes:
       - ./app_config/config.ini:/config/config.ini:ro
-    depends_on:
-      rabbitmq:
-        condition: service_healthy
-
-  filter-router-6:
-    container_name: filter-router-6
-    build:
-      context: .
-      dockerfile: filter/Dockerfile.router
-    environment:
-      - PYTHONUNBUFFERED=1
-      - RABBITMQ_HOST=rabbitmq
-      - LOG_LEVEL=INFO
-      - CONFIG_PATH=/config/config.ini
-      - FILTER_ROUTER_INDEX=6
-    networks:
-      - testing_net
-    volumes:
-      - ./app_config/config.ini:/config/config.ini:ro
-    depends_on:
-      rabbitmq:
-        condition: service_healthy
-
-  filter-router-7:
-    container_name: filter-router-7
-    build:
-      context: .
-      dockerfile: filter/Dockerfile.router
-    environment:
-      - PYTHONUNBUFFERED=1
-      - RABBITMQ_HOST=rabbitmq
-      - LOG_LEVEL=INFO
-      - CONFIG_PATH=/config/config.ini
-      - FILTER_ROUTER_INDEX=7
-    networks:
-      - testing_net
-    volumes:
-      - ./app_config/config.ini:/config/config.ini:ro
+      - /var/run/docker.sock:/var/run/docker.sock
+      - ./filter_router_state/router-5:/tmp/filter_router_state
     depends_on:
       rabbitmq:
         condition: service_healthy
@@ -210,10 +310,22 @@ services:
       - RABBITMQ_HOST=rabbitmq
       - LOG_LEVEL=INFO
       - CONFIG_PATH=/config/config.ini
+      - FILTER_WORKER_INDEX=0
+      - ELECTION_PORT=9100
+      - HEARTBEAT_INTERVAL_SECONDS=0.5
+      - HEARTBEAT_TIMEOUT_SECONDS=0.5
+      - HEARTBEAT_MAX_MISSES=3
+      - HEARTBEAT_STARTUP_GRACE_SECONDS=3.0
+      - HEARTBEAT_ELECTION_COOLDOWN_SECONDS=5.0
+      - HEARTBEAT_COOLDOWN_JITTER_SECONDS=0.2
+      - FOLLOWER_DOWN_TIMEOUT_SECONDS=6.0
+      - FOLLOWER_RESTART_COOLDOWN_SECONDS=20.0
+      - FOLLOWER_RECOVERY_GRACE_SECONDS=6.0
     networks:
       - testing_net
     volumes:
       - ./app_config/config.ini:/config/config.ini:ro
+      - /var/run/docker.sock:/var/run/docker.sock
     depends_on:
       rabbitmq:
         condition: service_healthy
@@ -230,10 +342,22 @@ services:
       - RABBITMQ_HOST=rabbitmq
       - LOG_LEVEL=INFO
       - CONFIG_PATH=/config/config.ini
+      - FILTER_WORKER_INDEX=1
+      - ELECTION_PORT=9101
+      - HEARTBEAT_INTERVAL_SECONDS=0.5
+      - HEARTBEAT_TIMEOUT_SECONDS=0.5
+      - HEARTBEAT_MAX_MISSES=3
+      - HEARTBEAT_STARTUP_GRACE_SECONDS=3.0
+      - HEARTBEAT_ELECTION_COOLDOWN_SECONDS=5.0
+      - HEARTBEAT_COOLDOWN_JITTER_SECONDS=0.2
+      - FOLLOWER_DOWN_TIMEOUT_SECONDS=6.0
+      - FOLLOWER_RESTART_COOLDOWN_SECONDS=20.0
+      - FOLLOWER_RECOVERY_GRACE_SECONDS=6.0
     networks:
       - testing_net
     volumes:
       - ./app_config/config.ini:/config/config.ini:ro
+      - /var/run/docker.sock:/var/run/docker.sock
     depends_on:
       rabbitmq:
         condition: service_healthy
@@ -250,10 +374,22 @@ services:
       - RABBITMQ_HOST=rabbitmq
       - LOG_LEVEL=INFO
       - CONFIG_PATH=/config/config.ini
+      - FILTER_WORKER_INDEX=2
+      - ELECTION_PORT=9102
+      - HEARTBEAT_INTERVAL_SECONDS=0.5
+      - HEARTBEAT_TIMEOUT_SECONDS=0.5
+      - HEARTBEAT_MAX_MISSES=3
+      - HEARTBEAT_STARTUP_GRACE_SECONDS=3.0
+      - HEARTBEAT_ELECTION_COOLDOWN_SECONDS=5.0
+      - HEARTBEAT_COOLDOWN_JITTER_SECONDS=0.2
+      - FOLLOWER_DOWN_TIMEOUT_SECONDS=6.0
+      - FOLLOWER_RESTART_COOLDOWN_SECONDS=20.0
+      - FOLLOWER_RECOVERY_GRACE_SECONDS=6.0
     networks:
       - testing_net
     volumes:
       - ./app_config/config.ini:/config/config.ini:ro
+      - /var/run/docker.sock:/var/run/docker.sock
     depends_on:
       rabbitmq:
         condition: service_healthy
@@ -270,10 +406,150 @@ services:
       - RABBITMQ_HOST=rabbitmq
       - LOG_LEVEL=INFO
       - CONFIG_PATH=/config/config.ini
+      - FILTER_WORKER_INDEX=3
+      - ELECTION_PORT=9103
+      - HEARTBEAT_INTERVAL_SECONDS=0.5
+      - HEARTBEAT_TIMEOUT_SECONDS=0.5
+      - HEARTBEAT_MAX_MISSES=3
+      - HEARTBEAT_STARTUP_GRACE_SECONDS=3.0
+      - HEARTBEAT_ELECTION_COOLDOWN_SECONDS=5.0
+      - HEARTBEAT_COOLDOWN_JITTER_SECONDS=0.2
+      - FOLLOWER_DOWN_TIMEOUT_SECONDS=6.0
+      - FOLLOWER_RESTART_COOLDOWN_SECONDS=20.0
+      - FOLLOWER_RECOVERY_GRACE_SECONDS=6.0
     networks:
       - testing_net
     volumes:
       - ./app_config/config.ini:/config/config.ini:ro
+      - /var/run/docker.sock:/var/run/docker.sock
+    depends_on:
+      rabbitmq:
+        condition: service_healthy
+      filter-router-0:
+        condition: service_started
+
+  filter-worker-4:
+    container_name: filter-worker-4
+    build:
+      context: .
+      dockerfile: filter/Dockerfile.worker
+    environment:
+      - PYTHONUNBUFFERED=1
+      - RABBITMQ_HOST=rabbitmq
+      - LOG_LEVEL=INFO
+      - CONFIG_PATH=/config/config.ini
+      - FILTER_WORKER_INDEX=4
+      - ELECTION_PORT=9104
+      - HEARTBEAT_INTERVAL_SECONDS=0.5
+      - HEARTBEAT_TIMEOUT_SECONDS=0.5
+      - HEARTBEAT_MAX_MISSES=3
+      - HEARTBEAT_STARTUP_GRACE_SECONDS=3.0
+      - HEARTBEAT_ELECTION_COOLDOWN_SECONDS=5.0
+      - HEARTBEAT_COOLDOWN_JITTER_SECONDS=0.2
+      - FOLLOWER_DOWN_TIMEOUT_SECONDS=6.0
+      - FOLLOWER_RESTART_COOLDOWN_SECONDS=20.0
+      - FOLLOWER_RECOVERY_GRACE_SECONDS=6.0
+    networks:
+      - testing_net
+    volumes:
+      - ./app_config/config.ini:/config/config.ini:ro
+      - /var/run/docker.sock:/var/run/docker.sock
+    depends_on:
+      rabbitmq:
+        condition: service_healthy
+      filter-router-0:
+        condition: service_started
+
+  filter-worker-5:
+    container_name: filter-worker-5
+    build:
+      context: .
+      dockerfile: filter/Dockerfile.worker
+    environment:
+      - PYTHONUNBUFFERED=1
+      - RABBITMQ_HOST=rabbitmq
+      - LOG_LEVEL=INFO
+      - CONFIG_PATH=/config/config.ini
+      - FILTER_WORKER_INDEX=5
+      - ELECTION_PORT=9105
+      - HEARTBEAT_INTERVAL_SECONDS=0.5
+      - HEARTBEAT_TIMEOUT_SECONDS=0.5
+      - HEARTBEAT_MAX_MISSES=3
+      - HEARTBEAT_STARTUP_GRACE_SECONDS=3.0
+      - HEARTBEAT_ELECTION_COOLDOWN_SECONDS=5.0
+      - HEARTBEAT_COOLDOWN_JITTER_SECONDS=0.2
+      - FOLLOWER_DOWN_TIMEOUT_SECONDS=6.0
+      - FOLLOWER_RESTART_COOLDOWN_SECONDS=20.0
+      - FOLLOWER_RECOVERY_GRACE_SECONDS=6.0
+    networks:
+      - testing_net
+    volumes:
+      - ./app_config/config.ini:/config/config.ini:ro
+      - /var/run/docker.sock:/var/run/docker.sock
+    depends_on:
+      rabbitmq:
+        condition: service_healthy
+      filter-router-0:
+        condition: service_started
+
+  filter-worker-6:
+    container_name: filter-worker-6
+    build:
+      context: .
+      dockerfile: filter/Dockerfile.worker
+    environment:
+      - PYTHONUNBUFFERED=1
+      - RABBITMQ_HOST=rabbitmq
+      - LOG_LEVEL=INFO
+      - CONFIG_PATH=/config/config.ini
+      - FILTER_WORKER_INDEX=6
+      - ELECTION_PORT=9106
+      - HEARTBEAT_INTERVAL_SECONDS=0.5
+      - HEARTBEAT_TIMEOUT_SECONDS=0.5
+      - HEARTBEAT_MAX_MISSES=3
+      - HEARTBEAT_STARTUP_GRACE_SECONDS=3.0
+      - HEARTBEAT_ELECTION_COOLDOWN_SECONDS=5.0
+      - HEARTBEAT_COOLDOWN_JITTER_SECONDS=0.2
+      - FOLLOWER_DOWN_TIMEOUT_SECONDS=6.0
+      - FOLLOWER_RESTART_COOLDOWN_SECONDS=20.0
+      - FOLLOWER_RECOVERY_GRACE_SECONDS=6.0
+    networks:
+      - testing_net
+    volumes:
+      - ./app_config/config.ini:/config/config.ini:ro
+      - /var/run/docker.sock:/var/run/docker.sock
+    depends_on:
+      rabbitmq:
+        condition: service_healthy
+      filter-router-0:
+        condition: service_started
+
+  filter-worker-7:
+    container_name: filter-worker-7
+    build:
+      context: .
+      dockerfile: filter/Dockerfile.worker
+    environment:
+      - PYTHONUNBUFFERED=1
+      - RABBITMQ_HOST=rabbitmq
+      - LOG_LEVEL=INFO
+      - CONFIG_PATH=/config/config.ini
+      - FILTER_WORKER_INDEX=7
+      - ELECTION_PORT=9107
+      - HEARTBEAT_INTERVAL_SECONDS=0.5
+      - HEARTBEAT_TIMEOUT_SECONDS=0.5
+      - HEARTBEAT_MAX_MISSES=3
+      - HEARTBEAT_STARTUP_GRACE_SECONDS=3.0
+      - HEARTBEAT_ELECTION_COOLDOWN_SECONDS=5.0
+      - HEARTBEAT_COOLDOWN_JITTER_SECONDS=0.2
+      - FOLLOWER_DOWN_TIMEOUT_SECONDS=6.0
+      - FOLLOWER_RESTART_COOLDOWN_SECONDS=20.0
+      - FOLLOWER_RECOVERY_GRACE_SECONDS=6.0
+    networks:
+      - testing_net
+    volumes:
+      - ./app_config/config.ini:/config/config.ini:ro
+      - /var/run/docker.sock:/var/run/docker.sock
     depends_on:
       rabbitmq:
         condition: service_healthy
@@ -290,10 +566,21 @@ services:
       - CONFIG_PATH=/config/config.ini
       - LOG_LEVEL=INFO
       - AGGREGATOR_ID=0
+      - ELECTION_PORT=9300
+      - HEARTBEAT_INTERVAL_SECONDS=0.5
+      - HEARTBEAT_TIMEOUT_SECONDS=0.5
+      - HEARTBEAT_MAX_MISSES=3
+      - HEARTBEAT_STARTUP_GRACE_SECONDS=3.0
+      - HEARTBEAT_ELECTION_COOLDOWN_SECONDS=5.0
+      - HEARTBEAT_COOLDOWN_JITTER_SECONDS=0.2
+      - FOLLOWER_DOWN_TIMEOUT_SECONDS=6.0
+      - FOLLOWER_RESTART_COOLDOWN_SECONDS=20.0
+      - FOLLOWER_RECOVERY_GRACE_SECONDS=6.0
     networks:
       - testing_net
     volumes:
       - ./app_config/config.ini:/config/config.ini:ro
+      - /var/run/docker.sock:/var/run/docker.sock
     depends_on:
       rabbitmq:
         condition: service_healthy
@@ -310,10 +597,21 @@ services:
       - CONFIG_PATH=/config/config.ini
       - LOG_LEVEL=INFO
       - AGGREGATOR_ID=1
+      - ELECTION_PORT=9301
+      - HEARTBEAT_INTERVAL_SECONDS=0.5
+      - HEARTBEAT_TIMEOUT_SECONDS=0.5
+      - HEARTBEAT_MAX_MISSES=3
+      - HEARTBEAT_STARTUP_GRACE_SECONDS=3.0
+      - HEARTBEAT_ELECTION_COOLDOWN_SECONDS=5.0
+      - HEARTBEAT_COOLDOWN_JITTER_SECONDS=0.2
+      - FOLLOWER_DOWN_TIMEOUT_SECONDS=6.0
+      - FOLLOWER_RESTART_COOLDOWN_SECONDS=20.0
+      - FOLLOWER_RECOVERY_GRACE_SECONDS=6.0
     networks:
       - testing_net
     volumes:
       - ./app_config/config.ini:/config/config.ini:ro
+      - /var/run/docker.sock:/var/run/docker.sock
     depends_on:
       rabbitmq:
         condition: service_healthy
@@ -330,10 +628,21 @@ services:
       - CONFIG_PATH=/config/config.ini
       - LOG_LEVEL=INFO
       - AGGREGATOR_ID=2
+      - ELECTION_PORT=9302
+      - HEARTBEAT_INTERVAL_SECONDS=0.5
+      - HEARTBEAT_TIMEOUT_SECONDS=0.5
+      - HEARTBEAT_MAX_MISSES=3
+      - HEARTBEAT_STARTUP_GRACE_SECONDS=3.0
+      - HEARTBEAT_ELECTION_COOLDOWN_SECONDS=5.0
+      - HEARTBEAT_COOLDOWN_JITTER_SECONDS=0.2
+      - FOLLOWER_DOWN_TIMEOUT_SECONDS=6.0
+      - FOLLOWER_RESTART_COOLDOWN_SECONDS=20.0
+      - FOLLOWER_RECOVERY_GRACE_SECONDS=6.0
     networks:
       - testing_net
     volumes:
       - ./app_config/config.ini:/config/config.ini:ro
+      - /var/run/docker.sock:/var/run/docker.sock
     depends_on:
       rabbitmq:
         condition: service_healthy
@@ -350,10 +659,21 @@ services:
       - CONFIG_PATH=/config/config.ini
       - LOG_LEVEL=INFO
       - AGGREGATOR_ID=3
+      - ELECTION_PORT=9303
+      - HEARTBEAT_INTERVAL_SECONDS=0.5
+      - HEARTBEAT_TIMEOUT_SECONDS=0.5
+      - HEARTBEAT_MAX_MISSES=3
+      - HEARTBEAT_STARTUP_GRACE_SECONDS=3.0
+      - HEARTBEAT_ELECTION_COOLDOWN_SECONDS=5.0
+      - HEARTBEAT_COOLDOWN_JITTER_SECONDS=0.2
+      - FOLLOWER_DOWN_TIMEOUT_SECONDS=6.0
+      - FOLLOWER_RESTART_COOLDOWN_SECONDS=20.0
+      - FOLLOWER_RECOVERY_GRACE_SECONDS=6.0
     networks:
       - testing_net
     volumes:
       - ./app_config/config.ini:/config/config.ini:ro
+      - /var/run/docker.sock:/var/run/docker.sock
     depends_on:
       rabbitmq:
         condition: service_healthy
@@ -370,10 +690,21 @@ services:
       - LOG_LEVEL=INFO
       - CONFIG_PATH=/config/config.ini
       - JOINER_ROUTER_INDEX=0
+      - ELECTION_PORT=9500
+      - HEARTBEAT_INTERVAL_SECONDS=0.5
+      - HEARTBEAT_TIMEOUT_SECONDS=0.5
+      - HEARTBEAT_MAX_MISSES=3
+      - HEARTBEAT_STARTUP_GRACE_SECONDS=3.0
+      - HEARTBEAT_ELECTION_COOLDOWN_SECONDS=5.0
+      - HEARTBEAT_COOLDOWN_JITTER_SECONDS=0.2
+      - FOLLOWER_DOWN_TIMEOUT_SECONDS=6.0
+      - FOLLOWER_RESTART_COOLDOWN_SECONDS=20.0
+      - FOLLOWER_RECOVERY_GRACE_SECONDS=6.0
     networks:
       - testing_net
     volumes:
       - ./app_config/config.ini:/config/config.ini:ro
+      - /var/run/docker.sock:/var/run/docker.sock
     depends_on:
       rabbitmq:
         condition: service_healthy
@@ -390,10 +721,21 @@ services:
       - LOG_LEVEL=INFO
       - CONFIG_PATH=/config/config.ini
       - JOINER_ROUTER_INDEX=1
+      - ELECTION_PORT=9501
+      - HEARTBEAT_INTERVAL_SECONDS=0.5
+      - HEARTBEAT_TIMEOUT_SECONDS=0.5
+      - HEARTBEAT_MAX_MISSES=3
+      - HEARTBEAT_STARTUP_GRACE_SECONDS=3.0
+      - HEARTBEAT_ELECTION_COOLDOWN_SECONDS=5.0
+      - HEARTBEAT_COOLDOWN_JITTER_SECONDS=0.2
+      - FOLLOWER_DOWN_TIMEOUT_SECONDS=6.0
+      - FOLLOWER_RESTART_COOLDOWN_SECONDS=20.0
+      - FOLLOWER_RECOVERY_GRACE_SECONDS=6.0
     networks:
       - testing_net
     volumes:
       - ./app_config/config.ini:/config/config.ini:ro
+      - /var/run/docker.sock:/var/run/docker.sock
     depends_on:
       rabbitmq:
         condition: service_healthy
@@ -410,30 +752,21 @@ services:
       - LOG_LEVEL=INFO
       - CONFIG_PATH=/config/config.ini
       - JOINER_ROUTER_INDEX=2
+      - ELECTION_PORT=9502
+      - HEARTBEAT_INTERVAL_SECONDS=0.5
+      - HEARTBEAT_TIMEOUT_SECONDS=0.5
+      - HEARTBEAT_MAX_MISSES=3
+      - HEARTBEAT_STARTUP_GRACE_SECONDS=3.0
+      - HEARTBEAT_ELECTION_COOLDOWN_SECONDS=5.0
+      - HEARTBEAT_COOLDOWN_JITTER_SECONDS=0.2
+      - FOLLOWER_DOWN_TIMEOUT_SECONDS=6.0
+      - FOLLOWER_RESTART_COOLDOWN_SECONDS=20.0
+      - FOLLOWER_RECOVERY_GRACE_SECONDS=6.0
     networks:
       - testing_net
     volumes:
       - ./app_config/config.ini:/config/config.ini:ro
-    depends_on:
-      rabbitmq:
-        condition: service_healthy
-      aggregator-0:
-        condition: service_started
-
-  joiner-router-3:
-    container_name: joiner-router-3
-    build:
-      context: .
-      dockerfile: joiner/Dockerfile.router
-    environment:
-      - PYTHONUNBUFFERED=1
-      - LOG_LEVEL=INFO
-      - CONFIG_PATH=/config/config.ini
-      - JOINER_ROUTER_INDEX=3
-    networks:
-      - testing_net
-    volumes:
-      - ./app_config/config.ini:/config/config.ini:ro
+      - /var/run/docker.sock:/var/run/docker.sock
     depends_on:
       rabbitmq:
         condition: service_healthy
@@ -450,10 +783,22 @@ services:
       - LOG_LEVEL=INFO
       - JOINER_WORKER_INDEX=0
       - CONFIG_PATH=/config/config.ini
+      - ELECTION_PORT=9400
+      - HEARTBEAT_INTERVAL_SECONDS=0.5
+      - HEARTBEAT_TIMEOUT_SECONDS=0.5
+      - HEARTBEAT_MAX_MISSES=3
+      - HEARTBEAT_STARTUP_GRACE_SECONDS=3.0
+      - HEARTBEAT_ELECTION_COOLDOWN_SECONDS=5.0
+      - HEARTBEAT_COOLDOWN_JITTER_SECONDS=0.2
+      - FOLLOWER_DOWN_TIMEOUT_SECONDS=6.0
+      - FOLLOWER_RESTART_COOLDOWN_SECONDS=20.0
+      - FOLLOWER_RECOVERY_GRACE_SECONDS=6.0
     networks:
       - testing_net
     volumes:
       - ./app_config/config.ini:/config/config.ini:ro
+      - /var/run/docker.sock:/var/run/docker.sock
+      - ./joiner_state/worker-0:/tmp/joiner_state
     depends_on:
       rabbitmq:
         condition: service_healthy
@@ -470,10 +815,22 @@ services:
       - LOG_LEVEL=INFO
       - JOINER_WORKER_INDEX=1
       - CONFIG_PATH=/config/config.ini
+      - ELECTION_PORT=9401
+      - HEARTBEAT_INTERVAL_SECONDS=0.5
+      - HEARTBEAT_TIMEOUT_SECONDS=0.5
+      - HEARTBEAT_MAX_MISSES=3
+      - HEARTBEAT_STARTUP_GRACE_SECONDS=3.0
+      - HEARTBEAT_ELECTION_COOLDOWN_SECONDS=5.0
+      - HEARTBEAT_COOLDOWN_JITTER_SECONDS=0.2
+      - FOLLOWER_DOWN_TIMEOUT_SECONDS=6.0
+      - FOLLOWER_RESTART_COOLDOWN_SECONDS=20.0
+      - FOLLOWER_RECOVERY_GRACE_SECONDS=6.0
     networks:
       - testing_net
     volumes:
       - ./app_config/config.ini:/config/config.ini:ro
+      - /var/run/docker.sock:/var/run/docker.sock
+      - ./joiner_state/worker-1:/tmp/joiner_state
     depends_on:
       rabbitmq:
         condition: service_healthy
@@ -490,10 +847,22 @@ services:
       - LOG_LEVEL=INFO
       - JOINER_WORKER_INDEX=2
       - CONFIG_PATH=/config/config.ini
+      - ELECTION_PORT=9402
+      - HEARTBEAT_INTERVAL_SECONDS=0.5
+      - HEARTBEAT_TIMEOUT_SECONDS=0.5
+      - HEARTBEAT_MAX_MISSES=3
+      - HEARTBEAT_STARTUP_GRACE_SECONDS=3.0
+      - HEARTBEAT_ELECTION_COOLDOWN_SECONDS=5.0
+      - HEARTBEAT_COOLDOWN_JITTER_SECONDS=0.2
+      - FOLLOWER_DOWN_TIMEOUT_SECONDS=6.0
+      - FOLLOWER_RESTART_COOLDOWN_SECONDS=20.0
+      - FOLLOWER_RECOVERY_GRACE_SECONDS=6.0
     networks:
       - testing_net
     volumes:
       - ./app_config/config.ini:/config/config.ini:ro
+      - /var/run/docker.sock:/var/run/docker.sock
+      - ./joiner_state/worker-2:/tmp/joiner_state
     depends_on:
       rabbitmq:
         condition: service_healthy
@@ -510,50 +879,22 @@ services:
       - LOG_LEVEL=INFO
       - JOINER_WORKER_INDEX=3
       - CONFIG_PATH=/config/config.ini
+      - ELECTION_PORT=9403
+      - HEARTBEAT_INTERVAL_SECONDS=0.5
+      - HEARTBEAT_TIMEOUT_SECONDS=0.5
+      - HEARTBEAT_MAX_MISSES=3
+      - HEARTBEAT_STARTUP_GRACE_SECONDS=3.0
+      - HEARTBEAT_ELECTION_COOLDOWN_SECONDS=5.0
+      - HEARTBEAT_COOLDOWN_JITTER_SECONDS=0.2
+      - FOLLOWER_DOWN_TIMEOUT_SECONDS=6.0
+      - FOLLOWER_RESTART_COOLDOWN_SECONDS=20.0
+      - FOLLOWER_RECOVERY_GRACE_SECONDS=6.0
     networks:
       - testing_net
     volumes:
       - ./app_config/config.ini:/config/config.ini:ro
-    depends_on:
-      rabbitmq:
-        condition: service_healthy
-      joiner-router-0:
-        condition: service_started
-
-  joiner-worker-4:
-    container_name: joiner-worker-4
-    build:
-      context: .
-      dockerfile: joiner/Dockerfile.worker
-    environment:
-      - PYTHONUNBUFFERED=1
-      - LOG_LEVEL=INFO
-      - JOINER_WORKER_INDEX=4
-      - CONFIG_PATH=/config/config.ini
-    networks:
-      - testing_net
-    volumes:
-      - ./app_config/config.ini:/config/config.ini:ro
-    depends_on:
-      rabbitmq:
-        condition: service_healthy
-      joiner-router-0:
-        condition: service_started
-
-  joiner-worker-5:
-    container_name: joiner-worker-5
-    build:
-      context: .
-      dockerfile: joiner/Dockerfile.worker
-    environment:
-      - PYTHONUNBUFFERED=1
-      - LOG_LEVEL=INFO
-      - JOINER_WORKER_INDEX=5
-      - CONFIG_PATH=/config/config.ini
-    networks:
-      - testing_net
-    volumes:
-      - ./app_config/config.ini:/config/config.ini:ro
+      - /var/run/docker.sock:/var/run/docker.sock
+      - ./joiner_state/worker-3:/tmp/joiner_state
     depends_on:
       rabbitmq:
         condition: service_healthy
@@ -571,10 +912,20 @@ services:
       - LOG_LEVEL=INFO
       - INPUT_QUEUE=results.controller.in
       - OUTPUT_QUEUES=finisher_input_queue_0,finisher_input_queue_1,finisher_input_queue_2,finisher_input_queue_3
+      - RESULTS_ROUTER_INDEX=0
+      - ELECTION_PORT=9700
+      - HEARTBEAT_INTERVAL_SECONDS=0.5
+      - HEARTBEAT_TIMEOUT_SECONDS=0.5
+      - HEARTBEAT_MAX_MISSES=3
+      - HEARTBEAT_STARTUP_GRACE_SECONDS=3.0
+      - HEARTBEAT_ELECTION_COOLDOWN_SECONDS=5.0
+      - HEARTBEAT_COOLDOWN_JITTER_SECONDS=0.2
     networks:
       - testing_net
     volumes:
       - ./results-finisher:/app/results-finisher:ro
+      - ./app_config/config.ini:/config/config.ini:ro
+      - /var/run/docker.sock:/var/run/docker.sock
     depends_on:
       rabbitmq:
         condition: service_healthy
@@ -590,10 +941,20 @@ services:
       - LOG_LEVEL=INFO
       - INPUT_QUEUE=results.controller.in
       - OUTPUT_QUEUES=finisher_input_queue_0,finisher_input_queue_1,finisher_input_queue_2,finisher_input_queue_3
+      - RESULTS_ROUTER_INDEX=1
+      - ELECTION_PORT=9701
+      - HEARTBEAT_INTERVAL_SECONDS=0.5
+      - HEARTBEAT_TIMEOUT_SECONDS=0.5
+      - HEARTBEAT_MAX_MISSES=3
+      - HEARTBEAT_STARTUP_GRACE_SECONDS=3.0
+      - HEARTBEAT_ELECTION_COOLDOWN_SECONDS=5.0
+      - HEARTBEAT_COOLDOWN_JITTER_SECONDS=0.2
     networks:
       - testing_net
     volumes:
       - ./results-finisher:/app/results-finisher:ro
+      - ./app_config/config.ini:/config/config.ini:ro
+      - /var/run/docker.sock:/var/run/docker.sock
     depends_on:
       rabbitmq:
         condition: service_healthy
@@ -609,10 +970,20 @@ services:
       - LOG_LEVEL=INFO
       - INPUT_QUEUE=results.controller.in
       - OUTPUT_QUEUES=finisher_input_queue_0,finisher_input_queue_1,finisher_input_queue_2,finisher_input_queue_3
+      - RESULTS_ROUTER_INDEX=2
+      - ELECTION_PORT=9702
+      - HEARTBEAT_INTERVAL_SECONDS=0.5
+      - HEARTBEAT_TIMEOUT_SECONDS=0.5
+      - HEARTBEAT_MAX_MISSES=3
+      - HEARTBEAT_STARTUP_GRACE_SECONDS=3.0
+      - HEARTBEAT_ELECTION_COOLDOWN_SECONDS=5.0
+      - HEARTBEAT_COOLDOWN_JITTER_SECONDS=0.2
     networks:
       - testing_net
     volumes:
       - ./results-finisher:/app/results-finisher:ro
+      - ./app_config/config.ini:/config/config.ini:ro
+      - /var/run/docker.sock:/var/run/docker.sock
     depends_on:
       rabbitmq:
         condition: service_healthy
@@ -628,10 +999,20 @@ services:
       - LOG_LEVEL=INFO
       - INPUT_QUEUE=results.controller.in
       - OUTPUT_QUEUES=finisher_input_queue_0,finisher_input_queue_1,finisher_input_queue_2,finisher_input_queue_3
+      - RESULTS_ROUTER_INDEX=3
+      - ELECTION_PORT=9703
+      - HEARTBEAT_INTERVAL_SECONDS=0.5
+      - HEARTBEAT_TIMEOUT_SECONDS=0.5
+      - HEARTBEAT_MAX_MISSES=3
+      - HEARTBEAT_STARTUP_GRACE_SECONDS=3.0
+      - HEARTBEAT_ELECTION_COOLDOWN_SECONDS=5.0
+      - HEARTBEAT_COOLDOWN_JITTER_SECONDS=0.2
     networks:
       - testing_net
     volumes:
       - ./results-finisher:/app/results-finisher:ro
+      - ./app_config/config.ini:/config/config.ini:ro
+      - /var/run/docker.sock:/var/run/docker.sock
     depends_on:
       rabbitmq:
         condition: service_healthy
@@ -648,10 +1029,24 @@ services:
       - STRATEGY_MODE=append_only  # Can be 'append_only' or 'incremental'
       - INPUT_QUEUE=finisher_input_queue_0
       - OUTPUT_QUEUE=orchestrator_results_queue
+      - RESULTS_FINISHER_INDEX=0
+      - ELECTION_PORT=9600
+      - HEARTBEAT_INTERVAL_SECONDS=0.5
+      - HEARTBEAT_TIMEOUT_SECONDS=0.5
+      - HEARTBEAT_MAX_MISSES=3
+      - HEARTBEAT_STARTUP_GRACE_SECONDS=3.0
+      - HEARTBEAT_ELECTION_COOLDOWN_SECONDS=5.0
+      - HEARTBEAT_COOLDOWN_JITTER_SECONDS=0.2
+      - FOLLOWER_DOWN_TIMEOUT_SECONDS=6.0
+      - FOLLOWER_RESTART_COOLDOWN_SECONDS=20.0
+      - FOLLOWER_RECOVERY_GRACE_SECONDS=6.0
     networks:
       - testing_net
     volumes:
       - ./results-finisher:/app/results-finisher:ro
+      - ./app_config/config.ini:/config/config.ini:ro
+      - /var/run/docker.sock:/var/run/docker.sock
+      - ./results_finisher_state/finisher-0:/tmp/results_finisher_state
     depends_on:
       rabbitmq:
         condition: service_healthy
@@ -670,10 +1065,24 @@ services:
       - STRATEGY_MODE=append_only  # Can be 'append_only' or 'incremental'
       - INPUT_QUEUE=finisher_input_queue_1
       - OUTPUT_QUEUE=orchestrator_results_queue
+      - RESULTS_FINISHER_INDEX=1
+      - ELECTION_PORT=9601
+      - HEARTBEAT_INTERVAL_SECONDS=0.5
+      - HEARTBEAT_TIMEOUT_SECONDS=0.5
+      - HEARTBEAT_MAX_MISSES=3
+      - HEARTBEAT_STARTUP_GRACE_SECONDS=3.0
+      - HEARTBEAT_ELECTION_COOLDOWN_SECONDS=5.0
+      - HEARTBEAT_COOLDOWN_JITTER_SECONDS=0.2
+      - FOLLOWER_DOWN_TIMEOUT_SECONDS=6.0
+      - FOLLOWER_RESTART_COOLDOWN_SECONDS=20.0
+      - FOLLOWER_RECOVERY_GRACE_SECONDS=6.0
     networks:
       - testing_net
     volumes:
       - ./results-finisher:/app/results-finisher:ro
+      - ./app_config/config.ini:/config/config.ini:ro
+      - /var/run/docker.sock:/var/run/docker.sock
+      - ./results_finisher_state/finisher-1:/tmp/results_finisher_state
     depends_on:
       rabbitmq:
         condition: service_healthy
@@ -692,10 +1101,24 @@ services:
       - STRATEGY_MODE=append_only  # Can be 'append_only' or 'incremental'
       - INPUT_QUEUE=finisher_input_queue_2
       - OUTPUT_QUEUE=orchestrator_results_queue
+      - RESULTS_FINISHER_INDEX=2
+      - ELECTION_PORT=9602
+      - HEARTBEAT_INTERVAL_SECONDS=0.5
+      - HEARTBEAT_TIMEOUT_SECONDS=0.5
+      - HEARTBEAT_MAX_MISSES=3
+      - HEARTBEAT_STARTUP_GRACE_SECONDS=3.0
+      - HEARTBEAT_ELECTION_COOLDOWN_SECONDS=5.0
+      - HEARTBEAT_COOLDOWN_JITTER_SECONDS=0.2
+      - FOLLOWER_DOWN_TIMEOUT_SECONDS=6.0
+      - FOLLOWER_RESTART_COOLDOWN_SECONDS=20.0
+      - FOLLOWER_RECOVERY_GRACE_SECONDS=6.0
     networks:
       - testing_net
     volumes:
       - ./results-finisher:/app/results-finisher:ro
+      - ./app_config/config.ini:/config/config.ini:ro
+      - /var/run/docker.sock:/var/run/docker.sock
+      - ./results_finisher_state/finisher-2:/tmp/results_finisher_state
     depends_on:
       rabbitmq:
         condition: service_healthy
@@ -714,10 +1137,24 @@ services:
       - STRATEGY_MODE=append_only  # Can be 'append_only' or 'incremental'
       - INPUT_QUEUE=finisher_input_queue_3
       - OUTPUT_QUEUE=orchestrator_results_queue
+      - RESULTS_FINISHER_INDEX=3
+      - ELECTION_PORT=9603
+      - HEARTBEAT_INTERVAL_SECONDS=0.5
+      - HEARTBEAT_TIMEOUT_SECONDS=0.5
+      - HEARTBEAT_MAX_MISSES=3
+      - HEARTBEAT_STARTUP_GRACE_SECONDS=3.0
+      - HEARTBEAT_ELECTION_COOLDOWN_SECONDS=5.0
+      - HEARTBEAT_COOLDOWN_JITTER_SECONDS=0.2
+      - FOLLOWER_DOWN_TIMEOUT_SECONDS=6.0
+      - FOLLOWER_RESTART_COOLDOWN_SECONDS=20.0
+      - FOLLOWER_RECOVERY_GRACE_SECONDS=6.0
     networks:
       - testing_net
     volumes:
       - ./results-finisher:/app/results-finisher:ro
+      - ./app_config/config.ini:/config/config.ini:ro
+      - /var/run/docker.sock:/var/run/docker.sock
+      - ./results_finisher_state/finisher-3:/tmp/results_finisher_state
     depends_on:
       rabbitmq:
         condition: service_healthy

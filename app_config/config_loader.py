@@ -56,6 +56,17 @@ class RoutersCfg:
     results: int
 
 
+@dataclass(frozen=True)
+class ElectionPortsCfg:
+    filter_workers: int
+    filter_routers: int
+    aggregators: int
+    joiner_workers: int
+    joiner_routers: int
+    results_workers: int
+    results_routers: int
+
+
 class ConfigError(Exception):
     pass
 
@@ -138,6 +149,25 @@ class Config:
         r_results = cp.getint("results", "routers", fallback=1)
         self.routers = RoutersCfg(r_filters, r_joiners, r_results)
 
+        # Joiner worker configuration
+        self.joiner_write_buffer_size = cp.getint("joiners", "write_buffer_size", fallback=100)
+
+        def _get_port(key: str, default: int) -> int:
+            if cp.has_section("election_ports"):
+                section = cp["election_ports"]
+                return section.getint(key, fallback=default)
+            return default
+
+        self.election_ports = ElectionPortsCfg(
+            filter_workers=_get_port("filter_workers", 9100),
+            filter_routers=_get_port("filter_routers", 9200),
+            aggregators=_get_port("aggregators", 9300),
+            joiner_workers=_get_port("joiner_workers", 9400),
+            joiner_routers=_get_port("joiner_routers", 9500),
+            results_workers=_get_port("results_workers", 9600),
+            results_routers=_get_port("results_routers", 9700),
+        )
+  
     def joiner_partitions(self, table: str) -> int:
         """Shards de salida del Joiner Router para TABLE (consumen Joiners)."""
         t = str(table).strip()

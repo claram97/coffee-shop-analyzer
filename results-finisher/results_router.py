@@ -1,11 +1,18 @@
 import logging
 import os
 import signal
+import sys
 import threading
-from typing import Dict, List
+from typing import Dict
 
-from middleware.middleware_client import MessageMiddlewareQueue, MessageMiddlewareDisconnectedError
-from protocol import DataBatch, ProtocolError, Opcodes
+from google.protobuf.message import DecodeError
+
+from middleware.middleware_client import (
+    MessageMiddlewareDisconnectedError,
+    MessageMiddlewareQueue,
+)
+from protocol2.envelope_pb2 import Envelope, MessageType
+from leader_election import ElectionCoordinator, HeartbeatClient, FollowerRecoveryManager
 
 logging.basicConfig(
     level=logging.INFO,
@@ -39,6 +46,12 @@ class ResultsRouter:
         self.output_queue_names = sorted(output_clients.keys())
         self.finisher_count = len(self.output_queue_names)
 
+        # Deduplication removed - with multiple router instances, per-instance dedup
+        # doesn't provide global deduplication. Let results finisher handle dedup.
+        # from collections import defaultdict
+        # from protocol2.table_data_pb2 import TableName
+        # self._received_batches: Dict[tuple[int, str, tuple], set[int]] = defaultdict(set)
+
         logger.info(
             f"Router initialized. Distributing to {self.finisher_count} finisher queues: "
             f"{self.output_queue_names}"
@@ -50,43 +63,137 @@ class ResultsRouter:
         target_index = hash_value % self.finisher_count
         return self.output_queue_names[target_index]
 
-    def _process_message(self, body: bytes):
+    def _broadcast_cleanup_to_finishers(self, raw: bytes):
+        """
+        Broadcast client cleanup message to all results finisher queues.
+        """
+        try:
+            envelope = Envelope()
+            envelope.ParseFromString(raw)
+            cleanup_msg = envelope.clean_up
+            client_id = cleanup_msg.client_id if cleanup_msg.client_id else ""
+            
+            logger.info(
+                "action: broadcast_cleanup_to_finishers | result: broadcasting | client_id: %s | finishers: %d",
+                client_id,
+                len(self.output_clients),
+            )
+            
+            for queue_name, client in self.output_clients.items():
+                try:
+                    client.send(raw)
+                    logger.debug(
+                        "Forwarded CLEAN_UP_MESSAGE to results finisher queue=%s client_id=%s",
+                        queue_name,
+                        client_id,
+                    )
+                except Exception as e:
+                    logger.error(
+                        "Failed to send cleanup message to finisher queue=%s: %s",
+                        queue_name,
+                        e,
+                    )
+                    raise  # Re-raise to cause NACK and redelivery
+        except Exception:
+            logger.exception("Failed to broadcast cleanup to finishers")
+            raise
+
+    # Deduplication method removed - router no longer deduplicates
+    # def _is_duplicate_batch(self, data_batch) -> bool:
+    #     """
+    #     Check if a batch is a duplicate. Returns True if duplicate, False otherwise.
+    #     Tracks batches by (table, client_id, query_ids_tuple, batch_number).
+    #     In-memory only - no persistence (loss on restart is acceptable).
+    #     """
+    #     table = data_batch.payload.name
+    #     client_id = data_batch.client_id
+    #     batch_number = data_batch.payload.batch_number
+    #     query_ids_tuple = tuple(sorted(data_batch.query_ids))
+    #     
+    #     dedup_key = (table, client_id, query_ids_tuple)
+    #     
+    #     if batch_number in self._received_batches[dedup_key]:
+    #         logger.warning(
+    #             "DUPLICATE batch detected and discarded in results router: table=%s bn=%s client=%s queries=%s",
+    #             table, batch_number, client_id, list(data_batch.query_ids)
+    #         )
+    #         return True
+    #     
+    #     # Mark batch as received
+    #     self._received_batches[dedup_key].add(batch_number)
+    #     logger.debug(
+    #         "Batch marked as received: table=%s bn=%s client=%s queries=%s",
+    #         table, batch_number, client_id, list(data_batch.query_ids)
+    #     )
+    #     return False
+
+    def _process_message(self, body: bytes, channel=None, delivery_tag=None, redelivered=False):
         """
         Parses, validates, and routes a single incoming message.
-        This is the core callback for the message consumer.
+        Uses manual ACKs so messages are requeued on failures.
         """
+        manual_ack = channel is not None and delivery_tag is not None
+
         if not body:
             logger.warning("Received an empty message body. Discarding.")
-            return
+            if manual_ack:
+                channel.basic_ack(delivery_tag=delivery_tag)
+            return False
 
         try:
             # The primary responsibility is to route DataBatch messages.
-            if body[0] != Opcodes.DATA_BATCH:
-                logger.warning(f"Received message with unsupported opcode {body[0]}. Discarding.")
-                return
+            envelope = Envelope()
+            envelope.ParseFromString(body)
 
-            message = DataBatch.deserialize_from_bytes(body)
-            
+            if envelope.type == MessageType.CLEAN_UP_MESSAGE:
+                # Broadcast cleanup message to all results finishers
+                self._broadcast_cleanup_to_finishers(body)
+                if manual_ack:
+                    channel.basic_ack(delivery_tag=delivery_tag)
+                return False
+
+            if envelope.type != MessageType.DATA_BATCH:
+                logger.warning(
+                    "Received envelope with unsupported type %s. Discarding.",
+                    envelope.type,
+                )
+                if manual_ack:
+                    channel.basic_ack(delivery_tag=delivery_tag)
+                return False
+
+            message = envelope.data_batch
+
+            # Deduplication removed - router now passes all batches through
+            # Results finisher will handle deduplication
+            # if self._is_duplicate_batch(message):
+            #     return  # Discard duplicate
+
             if not message.query_ids:
                 logger.warning("DataBatch contains no query_ids for routing. Discarding.")
-                return
-            
+                if manual_ack:
+                    channel.basic_ack(delivery_tag=delivery_tag)
+                return False
+
             # Route based on the first query_id in the list.
-            query_id = str(message.query_ids[0])
+            query_id = str(int(message.query_ids[0]))
             client_id = getattr(message, "client_id", None)
             if not client_id:
                 logger.warning(
                     "DataBatch missing client_id for routing. Query: %s. Discarding.",
                     query_id,
                 )
-                return
+                if manual_ack:
+                    channel.basic_ack(delivery_tag=delivery_tag)
+                return False
 
             routing_key = f"{client_id}:{query_id}"
-            batch_number = message.batch_number
+            batch_number = getattr(message.payload, "batch_number", 0)
             target_queue_name = self._get_target_queue_name(routing_key)
             target_client = self.output_clients[target_queue_name]
             
             target_client.send(body)
+            if manual_ack:
+                channel.basic_ack(delivery_tag=delivery_tag)
             logger.debug(
                 "Routed DATA_BATCH %s for query '%s' (client %s) to queue '%s'",
                 batch_number,
@@ -94,11 +201,21 @@ class ResultsRouter:
                 client_id,
                 target_queue_name,
             )
+            return False
 
-        except ProtocolError as e:
-            logger.error(f"Failed to parse message due to protocol error, discarding. Error: {e}. Body prefix: {body[:60]!r}")
+        except DecodeError as e:
+            logger.error(
+                "Failed to parse envelope due to protobuf error, discarding. Error: %s. Body prefix: %r",
+                e,
+                body[:60],
+            )
+            if manual_ack:
+                channel.basic_ack(delivery_tag=delivery_tag)
         except Exception as e:
             logger.critical(f"An unexpected error occurred in the message handler: {e}", exc_info=True)
+            if manual_ack:
+                channel.basic_nack(delivery_tag=delivery_tag, requeue=True)
+        return False
 
     def start(self):
         """Starts the message consumer in a dedicated thread."""
@@ -127,6 +244,13 @@ def main():
         if not output_queues:
             raise ValueError("OUTPUT_QUEUES environment variable must be configured with at least one queue.")
 
+        router_index_env = os.getenv("RESULTS_ROUTER_INDEX")
+        if router_index_env is not None:
+            router_index = int(router_index_env)
+        else:
+            router_index = hash(os.getenv("HOSTNAME", "results-router")) % 100
+        election_port = int(os.getenv("ELECTION_PORT", 9700 + router_index))
+
         logger.info("--- ResultsRouter Service ---")
         logger.info(f"Connecting to RabbitMQ at: {rabbitmq_host}")
         logger.info(f"Consuming from input queue: {input_queue}")
@@ -139,6 +263,101 @@ def main():
             name: MessageMiddlewareQueue(host=rabbitmq_host, queue_name=name)
             for name in output_queues
         }
+
+        heartbeat_interval = float(os.getenv("HEARTBEAT_INTERVAL_SECONDS", "1.0"))
+        heartbeat_timeout = float(os.getenv("HEARTBEAT_TIMEOUT_SECONDS", "1.0"))
+        heartbeat_max_misses = int(os.getenv("HEARTBEAT_MAX_MISSES", "3"))
+        heartbeat_startup_grace = float(os.getenv("HEARTBEAT_STARTUP_GRACE_SECONDS", "5.0"))
+        heartbeat_election_cooldown = float(os.getenv("HEARTBEAT_ELECTION_COOLDOWN_SECONDS", "10.0"))
+        heartbeat_cooldown_jitter = float(os.getenv("HEARTBEAT_COOLDOWN_JITTER_SECONDS", "0.5"))
+        follower_down_timeout = float(os.getenv("FOLLOWER_DOWN_TIMEOUT_SECONDS", "10.0"))
+        follower_restart_cooldown = float(os.getenv("FOLLOWER_RESTART_COOLDOWN_SECONDS", "30.0"))
+        follower_recovery_grace = float(os.getenv("FOLLOWER_RECOVERY_GRACE_SECONDS", "6.0"))
+        follower_max_restart_attempts = int(os.getenv("FOLLOWER_MAX_RESTART_ATTEMPTS", "100"))
+
+        election_coordinator = None
+        heartbeat_client = None
+        follower_recovery = None
+
+        def handle_leader_change(new_leader_id: int, am_i_leader: bool):
+            logger.info(
+                "Leader update | new_leader=%s | am_i_leader=%s",
+                new_leader_id,
+                am_i_leader,
+            )
+            if heartbeat_client:
+                if am_i_leader:
+                    heartbeat_client.deactivate()
+                else:
+                    heartbeat_client.activate()
+            if follower_recovery:
+                follower_recovery.set_leader_state(am_i_leader)
+        try:
+            from app_config.config_loader import Config
+            cfg_path = os.getenv("CONFIG_PATH", "/config/config.ini")
+            cfg = Config(cfg_path)
+            total_results_routers = cfg.routers.results
+            router_port_base = cfg.election_ports.results_routers
+            election_port = int(os.getenv("ELECTION_PORT", router_port_base + router_index))
+            
+            # Build list of all results router nodes in the cluster
+            all_nodes = [
+                (i, f"results-router-{i}", router_port_base + i)
+                for i in range(total_results_routers)
+            ]
+            
+            logger.info(f"Initializing election coordinator for results-router-{router_index} on port {election_port}")
+            logger.info(f"Cluster nodes: {all_nodes}")
+            
+            election_coordinator = ElectionCoordinator(
+                my_id=router_index,
+                my_host="0.0.0.0",
+                my_port=election_port,
+                all_nodes=all_nodes,
+                on_leader_change=handle_leader_change,
+                election_timeout=5.0
+            )
+
+            heartbeat_client = HeartbeatClient(
+                coordinator=election_coordinator,
+                my_id=router_index,
+                all_nodes=all_nodes,
+                heartbeat_interval=heartbeat_interval,
+                heartbeat_timeout=heartbeat_timeout,
+                max_missed_heartbeats=heartbeat_max_misses,
+                startup_grace=heartbeat_startup_grace,
+                election_cooldown=heartbeat_election_cooldown,
+                cooldown_jitter=heartbeat_cooldown_jitter,
+            )
+
+            node_container_map = {node_id: name for node_id, name, _ in all_nodes}
+            follower_recovery = FollowerRecoveryManager(
+                coordinator=election_coordinator,
+                my_id=router_index,
+                node_container_map=node_container_map,
+                check_interval=max(1.0, heartbeat_interval),
+                down_timeout=follower_down_timeout,
+                restart_cooldown=follower_restart_cooldown,
+                startup_grace=follower_recovery_grace,
+                max_restart_attempts=follower_max_restart_attempts,
+            )
+            
+            election_coordinator.start()
+            logger.info(f"Election listener started on port {election_port}")
+            
+            heartbeat_client.start()
+            heartbeat_client.activate()
+            follower_recovery.start()
+            
+        except Exception as e:
+            logger.error(f"Failed to initialize election coordinator: {e}", exc_info=True)
+            election_coordinator = None
+            heartbeat_client = None
+            follower_recovery = None
+
+        if not (election_coordinator and heartbeat_client and follower_recovery):
+            logger.critical("Leader election components failed to start, aborting.")
+            sys.exit(1)
 
         # Setup and run the router
         router = ResultsRouter(input_client=input_client, output_clients=output_clients)
@@ -158,6 +377,20 @@ def main():
         shutdown_event.wait()
         
         # Perform cleanup
+        logger.info("Cleaning up resources...")
+        
+        if election_coordinator:
+            election_coordinator.graceful_resign()
+            logger.info("Stopping election coordinator...")
+            election_coordinator.stop()
+        
+        if follower_recovery:
+            follower_recovery.stop()
+        
+        if heartbeat_client:
+            logger.info("Stopping heartbeat client...")
+            heartbeat_client.stop()
+        
         router.stop()
         logger.info("Shutdown complete.")
 

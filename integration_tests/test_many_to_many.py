@@ -36,6 +36,7 @@ POLL_INTERVAL_SECONDS = 5
 def wait_for_results() -> bool:
     """
     Waits for all result files to exist and be non-empty.
+    Checks in client_runs subdirectories since client writes there.
 
     Returns:
         bool: True if results are ready, False if timed out.
@@ -43,26 +44,44 @@ def wait_for_results() -> bool:
     print(f"\nWaiting for results... (Timeout: {WAIT_TIMEOUT_SECONDS}s)")
     start_time = time.time()
 
+    client_runs_dir = RESULTS_DIR / "client_runs"
+
     while time.time() - start_time < WAIT_TIMEOUT_SECONDS:
         try:
+            # Find the client directory (should be a UUID)
+            if not client_runs_dir.exists():
+                print(
+                    f"  ({int(time.time() - start_time)}s elapsed) client_runs directory doesn't exist yet..."
+                )
+                time.sleep(POLL_INTERVAL_SECONDS)
+                continue
+
+            client_dirs = [d for d in client_runs_dir.iterdir() if d.is_dir()]
+            if not client_dirs:
+                print(
+                    f"  ({int(time.time() - start_time)}s elapsed) No client directory found yet..."
+                )
+                time.sleep(POLL_INTERVAL_SECONDS)
+                continue
+
+            # Use the first (should be only) client directory
+            client_dir = client_dirs[0]
+            print(f"  Found client directory: {client_dir.name}")
+
             ready_files = 0
-            for file_path in RESULT_FILES:
+            for query in QUERIES:
+                file_path = client_dir / f"{query}_results.json"
                 if file_path.exists() and file_path.stat().st_size > 0:
                     ready_files += 1
-                else:
-                    # Optional: print which file is not ready
-                    # print(f"  - Waiting for: {file_path.name}")
-                    pass
 
-            if ready_files == len(RESULT_FILES):
-                print("All result files are available.")
+            if ready_files == len(QUERIES):
+                print(f"All result files are available in {client_dir.name}.")
                 return True
         except FileNotFoundError:
-            # This can happen if the directory isn't created yet
             pass
 
         print(
-            f"  ({int(time.time() - start_time)}s elapsed) Not all results ready, checking again in {POLL_INTERVAL_SECONDS}s..."
+            f"  ({int(time.time() - start_time)}s elapsed) {ready_files}/{len(QUERIES)} results ready, checking again in {POLL_INTERVAL_SECONDS}s..."
         )
         time.sleep(POLL_INTERVAL_SECONDS)
 
@@ -79,8 +98,21 @@ def check_results() -> dict[str, str]:
     """
     print("\nChecking results...")
     test_outcomes = {}
+
+    # Find the client directory
+    client_runs_dir = RESULTS_DIR / "client_runs"
+    client_dirs = [d for d in client_runs_dir.iterdir() if d.is_dir()]
+    if not client_dirs:
+        print("ERROR: No client directory found!")
+        for query in QUERIES:
+            test_outcomes[query] = "FAIL (No client directory)"
+        return test_outcomes
+
+    client_dir = client_dirs[0]
+    print(f"Checking results in: {client_dir.name}")
+
     for i, query in enumerate(QUERIES):
-        result_file = RESULT_FILES[i]
+        result_file = client_dir / f"{query}_results.json"
         expected_file = EXPECTED_FILES[i]
 
         try:
@@ -105,16 +137,35 @@ def check_results() -> dict[str, str]:
 
 
 def clear_results_files():
-    """Truncates all result files to zero bytes."""
+    """Clears the client_runs directory using Docker to handle root-owned files."""
     print("\nClearing result files...")
-    for file_path in RESULT_FILES:
-        try:
-            if file_path.exists():
-                with open(file_path, "w") as f:
-                    pass
-                print(f"  - Cleared {file_path.name}")
-        except IOError as e:
-            print(f"  - Warning: Could not clear {file_path.name}. Reason: {e}")
+    client_runs_dir = RESULTS_DIR / "client_runs"
+    try:
+        if client_runs_dir.exists() and list(client_runs_dir.iterdir()):
+            import subprocess
+            
+            # Use a temporary docker container to remove root-owned files
+            # This avoids needing sudo and works because docker can access root files
+            print(f"  - Using Docker to clear {client_runs_dir} (contains root-owned files)")
+            subprocess.run(
+                [
+                    "docker", "run", "--rm",
+                    "-v", f"{client_runs_dir.absolute()}:/cleanup",
+                    "busybox",
+                    "sh", "-c", "rm -rf /cleanup/* /cleanup/.*"
+                ],
+                check=True,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL
+            )
+            print(f"  - Cleared {client_runs_dir}")
+        
+        # Ensure directory exists
+        client_runs_dir.mkdir(parents=True, exist_ok=True)
+        print(f"  - Cleaned up {client_runs_dir}")
+    except Exception as e:
+        print(f"  - Warning: Could not clear {client_runs_dir}. Reason: {e}")
+        print(f"  - You can manually remove with: docker run --rm -v $(pwd)/integration_tests/client_runs:/cleanup busybox sh -c 'rm -rf /cleanup/*'")
 
 
 def run_test():
@@ -128,7 +179,7 @@ def run_test():
             topology=Topology.MANY_TO_MANY,
             project_root=PROJECT_ROOT,
         )
-        time.sleep(5)
+        time.sleep(10)
         initiate_client.start_docker_services(project_root=PROJECT_ROOT)
         services_started = True
         print("All services initiated.")

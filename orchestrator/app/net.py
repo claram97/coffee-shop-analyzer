@@ -1,4 +1,3 @@
-# orchestrator/app/net.py
 """
 Refactored Orchestrator using modular architecture.
 """
@@ -7,20 +6,23 @@ import logging
 import multiprocessing as mp
 import os
 import queue
-import time
 import threading
+import time
 from typing import Optional
 
 from app.results_consumer import ResultsConsumer
 from common.network import MessageHandler, ResponseHandler, ServerManager
-from common.processing import create_filtered_data_batch, message_logger
 
 from middleware.middleware_client import MessageMiddlewareExchange
+from protocol2.envelope_pb2 import Envelope, MessageType
+from protocol2.eof_message_pb2 import EOFMessage as PB_EOFMessage
+from protocol2.clean_up_message_pb2 import CleanUpMessage
 from protocol.constants import Opcodes
 from protocol.messages import Finished
 
 from .worker_pool import processing_worker_main
-
+        
+DEFAULT_TIMEOUT = 5.0
 
 class Orchestrator:
     """Orchestrator using modular network and processing components."""
@@ -64,11 +66,8 @@ class Orchestrator:
         self._queue_maxsize = max(1, int(os.getenv("ORCH_PROCESS_QUEUE_SIZE", "128")))
         worker_default = os.getenv("ORCH_PROCESS_COUNT") or str(self._num_routers)
         self._worker_count = max(1, int(worker_default))
-        # Queue put timeout (seconds). If not configured, use a sensible
-        # default so the orchestrator doesn't retry indefinitely by default.
         queue_timeout_raw = os.getenv("ORCH_PROCESS_QUEUE_TIMEOUT")
-        default_timeout = 5.0
-        self._queue_put_timeout = default_timeout
+        self._queue_put_timeout = DEFAULT_TIMEOUT
         if queue_timeout_raw:
             try:
                 self._queue_put_timeout = float(queue_timeout_raw)
@@ -76,8 +75,9 @@ class Orchestrator:
                 logging.warning(
                     "action: queue_timeout_parse | result: fail | value: %s | using_default: %s",
                     queue_timeout_raw,
-                    default_timeout,
+                    self._queue_put_timeout,
                 )
+        
         # Use one multiprocessing.Queue per worker so we can route messages
         # to individual workers (one-queue-per-worker). Queues are created
         # when starting worker processes.
@@ -85,6 +85,7 @@ class Orchestrator:
         # Round-robin pointer and lock for thread-safe assignment
         self._rr_lock = threading.Lock()
         self._next_worker_idx = 0
+
         self._workers: list[mp.Process] = []
 
         self._setup_message_processors()
@@ -108,6 +109,9 @@ class Orchestrator:
         with self._client_states_lock:
             if client_id and client_id in self._client_states:
                 self._client_states.pop(client_id)
+        # Broadcast client_cleanup to all filter router replicas when client disconnects
+        if client_id:
+            self._broadcast_client_cleanup(client_id)
 
     def _publisher_for_rk(self, rk: str) -> MessageMiddlewareExchange:
         pub = self._publishers.get(rk)
@@ -126,15 +130,34 @@ class Orchestrator:
             self._publishers[rk] = pub
         return pub
 
-    def _send_to_filter_router_exchange(self, raw: bytes, batch_number: Optional[int]):
-        pid = 0 if batch_number is None else int(batch_number) % self._num_routers
-        rk = self._fr_rk_fmt.format(pid=pid)
-        self._publisher_for_rk(rk).send(raw)
-
     def _broadcast_eof_to_all(self, raw: bytes):
         for pid in range(self._num_routers):
             rk = self._fr_rk_fmt.format(pid=pid)
             self._publisher_for_rk(rk).send(raw)
+
+    def _broadcast_client_cleanup(self, client_id: str):
+        """Broadcast client_cleanup message to all filter router replicas."""
+        if not client_id:
+            return
+        
+        cleanup_msg = CleanUpMessage()
+        cleanup_msg.client_id = client_id
+        
+        env = Envelope()
+        env.type = MessageType.CLEAN_UP_MESSAGE
+        env.clean_up.CopyFrom(cleanup_msg)
+        
+        payload = env.SerializeToString()
+        
+        logging.info(
+            "action: broadcast_client_cleanup | result: broadcasting | client_id: %s | replicas: %d",
+            client_id,
+            self._num_routers,
+        )
+        
+        for pid in range(self._num_routers):
+            rk = self._fr_rk_fmt.format(pid=pid)
+            self._publisher_for_rk(rk).send(payload)
 
     def _setup_message_processors(self):
         """Setup message processors for different message types."""
@@ -218,6 +241,8 @@ class Orchestrator:
                 self._client_states.pop(client_id)
                 with self._client_ids_lock:
                     self._client_ids.pop(sock, None)
+                # Broadcast client_cleanup to all filter router replicas
+                self._broadcast_client_cleanup(client_id)
 
     def _cleanup_all_clients(self):
         """Clean up all remaining clients on shutdown."""
@@ -250,6 +275,7 @@ class Orchestrator:
         )
 
         for worker_idx in range(self._worker_count):
+            
             q = self._mp_context.Queue(maxsize=self._queue_maxsize)
             self._task_queues.append(q)
 
@@ -363,29 +389,8 @@ class Orchestrator:
         except Exception as e:
             return ResponseHandler.handle_processing_error(msg, client_sock, e)
 
-    def _process_filtered_batch(self, msg, status_text: str):
-        """Filtra, empaqueta y publica el DataBatch al exchange del Filter Router."""
-        try:
-            client_id = getattr(msg, "client_id", None)
-            if not client_id:
-                raise RuntimeError("missing client_id for filtered batch")
-
-            filtered_batch = create_filtered_data_batch(msg, client_id)
-            batch_bytes = filtered_batch.to_bytes()
-
-            bn = int(getattr(filtered_batch, "batch_number", 0) or 0)
-            self._send_to_filter_router_exchange(batch_bytes, bn)
-
-        except Exception as filter_error:
-            logging.error(
-                "action: batch_filter | result: fail | batch_number: %d | opcode: %d | error: %s",
-                getattr(msg, "batch_number", 0),
-                msg.opcode,
-                str(filter_error),
-            )
-
     def _process_eof_message(self, msg, client_sock) -> bool:
-        """Reenvía EOFs al exchange del Filter Router (broadcast a todas las réplicas)."""
+        """Reenvía EOFs al exchange del Filter Router (broadcast a todas las réplicas) usando protocol2 Envelope."""
         try:
             table_type = msg.get_table_type()
             logging.info(
@@ -394,10 +399,6 @@ class Orchestrator:
                 getattr(msg, "batch_number", 0),
             )
 
-            # Enqueue a copy of the EOF message into each worker's queue.
-            # If any worker queue is full, retry until the configured timeout
-            # elapses. Use an overall deadline so the total waiting time is
-            # bounded.
             if not getattr(self, "_task_queues", None):
                 raise RuntimeError("no task queues available for workers")
 
@@ -405,15 +406,40 @@ class Orchestrator:
             overall_deadline = None if self._queue_put_timeout is None else now + self._queue_put_timeout
             client_id = getattr(msg, "client_id", None)
 
-            message_bytes = msg.to_bytes()
+            pb_eof = PB_EOFMessage()
+            if client_id:
+                pb_eof.client_id = client_id
+
+            # Map textual table_type to proto enum if possible
+            try:
+                from protocol2.table_data_pb2 import TableName as PBTableName
+
+                table_name = (table_type or "").lower()
+                mapping = {
+                    "menu_items": PBTableName.MENU_ITEMS,
+                    "stores": PBTableName.STORES,
+                    "transaction_items": PBTableName.TRANSACTION_ITEMS,
+                    "transactions": PBTableName.TRANSACTIONS,
+                    "users": PBTableName.USERS,
+                }
+                table_enum = mapping.get(table_name)
+                if table_enum is not None:
+                    pb_eof.table = table_enum
+            except Exception:
+                logging.error("Failed to map table_type to proto enum")
+                pass
+
+            env = Envelope()
+            env.type = MessageType.EOF_MESSAGE
+            env.eof.CopyFrom(pb_eof)
+
+            payload = env.SerializeToString()
+
             for idx, q in enumerate(self._task_queues):
                 enqueued = False
                 while True:
                     try:
-                        # enqueue a marker with the raw bytes to avoid pickling
-                        # issues with message objects (EOFMessage may contain
-                        # lambdas/locals that aren't picklable).
-                        q.put(("__eof__", message_bytes, client_id), block=False)
+                        q.put(("__eof__", payload, client_id), block=False)
                         enqueued = True
                         logging.info(
                             "action: eof_enqueue | result: success | worker_queue: %d | table_type: %s | batch_number: %d",
@@ -431,17 +457,16 @@ class Orchestrator:
                                 getattr(msg, "batch_number", 0),
                             )
                             raise
-                        # short sleep before retrying
                         time.sleep(0.1)
 
                 if not enqueued:
-                    # should not reach here because we either enqueued or raised
                     raise queue.Full()
 
             logging.info(
-                "action: eof_enqueued_all | result: success | table_type: %s | replicas: %d",
+                "action: eof_enqueued_all | result: success | table_type: %s | replicas: %d | bytes_length: %d",
                 table_type,
                 len(self._task_queues),
+                len(payload),
             )
 
             ResponseHandler.send_success(client_sock)
@@ -476,4 +501,3 @@ class MockFilterRouterQueue:
             "action: mock_queue_send | result: success | message_size: %d bytes",
             len(message_bytes),
         )
-

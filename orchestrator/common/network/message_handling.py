@@ -7,7 +7,10 @@ import logging
 import os
 from typing import Any, Dict, Optional
 
-from common.processing import create_filtered_data_batch
+from common.processing import (
+    create_filtered_data_batch,
+    create_filtered_data_batch_protocol2,
+)
 
 from middleware.middleware_client import MessageMiddlewareExchange
 from protocol.constants import Opcodes
@@ -53,7 +56,9 @@ class MessageHandler:
             and msg.opcode != Opcodes.BATCH_RECV_FAIL
         )
 
-    def handle_message(self, msg: Any, client_sock: Any, client_id: Optional[str] = None) -> bool:
+    def old_handle_message(
+        self, msg: Any, client_sock: Any, client_id: Optional[str] = None
+    ) -> bool:
         # 1) Fast-path: tablas livianas → Filter Router 0 por exchange
         effective_client_id = client_id or getattr(msg, "client_id", None)
         if msg.opcode in (Opcodes.NEW_MENU_ITEMS, Opcodes.NEW_STORES):
@@ -82,7 +87,9 @@ class MessageHandler:
 
         # 2) Camino normal (procesadores registrados)
         if msg.opcode in self.message_processors:
-            logging.debug("mensaje con opcode %d está en message_processors", msg.opcode)
+            logging.debug(
+                "mensaje con opcode %d está en message_processors", msg.opcode
+            )
             return self.message_processors[msg.opcode](msg, client_sock)
 
         # 3) Fallback por defecto (logs + ACK)
@@ -94,6 +101,72 @@ class MessageHandler:
 
         logging.warning(
             "action=handle_message result=unknown_opcode opcode=%d", msg.opcode
+        )
+        return True
+
+    def handle_message(
+        self, msg: Any, client_sock: Any, client_id: Optional[str] = None
+    ) -> bool:
+        """
+        Protocol2-aware variant of handle_message.
+
+        Behaves like `handle_message` but when forwarding light tables it will
+        call `create_filtered_data_batch_protocol2` (which returns a protobuf
+        `Envelope`), serialize it with `SerializeToString()` and send the
+        resulting bytes to the Filter Router exchange. For other message paths
+        the behavior mirrors the legacy `handle_message` (processors and
+        fallback to `_handle_data_message`).
+        """
+        effective_client_id = client_id or getattr(msg, "client_id", None)
+
+        # 1) Fast-path: tablas livianas → Filter Router 0 por exchange (protocol2)
+        if msg.opcode in (Opcodes.NEW_MENU_ITEMS, Opcodes.NEW_STORES):
+            try:
+                if not effective_client_id:
+                    raise RuntimeError("client_id required for light data path")
+
+                env = create_filtered_data_batch_protocol2(msg, effective_client_id)
+                # env is a protobuf Envelope; serialize to bytes for transport
+                raw = env.SerializeToString()
+                # Attempt to log a batch_number if present in the payload
+                bn = 0
+                try:
+                    bn = getattr(env, "data_batch", env).payload.batch_number
+                except Exception:
+                    # keep bn as 0 if structure differs
+                    bn = 0
+
+                logging.info(
+                    "action=orch_forward_light_proto table=%s bn=%d bytes=%d rk=%s",
+                    env.data_batch.payload.name,
+                    bn,
+                    len(raw),
+                    self._rk_fr0,
+                )
+                self._fr_pub_ex.send(raw)
+                self.send_success_response(client_sock)
+            except Exception:
+                logging.exception("forward_light_proto_failed")
+                self.send_failure_response(client_sock)
+            return True
+
+        # 2) Camino normal (procesadores registrados)
+        if msg.opcode in self.message_processors:
+            logging.debug(
+                "mensaje con opcode %d está en message_processors", msg.opcode
+            )
+            return self.message_processors[msg.opcode](msg, client_sock)
+
+        # 3) Fallback por defecto (logs + ACK)
+        if self.is_data_message(msg):
+            return self._handle_data_message(msg, client_sock)
+        elif msg.opcode == Opcodes.FINISHED:
+            logging.info("action: client_finished | result: received")
+            return True
+
+        logging.warning(
+            "action=handle_message_protocol2 result=unknown_opcode opcode=%d",
+            msg.opcode,
         )
         return True
 

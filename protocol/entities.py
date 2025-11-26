@@ -13,7 +13,7 @@ class RawMenuItems:
 
     def __init__(
         self,
-        product_id: str,
+        item_id: str,
         name: str,
         price: str,
         category: str,
@@ -25,7 +25,7 @@ class RawMenuItems:
         Initializes a RawMenuItems instance.
 
         Args:
-            product_id: The unique identifier for the product.
+            item_id: The unique identifier for the product.
             name: The name of the menu item.
             price: The price of the item.
             category: The category the item belongs to.
@@ -33,7 +33,7 @@ class RawMenuItems:
             available_from: The date from which the item is available.
             available_to: The date until which the item is available.
         """
-        self.product_id = product_id
+        self.item_id = item_id
         self.name = name
         self.price = price
         self.category = category
@@ -181,7 +181,7 @@ class RawTransactionStore:
         final_amount: str,
         created_at: str,
         user_id: str,
-        **kwargs
+        **kwargs,
     ):
         self.transaction_id = transaction_id
         self.store_id = store_id
@@ -202,7 +202,7 @@ class RawTransactionItemMenuItem:
         quantity: str,
         subtotal: str,
         created_at: str,
-        **kwargs
+        **kwargs,
     ):
         self.transaction_id = transaction_id
         self.item_name = item_name
@@ -210,7 +210,7 @@ class RawTransactionItemMenuItem:
         self.quantity = "0" if quantity is None or quantity == "" else quantity
         self.subtotal = subtotal
         self.created_at = created_at
-        
+
     def __str__(self):
         """String representation for debugging"""
         return f"RawTransactionItemMenuItem(id={self.transaction_id}, name={self.item_name}, quantity={self.quantity}, subtotal={self.subtotal})"
@@ -227,7 +227,7 @@ class RawTransactionStoreUser:
         user_id: str,
         birthdate: str,
         created_at: str,
-        **kwargs
+        **kwargs,
     ):
         self.transaction_id = transaction_id
         self.store_id = store_id
@@ -238,6 +238,7 @@ class RawTransactionStoreUser:
 
 
 # --- Query Result Entities ---
+
 
 class ResultFilteredTransaction:
     """Represents a filtered transaction for Query 1 result."""
@@ -250,7 +251,9 @@ class ResultFilteredTransaction:
 class ResultProductMetrics:
     """Represents a product metric entry for Query 2 result."""
 
-    def __init__(self, month: str, name: str, quantity: str = None, revenue: str = None):
+    def __init__(
+        self, month: str, name: str, quantity: str = None, revenue: str = None
+    ):
         self.month = month
         self.name = name
         if quantity is not None:
@@ -286,7 +289,12 @@ class ResultTopCustomer:
 class ResultError:
     """Represents an error result for any query."""
 
-    def __init__(self, query_id: str, error_code: str = "EXECUTION_ERROR", error_message: str = ""):
+    def __init__(
+        self,
+        query_id: str,
+        error_code: str = "EXECUTION_ERROR",
+        error_message: str = "",
+    ):
         self.query_id = query_id
         self.error_code = error_code
         self.error_message = error_message

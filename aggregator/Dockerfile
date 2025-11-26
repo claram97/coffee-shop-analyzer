@@ -1,20 +1,20 @@
 FROM python:3.9.7-slim
 
-# Copy requirements.txt if you have one
-# COPY aggregator/requirements.txt /tmp/requirements.txt
-# RUN pip install -r /tmp/requirements.txt && rm /tmp/requirements.txt
+RUN apt-get update && apt-get install -y --no-install-recommends docker.io && rm -rf /var/lib/apt/lists/*
 
-# Install required dependencies
-RUN pip install pika
+# Install required dependencies (including protobuf runtime required by generated pb2)
+RUN pip install --no-cache-dir protobuf==6.33.0 pika
 
 # Copy all code to root for easier imports
 COPY aggregator /aggregator
 COPY middleware /middleware
 COPY protocol /protocol
+COPY protocol2 /protocol2
 COPY app_config /app_config
+COPY leader_election /leader_election
 
 # Set Python path to include root directory
-ENV PYTHONPATH=/
+ENV PYTHONPATH=/:/protocol2
 
 # Set working directory
 WORKDIR /aggregator

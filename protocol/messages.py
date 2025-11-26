@@ -18,11 +18,11 @@ from .entities import (
     RawTransactionStore,
     RawTransactionStoreUser,
     RawUser,
+    ResultError,
     ResultFilteredTransaction,
     ResultProductMetrics,
     ResultStoreTPV,
     ResultTopCustomer,
-    ResultError
 )
 from .parsing import (
     BytesReader,
@@ -32,8 +32,11 @@ from .parsing import (
     read_u8_with_remaining,
 )
 
-_ROW_FACTORY_SIGNATURE_CACHE: dict[Any, Optional[tuple[tuple[str, ...], tuple[str, ...], bool]]] = {}
+_ROW_FACTORY_SIGNATURE_CACHE: dict[
+    Any, Optional[tuple[tuple[str, ...], tuple[str, ...], bool]]
+] = {}
 _SKIP_ROW = object()
+
 
 class TableMessage:
     """
@@ -359,7 +362,7 @@ class NewMenuItems(TableMessage):
 
     def __init__(self):
         required = (
-            "product_id",
+            "item_id",
             "name",
             "category",
             "price",
@@ -507,61 +510,61 @@ class NewTransactionStoresUsers(TableMessage):
 # --- Query Result Messages ---
 class QueryResult1(TableMessage):
     """Result message for Query 1: Filtered transactions."""
-    
+
     def __init__(self):
         required = ("transaction_id", "final_amount")
         super().__init__(
             opcode=Opcodes.QUERY_RESULT_1,
             required_keys=required,
-            row_factory=ResultFilteredTransaction
+            row_factory=ResultFilteredTransaction,
         )
 
 
 class QueryResult2(TableMessage):
     """Result message for Query 2: Product metrics ranked by sales and revenue."""
-    
+
     def __init__(self):
         required = ("month", "name")
         super().__init__(
             opcode=Opcodes.QUERY_RESULT_2,
             required_keys=required,
-            row_factory=ResultProductMetrics
+            row_factory=ResultProductMetrics,
         )
 
 
 class QueryResult3(TableMessage):
     """Result message for Query 3: TPV analysis by store and semester."""
-    
+
     def __init__(self):
         required = ("store_name", "period", "amount")
         super().__init__(
             opcode=Opcodes.QUERY_RESULT_3,
             required_keys=required,
-            row_factory=ResultStoreTPV
+            row_factory=ResultStoreTPV,
         )
 
 
 class QueryResult4(TableMessage):
     """Result message for Query 4: Top customers by store."""
-    
+
     def __init__(self):
         required = ("store_name", "birthdate", "purchase_count")
         super().__init__(
             opcode=Opcodes.QUERY_RESULT_4,
             required_keys=required,
-            row_factory=ResultTopCustomer
+            row_factory=ResultTopCustomer,
         )
 
 
 class QueryResultError(TableMessage):
     """Error result message for any query type."""
-    
+
     def __init__(self):
         required = ("query_id", "error_code", "error_message")
         super().__init__(
             opcode=Opcodes.QUERY_RESULT_ERROR,
             required_keys=required,
-            row_factory=ResultError
+            row_factory=ResultError,
         )
 
 
@@ -584,17 +587,24 @@ class EOFMessage(TableMessage):
 
         (n_rows, remaining) = read_i32(reader, remaining, self.opcode)
         if n_rows != 1:
-            raise ProtocolError("EOF message must contain exactly one metadata row", self.opcode)
+            raise ProtocolError(
+                "EOF message must contain exactly one metadata row", self.opcode
+            )
 
         (batch_number, remaining) = read_i64(reader, remaining, self.opcode)
         self.batch_number = batch_number
 
-        (batch_status, remaining) = read_u8_with_remaining(reader, remaining, self.opcode)
+        (batch_status, remaining) = read_u8_with_remaining(
+            reader, remaining, self.opcode
+        )
         self.batch_status = batch_status
 
         (n_pairs, remaining) = read_i32(reader, remaining, self.opcode)
         if n_pairs != 1:
-            raise ProtocolError("EOF message metadata row must contain exactly one key/value pair", self.opcode)
+            raise ProtocolError(
+                "EOF message metadata row must contain exactly one key/value pair",
+                self.opcode,
+            )
 
         key, remaining = read_string(reader, remaining, self.opcode)
         value, remaining = read_string(reader, remaining, self.opcode)
@@ -623,7 +633,9 @@ class EOFMessage(TableMessage):
             self.client_id = None
 
         if remaining != 0:
-            raise ProtocolError("Indicated length doesn't match body length", self.opcode)
+            raise ProtocolError(
+                "Indicated length doesn't match body length", self.opcode
+            )
 
     @staticmethod
     def deserialize_from_bytes(buf: bytes) -> "EOFMessage":
@@ -642,7 +654,9 @@ class EOFMessage(TableMessage):
         msg.read_from(body)
         return msg
 
-    def create_eof_message(self, batch_number: int, table_type: str, client_id: Optional[str] = None):
+    def create_eof_message(
+        self, batch_number: int, table_type: str, client_id: Optional[str] = None
+    ):
         """Create an EOF message for a specific table type.
 
         Args:
@@ -736,7 +750,9 @@ class EOFMessage(TableMessage):
             try:
                 uuid_bytes = uuid.UUID(str(self.client_id)).bytes
             except (ValueError, AttributeError) as exc:
-                raise ProtocolError("client_id must be a valid UUID string", self.opcode) from exc
+                raise ProtocolError(
+                    "client_id must be a valid UUID string", self.opcode
+                ) from exc
             body_parts.append(uuid_bytes)
 
         # Join all body parts
@@ -760,7 +776,7 @@ class Finished:
 
     def read_from(self, data, length: int):
         """Validate fixed body length (0).
-        
+
         Args:
             data: Either a socket object or bytes buffer
             length: Expected body length (should be 0)
@@ -771,6 +787,7 @@ class Finished:
     def to_bytes(self) -> bytes:
         """Serialize the FINISHED message to bytes: [opcode:u8][length:i32] with empty body."""
         import struct
+
         opcode_byte = struct.pack("<B", self.opcode)  # u8
         length_bytes = struct.pack("<I", self._length)  # i32, length=0
         return opcode_byte + length_bytes

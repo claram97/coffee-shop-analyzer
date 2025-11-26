@@ -1,67 +1,33 @@
 from __future__ import annotations
 
-import copy
-import hashlib
 import logging
+import os
 import random
+import shutil
 import threading
 import time
 from collections import defaultdict
-from dataclasses import dataclass
 from random import randint
-from typing import Any, Dict, List, Optional, Union
+from typing import Dict, Optional
 
-from middleware.middleware_client import (MessageMiddlewareExchange,
-                                          MessageMiddlewareQueue)
-from protocol.constants import Opcodes
-from protocol.databatch import DataBatch
-from protocol.messages import EOFMessage
+from middleware.middleware_client import (
+    MessageMiddlewareExchange,
+    MessageMiddlewareQueue,
+)
+from protocol2.databatch_pb2 import DataBatch, Query
+from protocol2.envelope_pb2 import Envelope, MessageType
+from protocol2.eof_message_pb2 import EOFMessage
+from protocol2.table_data_pb2 import Row, TableData, TableName, TableSchema, TableStatus
+from protocol2.table_data_utils import iterate_rows_as_dicts
 
-TID_TO_NAME = {
-    Opcodes.NEW_TRANSACTION: "transactions",
-    Opcodes.NEW_USERS: "users",
-    Opcodes.NEW_TRANSACTION_ITEMS: "transaction_items",
-    Opcodes.NEW_MENU_ITEMS: "menu_items",
-    Opcodes.NEW_STORES: "stores",
+TABLE_NAME_TO_STR = {
+    TableName.MENU_ITEMS: "menu_items",
+    TableName.STORES: "stores",
+    TableName.TRANSACTION_ITEMS: "transaction_items",
+    TableName.TRANSACTIONS: "transactions",
+    TableName.USERS: "users",
 }
-LIGHT_TABLES = {"menu_items", "stores"}
-
-
-def table_name_of(db: DataBatch) -> str:
-    if not getattr(db, "batch_msg", None):
-        return ""
-    return TID_TO_NAME.get(int(db.batch_msg.opcode))
-
-
-def queries_of(db: DataBatch) -> List[int]:
-    return list(getattr(db, "query_ids", []) or [])
-
-
-def rows_of(db: DataBatch) -> List[Union[dict, object]]:
-    inner = getattr(db, "batch_msg", None)
-    if inner is None or not hasattr(inner, "rows"):
-        return []
-    return inner.rows or []
-
-
-def get_field(row: Union[dict, object], key: str):
-    if isinstance(row, dict):
-        return row.get(key)
-    return getattr(row, key, None)
-
-
-@dataclass
-class MetadataCompat:
-    table_name: str
-    queries: List[int]
-    total_filter_steps: int
-    reserved_u16: int = 0
-
-
-def table_eof_to_bytes(key: tuple[str, str]) -> bytes:
-    eof_msg = EOFMessage()
-    eof_msg.create_eof_message(batch_number=0, table_type=key[0], client_id=key[1])
-    return eof_msg.to_bytes()
+LIGHT_TABLES = {TableName.MENU_ITEMS, TableName.STORES}
 
 
 def is_bit_set(mask: int, idx: int) -> bool:
@@ -79,64 +45,6 @@ def first_zero_bit(mask: int, total_bits: int) -> Optional[int]:
     return None
 
 
-def _hash_u64(s: str) -> int:
-    return int.from_bytes(
-        hashlib.blake2b(s.encode("utf-8"), digest_size=8).digest(),
-        "little",
-        signed=False,
-    )
-
-
-def _pick_key_field(table_name: str, queries: List[int]) -> Optional[str]:
-    t = table_name
-    qs = set(queries or [])
-    if t == "transactions":
-        return "user_id" if 4 in qs else "transaction_id"
-    if t == "transaction_items":
-        return "transaction_id"
-    if t == "users":
-        return "user_id"
-    return None
-
-
-def _clone_with_rows(
-    batch: DataBatch, subrows: list, parts_info: tuple[int, int] | None = None
-) -> DataBatch:
-    b = copy.copy(batch)
-    inner = copy.copy(batch.batch_msg)
-    inner.rows = subrows
-    b.batch_msg = inner
-    if parts_info:
-        parts, pid = parts_info
-        b.shards_info = getattr(batch, "shards_info", []) + [(parts, pid)]
-    b.batch_bytes = b.batch_msg.to_bytes()
-    return b
-
-
-def _group_rows_by_partition(
-    table_name: str,
-    queries: List[int],
-    rows: List[Union[dict, object]],
-    num_parts: int,
-) -> Dict[int, List[Union[dict, object]]]:
-    parts: Dict[int, List[Union[dict, object]]] = defaultdict(list)
-    if num_parts <= 1:
-        parts[0] = list(rows)
-        return parts
-    key = _pick_key_field(table_name, queries)
-    if not key:
-        parts[0] = list(rows)
-        return parts
-    for r in rows:
-        val = get_field(r, key)
-        if val is None:
-            parts[0].append(r)
-            continue
-        pid = _hash_u64(str(val)) % num_parts
-        parts[int(pid)].append(r)
-    return parts
-
-
 class TableConfig:
     def __init__(self, aggregators: int):
         self.aggregators = aggregators
@@ -144,45 +52,47 @@ class TableConfig:
 
 class QueryPolicyResolver:
     def steps_remaining(
-        self, batch_table_name: str, batch_queries: list[int], steps_done: int
+        self, batch_table_name: TableName, batch_queries: list[Query], steps_done: int
     ) -> bool:
-        if batch_table_name == "transactions":
+        if batch_table_name == TableName.TRANSACTIONS:
             if len(batch_queries) == 3:
                 return steps_done == 0
-            if len(batch_queries) == 1 and batch_queries[0] == 4:
+            if len(batch_queries) == 1 and batch_queries[0] == Query.Q4:
                 return False
             if len(batch_queries) == 2:
                 return steps_done == 1
-            if len(batch_queries) == 1 and batch_queries[0] == 3:
+            if len(batch_queries) == 1 and batch_queries[0] == Query.Q3:
                 return False
-            if len(batch_queries) == 1 and batch_queries[0] == 1:
+            if len(batch_queries) == 1 and batch_queries[0] == Query.Q1:
                 return steps_done == 2
-        if batch_table_name == "transaction_items":
+        if batch_table_name == TableName.TRANSACTION_ITEMS:
             return steps_done == 0
         return False
 
-    def get_duplication_count(self, batch_queries: list[int]) -> int:
+    def get_duplication_count(self, batch_queries: list[Query]) -> int:
         return 2 if len(batch_queries) > 1 else 1
 
     def get_new_batch_queries(
-        self, batch_table_name: str, batch_queries: list[int], copy_number: int
-    ) -> list[int]:
-        if batch_table_name == "transactions":
+        self, batch_table_name: TableName, batch_queries: list[Query], copy_number: int
+    ) -> list[Query]:
+        if batch_table_name == TableName.TRANSACTIONS:
             if len(batch_queries) == 3:
-                return [4] if copy_number == 1 else [1, 3]
+                return [Query.Q4] if copy_number == 1 else [Query.Q1, Query.Q3]
             if len(batch_queries) == 2:
-                return [3] if copy_number == 1 else [1]
+                return [Query.Q3] if copy_number == 1 else [Query.Q1]
         return list(batch_queries)
 
-    def total_steps(self, batch_table_name: str, batch_queries: list[int]) -> int:
-        if batch_table_name == "transactions":
+    def total_steps(
+        self, batch_table_name: TableName, batch_queries: list[Query]
+    ) -> int:
+        if batch_table_name == TableName.TRANSACTIONS:
             if len(batch_queries) == 3:
                 return 3
             if len(batch_queries) == 2:
                 return 2
-            if batch_queries == [1]:
+            if batch_queries == [Query.Q1]:
                 return 3
-            if batch_queries == [3] or batch_queries == [4]:
+            if batch_queries in [[Query.Q3], [Query.Q4]]:
                 return 1
         return 1
 
@@ -194,138 +104,287 @@ class FilterRouter:
         policy: QueryPolicyResolver,
         table_cfg: TableConfig,
         orch_workers: int,
+        router_id: int = 0,
     ):
         self._p = producer
         self._pol = policy
         self._cfg = table_cfg
         self._log = logging.getLogger("filter-router")
-        self._pending_batches: Dict[tuple[str, str], int] = defaultdict(int)
-        self._pending_eof: Dict[tuple[str, str], tuple[int, EOFMessage]] = {}
         self._orch_workers = orch_workers
+        self._router_id = router_id
 
-    def process_message(self, msg: Any) -> None:
+        # Store unacked EOF messages: key=(table, client_id) -> list of (channel, delivery_tag)
+        self._unacked_eofs: Dict[tuple[TableName, str], list] = {}
+        self._eof_ack_lock = threading.Lock()
+
+        # Batch deduplication: track received batch numbers per (table, client_id, query_ids_tuple)
+        # In-memory only (no persistence)
+        # Use regular dict instead of defaultdict to ensure each key gets its own set
+        self._received_batches: Dict[tuple[int, str, tuple], set[int]] = {}
+
+        # Track pending EOFs for LIGHT_TABLES only: key=(table, client_id) -> (set of worker_ids, EOFMessage)
+        # Only menu_items and stores tables need EOF broadcasting
+        # Worker IDs are extracted from the trace field (format: "orch_worker_id")
+        self._pending_eof: Dict[tuple[TableName, str], tuple[set[str], EOFMessage]] = {}
+        self._state_lock = threading.Lock()
+
+    def process_message(
+        self, msg: Envelope, channel=None, delivery_tag=None, redelivered=False
+    ) -> tuple[bool, bool]:
+        """
+        Process a message and return (should_ack, ack_now).
+        - should_ack: True if message should eventually be acked
+        - ack_now: True if should ack immediately, False if should delay ack
+        """
+        self._log.debug(
+            "Processing message: %r, message type: %r, redelivered: %r",
+            msg,
+            msg.type,
+            redelivered,
+        )
+        if msg.type == MessageType.DATA_BATCH:
+            self._handle_data(msg.data_batch)
+            return (True, True)  # Regular messages: ack immediately
+        elif msg.type == MessageType.EOF_MESSAGE:
+            # EOF messages: delay ack until fully processed
+            return self._handle_table_eof(msg.eof, channel, delivery_tag, redelivered)
+        elif msg.type == MessageType.CLEAN_UP_MESSAGE:
+            # Client cleanup: clean all state for the client
+            self._handle_client_cleanup(msg.clean_up)
+            return (True, True)  # Ack immediately
+        else:
+            self._log.warning("Unknown message type: %r", type(msg))
+            return (True, True)
+
+    def _is_duplicate_batch(self, batch: DataBatch) -> bool:
+        """
+        Check if a batch is a duplicate. Returns True if duplicate, False otherwise.
+        Tracks batches by (table, client_id, query_ids_tuple, batch_number).
+        Only deduplicates batches that are finished processing (no more filter steps).
+        In-memory only - no persistence.
+        """
+        if batch.payload is None:
+            self._log.warning("Cannot check duplicate: batch has no payload")
+            return False
+
+        # Convert protobuf enum to int for consistent hashing in tuple key
+        table = int(batch.payload.name)
+        # Ensure client_id is a string and not None
+        client_id = str(batch.client_id) if batch.client_id else ""
+        batch_number = int(batch.payload.batch_number)
+
+        # Convert protobuf repeated field to list of integers for proper comparison
+        queries = [int(q) for q in batch.query_ids]
+        query_ids_tuple = tuple(sorted(queries))
+
+        # Create immutable key tuple - ensure all elements are hashable
+        dedup_key = (table, client_id, query_ids_tuple)
+
+        # Validate key is hashable
         try:
-            if isinstance(msg, DataBatch):
-                self._handle_data(msg)
-            elif isinstance(msg, EOFMessage):
-                self._handle_table_eof(msg)
-            else:
-                self._log.warning("Unknown message type: %r", type(msg))
-        except Exception as e:
-            self._log.exception("Unhandled error in process_message: %s", e)
+            hash(dedup_key)
+        except TypeError as e:
+            self._log.error("Dedup key is not hashable: %s error=%s", dedup_key, e)
+            return False
+
+        with self._state_lock:
+            # Get or create a set for this key - ensure each key gets its own independent set
+            if dedup_key not in self._received_batches:
+                self._received_batches[dedup_key] = set()
+            received_set = self._received_batches[dedup_key]
+
+            # if batch_number in received_set:
+            #     self._log.warning(
+            #         "DUPLICATE batch detected and discarded: table=%s bn=%s client=%s queries=%s",
+            #         table, batch_number, client_id, queries
+            #     )
+            #     return True
+
+            # Mark batch as received
+            received_set.add(batch_number)
+            self._log.debug(
+                "Batch marked as received: table=%s bn=%s client=%s queries=%s",
+                table,
+                batch_number,
+                client_id,
+                queries,
+            )
+            return False
 
     def _handle_data(self, batch: DataBatch) -> None:
-        table = table_name_of(batch)
-        queries = queries_of(batch)
-        mask = int(getattr(batch, "reserved_u16", 0))
-        bn = int(getattr(batch, "batch_number", 0))
-        cid = getattr(batch, "client_id", "")
-        if not table:
+        table = batch.payload.name
+        queries = batch.query_ids
+        mask = batch.filter_steps
+        bn = batch.payload.batch_number
+        cid = batch.client_id
+
+        if table is None:
             self._log.warning("Batch sin table_id válido. bn=%s", bn)
             return
 
         self._log.debug(
-            "recv DataBatch table=%s queries=%s mask=%s shards_info=%s bn=%s cid=%s",
+            "recv DataBatch table=%s queries=%s mask=%s bn=%s cid=%s",
             table,
             queries,
             bin(mask),
-            getattr(batch, "shards_info", []),
             bn,
             cid,
         )
-        key = (cid, table)
 
-        if mask == 0:
-            self._pending_batches[table] += 1
-            self._log.debug("pending++ %s -> %d", table, self._pending_batches[key])
-
-        total_steps = self._pol.total_steps(table, queries)
-        next_step = first_zero_bit(mask, total_steps)
-        if next_step is not None and self._pol.steps_remaining(
-            table, queries, steps_done=next_step
-        ):
-            batch.reserved_u16 = set_bit(mask, next_step)
-            self._log.debug(
-                "→ filters step=%d table=%s new_mask=%s",
-                next_step,
-                table,
-                bin(batch.reserved_u16),
-            )
-            try:
+        try:
+            total_steps = self._pol.total_steps(table, queries)
+            next_step = first_zero_bit(mask, total_steps)
+            if next_step is not None and self._pol.steps_remaining(
+                table, queries, steps_done=next_step
+            ):
+                new_mask = set_bit(mask, next_step)
+                batch.filter_steps = new_mask
+                self._log.debug(
+                    "→ filters step=%d table=%s new_mask=%s",
+                    next_step,
+                    table,
+                    bin(new_mask),
+                )
                 self._p.send_to_filters_pool(batch)
-            except Exception as e:
-                self._log.error("send_to_filters_pool failed: %s", e)
-            return
+                return
 
-        dup_count = int(self._pol.get_duplication_count(queries) or 1)
-        if dup_count > 1:
-            self._log.debug(
-                "Fan-out x%d table=%s queries=%s", dup_count, table, queries
-            )
-
-            try:
-                self._pending_batches[table] += dup_count
+            dup_count = int(self._pol.get_duplication_count(queries) or 1)
+            if dup_count > 1:
+                self._log.debug(
+                    "Fan-out x%d table=%s queries=%s", dup_count, table, queries
+                )
+                fanout_batches = []
                 for i in range(dup_count):
                     new_queries = self._pol.get_new_batch_queries(
                         table, queries, copy_number=i
                     ) or list(queries)
-                    b = copy.copy(batch)
-                    inner = copy.copy(batch.batch_msg)
-                    b.batch_msg = inner
-                    b.query_ids = list(new_queries)
-                    b.batch_bytes = b.batch_bytes
+                    b = DataBatch()
+                    b.CopyFrom(batch)
+                    b.query_ids.clear()
+                    b.query_ids.extend(new_queries)
+                    fanout_batches.append(b)
+
+                for b in fanout_batches:
                     self._handle_data(b)
-            except Exception as e:
-                self._log.error("requeue_to_router failed: %s", e)
+                return
 
-            self._pending_batches[table] = max(0, self._pending_batches[key] - 1)
+            # Check for duplicates only when batch is finished processing (ready to send to aggregator)
+            # This prevents marking batches as duplicates when they're still going through filter steps
+            if self._is_duplicate_batch(batch):
+                return
+
+            self._send_to_some_aggregator(batch)
+
+        except Exception:
+            self._log.exception("Error processing batch: table=%s bn=%s", table, bn)
+            raise
+
+    def _send_to_some_aggregator(self, batch: DataBatch) -> None:
+        if batch.payload.name in [TableName.MENU_ITEMS, TableName.STORES]:
             self._log.debug(
-                "pending-- (fanout parent) %s -> %d",
-                key,
-                self._pending_batches[key],
+                "_send_to_some_aggregator table=%s bn=%s",
+                batch.payload.name,
+                batch.payload.batch_number,
             )
-            return
-
-        try:
-            self._send_sharded_to_aggregators(batch, table, queries)
-        except Exception as e:
-            self._log.error("send_sharded failed: %s", e)
-
-        self._pending_batches[table] = max(0, self._pending_batches[table] - 1)
-        self._log.debug("pending-- %s -> %d", table, self._pending_batches[table])
-        self._maybe_flush_pending_eof(key)
-
-    def _send_sharded_to_aggregators(
-        self, batch: DataBatch, table: str, queries: List[int]
-    ) -> None:
         num_parts = max(1, int(self._cfg.aggregators))
         self._p.send_to_aggregator_partition(randint(0, num_parts - 1), batch)
 
-    def _pick_part_for_empty_payload(
-        self, table: str, queries: List[int], reserved_u16: int
-    ) -> int:
-        n = max(1, int(self._cfg.num_aggregator_partitions(table)))
-        seed = hashlib.blake2b(
-            f"{table}|{tuple(sorted(queries))}|{reserved_u16}".encode(),
-            digest_size=8,
-        ).digest()
-        return int.from_bytes(seed, "little") % n
+    def _handle_table_eof(
+        self, eof: EOFMessage, channel=None, delivery_tag=None, redelivered=False
+    ) -> tuple[bool, bool]:
+        key = (eof.table, eof.client_id)
 
-    def _handle_table_eof(self, eof: EOFMessage) -> None:
-        key = (eof.table_type, eof.client_id)
-        self._log.info("TABLE_EOF received: key=%s", key)
-        (recvd, _eof) = self._pending_eof.get(key, (0, eof))
-        self._pending_eof[key] = (recvd + 1, eof)
-        self._maybe_flush_pending_eof(key)
+        if redelivered:
+            self._log.info("TABLE_EOF REDELIVERED: key=%s trace=%s", key, eof.trace)
+        else:
+            self._log.debug("TABLE_EOF received: key=%s trace=%s", key, eof.trace)
 
-    def _maybe_flush_pending_eof(self, key: tuple[str, str]) -> None:
-        pending = self._pending_batches.get(key, 0)
-        (recvd, eof) = self._pending_eof.get(key, (0, None))
-        if eof is None or recvd < self._orch_workers or pending > 0:
-            if eof is not None:
-                self._log.debug("TABLE_EOF deferred: key=%s pending=%d", key, pending)
-            return
-        total_parts = max(1, int(self._cfg.aggregators))
+        # Only broadcast EOFs for LIGHT_TABLES (menu_items and stores)
+        # These tables don't go through filters, so FIFO is assured
+        if eof.table not in LIGHT_TABLES:
+            self._log.debug("Ignoring EOF for non-light table: key=%s", key)
+            return (True, True)  # Ack immediately for non-light tables
+
+        with self._eof_ack_lock:
+            if channel is not None and delivery_tag is not None:
+                if key not in self._unacked_eofs:
+                    self._unacked_eofs[key] = []
+                self._unacked_eofs[key].append((channel, delivery_tag))
+
+        flush_info = None
+        with self._state_lock:
+            # Extract worker ID from trace field (format: "orch_worker_id")
+            worker_id = None
+            if eof.trace:
+                # Trace format from orchestrator worker: "orch_worker_id"
+                # Extract the worker ID part
+                if eof.trace.startswith("orch_"):
+                    worker_id = eof.trace
+                else:
+                    # Handle cases where trace might have additional parts (e.g., "orch_0:filter_router_id:aggregator_id")
+                    # Extract just the orchestrator worker part
+                    parts = eof.trace.split(":")
+                    for part in parts:
+                        if part.startswith("orch_"):
+                            worker_id = part
+                            break
+                    if not worker_id:
+                        # Fallback: use the entire trace as worker_id if no "orch_" prefix found
+                        worker_id = eof.trace
+
+            if not worker_id:
+                # Fallback: if no trace, use a default identifier (shouldn't happen with fix, but handle gracefully)
+                self._log.warning(
+                    "EOF without trace field, using fallback deduplication: key=%s", key
+                )
+                worker_id = f"unknown_{hash(eof.SerializeToString()) % 10000}"
+
+            # Get or create the set of received worker IDs for this key
+            (recvd_workers, _eof) = self._pending_eof.get(key, (set(), eof))
+
+            # Check if this worker ID was already received (deduplication)
+            if worker_id in recvd_workers:
+                self._log.warning(
+                    "Duplicate EOF ignored: key=%s worker_id=%s (already received from this worker)",
+                    key,
+                    worker_id,
+                )
+                # Still return delay ack to ensure proper cleanup
+                return (True, False)
+
+            # Add this worker ID to the set
+            recvd_workers.add(worker_id)
+            self._pending_eof[key] = (recvd_workers, eof)
+
+            # Check if we've received EOF from all orchestrator workers
+            if len(recvd_workers) >= self._orch_workers:
+                flush_info = (key, max(1, int(self._cfg.aggregators)))
+                self._pending_eof.pop(key, None)
+                self._log.info(
+                    "TABLE_EOF complete: key=%s received from %d/%d workers",
+                    key,
+                    len(recvd_workers),
+                    self._orch_workers,
+                )
+            else:
+                self._log.debug(
+                    "TABLE_EOF deferred: key=%s received from %d/%d workers (worker_id=%s)",
+                    key,
+                    len(recvd_workers),
+                    self._orch_workers,
+                    worker_id,
+                )
+
+        if flush_info:
+            self._flush_eof(*flush_info)
+
+        return (True, False)  # Delay ack until flushed
+
+    def _flush_eof(self, key: tuple[TableName, str], total_parts: int):
+        """
+        Sends EOF messages to aggregators and cleans up state.
+        This method is called outside of the state lock.
+        """
         self._log.info("TABLE_EOF -> aggregators: key=%s parts=%d", key, total_parts)
         for part in range(total_parts):
             try:
@@ -337,8 +396,147 @@ class FilterRouter:
                     key,
                     e,
                 )
-        self._pending_eof.pop(key, None)
-        self._pending_batches.pop(key, None)
+
+        self._ack_eof(key)
+
+        # Clean up deduplication state for this table/client
+        with self._state_lock:
+            keys_to_remove = [
+                k
+                for k in self._received_batches.keys()
+                if k[0] == key[0] and k[1] == key[1]
+            ]
+            for k in keys_to_remove:
+                self._received_batches.pop(k, None)
+
+    def _ack_eof(self, key: tuple[TableName, str]) -> None:
+        """Acknowledge all EOF messages for this key after they have been fully processed."""
+        with self._eof_ack_lock:
+            ack_list = self._unacked_eofs.get(key, [])
+            if ack_list:
+                self._log.info(
+                    "ACKing %d TABLE_EOF messages: key=%s", len(ack_list), key
+                )
+                for channel, delivery_tag in ack_list:
+                    try:
+                        channel.basic_ack(delivery_tag=delivery_tag)
+                    except Exception as e:
+                        self._log.error(
+                            "Failed to ACK EOF key=%s delivery_tag=%s: %s",
+                            key,
+                            delivery_tag,
+                            e,
+                        )
+                del self._unacked_eofs[key]
+
+    def _cleanup_client_state(self, client_id: str) -> None:
+        """
+        Clean all in-memory and persisted state for a given client_id.
+        This includes:
+        - Unacked EOF messages
+        - Received batch deduplication state
+        - Pending EOF state
+        - Any persisted state on disk
+        """
+        if not client_id:
+            self._log.warning("_cleanup_client_state called with empty client_id")
+            return
+
+        self._log.info(
+            "action: cleanup_client_state | result: starting | client_id: %s", client_id
+        )
+
+        # Clean unacked EOFs
+        with self._eof_ack_lock:
+            keys_to_remove = [
+                key for key in self._unacked_eofs.keys() if key[1] == client_id
+            ]
+            for key in keys_to_remove:
+                # Try to ack any pending EOFs before removing
+                ack_list = self._unacked_eofs.get(key, [])
+                if ack_list:
+                    self._log.debug(
+                        "ACKing %d unacked EOFs during cleanup: key=%s",
+                        len(ack_list),
+                        key,
+                    )
+                    for channel, delivery_tag in ack_list:
+                        try:
+                            channel.basic_ack(delivery_tag=delivery_tag)
+                        except Exception as e:
+                            self._log.warning(
+                                "Failed to ACK EOF during cleanup key=%s: %s", key, e
+                            )
+                del self._unacked_eofs[key]
+
+        # Clean received batches deduplication state
+        with self._state_lock:
+            # Remove all entries where client_id matches (second element of tuple key)
+            keys_to_remove = [
+                key for key in self._received_batches.keys() if key[1] == client_id
+            ]
+            for key in keys_to_remove:
+                del self._received_batches[key]
+
+            # Clean pending EOF state
+            keys_to_remove = [
+                key for key in self._pending_eof.keys() if key[1] == client_id
+            ]
+            for key in keys_to_remove:
+                del self._pending_eof[key]
+
+        # Clean persisted state if it exists
+        # Note: Currently filter router doesn't persist state, but this is here for future-proofing
+        # If persistence is added later, this is where it should be cleaned
+        state_dir = os.getenv("FILTER_ROUTER_STATE_DIR")
+        if state_dir and os.path.exists(state_dir):
+            try:
+                # Look for any files/directories related to this client_id
+                for item in os.listdir(state_dir):
+                    if client_id in item:
+                        item_path = os.path.join(state_dir, item)
+                        try:
+                            if os.path.isfile(item_path):
+                                os.remove(item_path)
+                                self._log.debug("Removed persisted file: %s", item_path)
+                            elif os.path.isdir(item_path):
+                                shutil.rmtree(item_path)
+                                self._log.debug(
+                                    "Removed persisted directory: %s", item_path
+                                )
+                        except Exception as e:
+                            self._log.warning(
+                                "Failed to remove persisted state %s: %s", item_path, e
+                            )
+            except Exception as e:
+                self._log.warning("Failed to clean persisted state directory: %s", e)
+
+        self._log.info(
+            "action: cleanup_client_state | result: success | client_id: %s", client_id
+        )
+
+    def _handle_client_cleanup(self, cleanup_msg) -> None:
+        """Handle client cleanup message from orchestrator."""
+        client_id = cleanup_msg.client_id if cleanup_msg.client_id else ""
+        if not client_id:
+            self._log.warning("Received client_cleanup message with empty client_id")
+            return
+
+        # Clean local state first
+        self._cleanup_client_state(client_id)
+
+        # Only forward if this is router ID 0 (to avoid duplicate messages)
+        if self._router_id == 0:
+            # Forward to a random aggregator (aggregators are stateless and will broadcast to joiners)
+            num_parts = max(1, int(self._cfg.aggregators))
+            random_partition = randint(0, num_parts - 1)
+            self._p.send_cleanup_to_aggregator_partition(random_partition, cleanup_msg)
+        else:
+            self._log.debug(
+                "action: cleanup_forward | result: skipped | client_id: %s | router_id: %d (only router 0 forwards)",
+                client_id,
+                self._router_id,
+            )
 
 
 class ExchangeBusProducer:
@@ -350,6 +548,7 @@ class ExchangeBusProducer:
         exchange_fmt: str = "ex.{table}",
         rk_fmt: str = "agg.{table}.{pid:02d}",
         *,
+        router_id: int = 0,
         max_retries: int = 5,
         base_backoff_ms: int = 100,
         backoff_multiplier: float = 2.0,
@@ -359,9 +558,10 @@ class ExchangeBusProducer:
         self._filters_pub = MessageMiddlewareQueue(host, filters_pool_queue)
         self._exchange_fmt = exchange_fmt
         self._rk_fmt = rk_fmt
-        self._pub_cache: dict[tuple[str, str], MessageMiddlewareExchange] = {}
-        self._pub_locks: dict[tuple[str, str], threading.Lock] = {}
+        self._pub_cache: dict[tuple[TableName, str], MessageMiddlewareExchange] = {}
+        self._pub_locks: dict[tuple[TableName, str], threading.Lock] = {}
         self._in_mw = in_mw
+        self._router_id = router_id
 
         self._max_retries = int(max_retries)
         self._base_backoff_ms = int(base_backoff_ms)
@@ -385,12 +585,14 @@ class ExchangeBusProducer:
         self._pub_cache.clear()
         self._log.info("ExchangeBusProducer shutdown complete.")
 
-    def _key_for(self, table: str, pid: int) -> tuple[str, str]:
+    def _key_for(self, table_name: TableName, pid: int) -> tuple[TableName, str]:
+        table = TABLE_NAME_TO_STR[table_name]
         ex = self._exchange_fmt.format(table=table)
         rk = self._rk_fmt.format(table=table, pid=pid)
         return (ex, rk)
 
-    def _get_pub(self, table: str, pid: int) -> MessageMiddlewareExchange:
+    def _get_pub(self, table_name: str, pid: int) -> MessageMiddlewareExchange:
+        table = TABLE_NAME_TO_STR[table_name]
         key = self._key_for(table, pid)
         pub = self._pub_cache.get(key)
 
@@ -415,7 +617,7 @@ class ExchangeBusProducer:
                 self._pub_locks[key] = threading.Lock()
         return pub
 
-    def _drop_pub(self, key: tuple[str, str]) -> None:
+    def _drop_pub(self, key: tuple[TableName, str]) -> None:
         pub = self._pub_cache.pop(key, None)
         if pub is not None:
             try:
@@ -424,11 +626,12 @@ class ExchangeBusProducer:
             except Exception:
                 pass
 
-    def _send_with_retry(self, key: tuple[str, str], payload: bytes) -> None:
+    def _send_with_retry(self, key: tuple[TableName, str], payload: bytes) -> None:
         """
         Envía `payload` al exchange/rk indicado por `key`, con reintentos y recreación del publisher.
         Bloquea por key para serializar accesos concurrentes al mismo canal.
         """
+        self._log.debug("send_with_retry key=%s payload_size=%d", key, len(payload))
         lock = self._pub_locks.setdefault(key, threading.Lock())
         with lock:
             attempt = 0
@@ -473,22 +676,23 @@ class ExchangeBusProducer:
     def send_to_filters_pool(self, batch: DataBatch) -> None:
         try:
             self._log.debug("publish → filters_pool")
-            batch.batch_bytes = batch.batch_msg.to_bytes()
-            self._filters_pub.send(batch.to_bytes())
+            envelope = Envelope(type=MessageType.DATA_BATCH, data_batch=batch)
+            raw = envelope.SerializeToString()
+            self._filters_pub.send(raw)
         except Exception as e:
             self._log.error("filters_pool send failed: %s", e)
+            raise
 
     def send_to_aggregator_partition(self, partition_id: int, batch: DataBatch) -> None:
-        table = table_name_of(batch)
+        table = batch.payload.name
         key = self._key_for(table, int(partition_id))
         try:
             self._log.debug(
                 "publish → aggregator table=%s part=%d", table, int(partition_id)
             )
-            if getattr(batch, "batch_bytes", None) is None:
-                batch.batch_bytes = batch.batch_msg.to_bytes()
-            payload = batch.to_bytes()
-            self._send_with_retry(key, payload)
+            envelope = Envelope(type=MessageType.DATA_BATCH, data_batch=batch)
+            raw = envelope.SerializeToString()
+            self._send_with_retry(key, raw)
         except Exception as e:
             self._log.error(
                 "aggregator send failed table=%s part=%d: %s",
@@ -496,28 +700,36 @@ class ExchangeBusProducer:
                 int(partition_id),
                 e,
             )
+            raise
 
     def requeue_to_router(self, batch: DataBatch) -> None:
+        env = Envelope(type=MessageType.DATA_BATCH, data_batch=batch)
         try:
-            self._log.debug(
-                "requeue_to_router: reinyectando batch table=%s queries=%s",
-                table_name_of(batch),
-                queries_of(batch),
+            self._log.info(
+                "requeue_to_router: reinjecting batch table=%s queries=%s",
+                batch.payload.name,
+                batch.query_ids,
             )
-            batch.batch_bytes = batch.batch_msg.to_bytes()
-            raw = batch.to_bytes()
+            raw = env.SerializeToString()
             self._in_mw.send(raw)
         except Exception as e:
             self._log.error("requeue_to_router failed: %s", e)
 
     def send_table_eof_to_aggregator_partition(
-        self, key: tuple[str, str], partition_id: int
+        self, key: tuple[TableName, str], partition_id: int
     ) -> None:
         try:
-            payload = table_eof_to_bytes(key)
+            # Add trace: "filter_router_id:aggregator_id"
+            trace = f"{self._router_id}:{partition_id}"
+            eof = EOFMessage(table=key[0], client_id=key[1], trace=trace)
+            env = Envelope(type=MessageType.EOF_MESSAGE, eof=eof)
+            payload = env.SerializeToString()
             k = self._key_for(key[0], int(partition_id))
-            self._log.debug(
-                "publish TABLE_EOF → aggregator key=%s part=%d", key, int(partition_id)
+            self._log.info(
+                "publish TABLE_EOF → aggregator key=%s part=%d trace=%s",
+                key,
+                int(partition_id),
+                trace,
             )
             self._send_with_retry(k, payload)
         except Exception as e:
@@ -525,6 +737,33 @@ class ExchangeBusProducer:
                 "aggregator TABLE_EOF send failed key=%s part=%d: %s",
                 key,
                 int(partition_id),
+                e,
+            )
+
+    def send_cleanup_to_aggregator_partition(
+        self, partition_id: int, cleanup_msg
+    ) -> None:
+        """
+        Send client cleanup message to a random aggregator partition.
+        The aggregator will broadcast this to joiner routers.
+        """
+        # Use MENU_ITEMS table exchange for routing, table does not matter, and light tables queues are less saturated
+        table = TableName.MENU_ITEMS
+        key = self._key_for(table, int(partition_id))
+        try:
+            env = Envelope(type=MessageType.CLEAN_UP_MESSAGE, clean_up=cleanup_msg)
+            payload = env.SerializeToString()
+            self._log.info(
+                "publish CLEAN_UP_MESSAGE → aggregator part=%d client_id=%s",
+                int(partition_id),
+                cleanup_msg.client_id,
+            )
+            self._send_with_retry(key, payload)
+        except Exception as e:
+            self._log.error(
+                "aggregator CLEAN_UP_MESSAGE send failed part=%d client_id=%s: %s",
+                int(partition_id),
+                cleanup_msg.client_id,
                 e,
             )
 
@@ -539,6 +778,7 @@ class RouterServer:
         table_cfg: TableConfig,
         stop_event: threading.Event,
         orch_workers: int,
+        router_id: int = 0,
     ):
         self._producer = producer
         self._mw_in = router_in
@@ -547,6 +787,7 @@ class RouterServer:
             policy=policy,
             table_cfg=table_cfg,
             orch_workers=orch_workers,
+            router_id=router_id,
         )
         self._log = logging.getLogger("filter-router-server")
         self._stop_event = stop_event
@@ -554,33 +795,35 @@ class RouterServer:
     def run(self) -> None:
         self._log.debug("RouterServer starting consume")
 
-        def _cb(body: bytes):
+        def _cb(body: bytes, channel=None, delivery_tag=None, redelivered=False):
             if self._stop_event.is_set():
-                self._log.warning("Shutdown in progress, skipping incoming message.")
-                return
-
+                self._log.warning("Shutdown in progress, nacking incoming message.")
+                if channel is not None and delivery_tag is not None:
+                    try:
+                        channel.basic_nack(delivery_tag=delivery_tag, requeue=True)
+                    except Exception as e:
+                        self._log.warning(
+                            "NACK failed during shutdown, message may redeliver later: %s",
+                            e,
+                        )
+                return False
             try:
                 if len(body) < 1:
                     self._log.error("Received empty message")
-                    return
-
-                opcode = body[0]
-                if opcode == Opcodes.EOF:
-                    eof_msg = EOFMessage.deserialize_from_bytes(body)
-                    self._router.process_message(eof_msg)
-                elif opcode == Opcodes.DATA_BATCH:
-                    db = DataBatch.deserialize_from_bytes(body)
-                    self._router.process_message(db)
-                else:
-                    self._log.warning(f"Unwanted message opcode: {opcode}")
+                    return True  # Ack empty messages
+                msg = Envelope()
+                msg.ParseFromString(body)
+                should_ack, ack_now = self._router.process_message(
+                    msg, channel, delivery_tag, redelivered
+                )
+                return ack_now  # Return whether to ack immediately
             except Exception as e:
                 self._log.exception("Error in router callback: %s", e)
-            except Exception as e:
-                self._log.exception("Error in router callback: %s", e)
+                return False  # NACK to trigger redelivery on transient errors
 
         try:
             self._mw_in.start_consuming(_cb)
-            self._log.debug("RouterServer consuming (thread started)")
+            self._log.info("RouterServer consuming (thread started)")
         except Exception as e:
             self._log.exception("start_consuming failed: %s", e)
 

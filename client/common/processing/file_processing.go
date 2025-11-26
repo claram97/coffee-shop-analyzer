@@ -67,7 +67,7 @@ func (tth *TableTypeHandler) GetHandlerAndOpCode(tableType string) (TableRowHand
 
 // openAndPrepareFile opens the file and logs the start of processing
 func (fp *FileProcessor) openAndPrepareFile(filePath string) (*os.File, error) {
-	fp.log.Infof("action: processing_file | file: %s", filePath)
+	fp.log.Debugf("action: processing_file | file: %s", filePath)
 
 	file, err := os.Open(filePath)
 	if err != nil {
@@ -111,7 +111,7 @@ func (fp *FileProcessor) processFileAsync(ctx context.Context, reader *csv.Reade
 		return result.lastBatchNo, result.err
 	}
 
-	fp.log.Infof("action: completed_processing_file | file: %s | result: success | last_batch_number: %d", fileName, result.lastBatchNo)
+	fp.log.Debugf("action: completed_processing_file | file: %s | result: success | last_batch_number: %d", fileName, result.lastBatchNo)
 	return result.lastBatchNo, nil
 }
 
@@ -173,9 +173,9 @@ func (fp *FileProcessor) ProcessTableType(ctx context.Context, dataDir, tableTyp
 		isLastFile := (i == len(csvFiles)-1)
 
 		if isLastFile {
-			fp.log.Infof("action: processing_file | file: %s | is_last_file: true | starting_batch: %d", fileEntry.Name(), tableBatchCounter)
+			fp.log.Debugf("action: processing_file | file: %s | is_last_file: true | starting_batch: %d", fileEntry.Name(), tableBatchCounter)
 		} else {
-			fp.log.Infof("action: processing_file | file: %s | starting_batch: %d", fileEntry.Name(), tableBatchCounter)
+			fp.log.Debugf("action: processing_file | file: %s | starting_batch: %d", fileEntry.Name(), tableBatchCounter)
 		}
 
 		// Process the file with the current table batch counter
@@ -186,7 +186,7 @@ func (fp *FileProcessor) ProcessTableType(ctx context.Context, dataDir, tableTyp
 
 		// Update the table batch counter for the next file
 		tableBatchCounter = lastBatchNo
-		fp.log.Infof("action: updated_batch_counter | table_type: %s | new_value: %d", tableType, tableBatchCounter)
+		fp.log.Debugf("action: updated_batch_counter | table_type: %s | new_value: %d", tableType, tableBatchCounter)
 
 		time.Sleep(1 * time.Second) // delay between files
 	}

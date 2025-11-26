@@ -1,6 +1,5 @@
 from constants import MAX_HOUR, MIN_HOUR, VALID_YEARS
 from utils.datetimeUtils import parse_datetime
-from protocol.entities import RawTransaction
 
 
 
@@ -18,12 +17,12 @@ def is_valid_hour(hour: int) -> bool:
     return MIN_HOUR <= hour <= MAX_HOUR
 
 
-def filter_transaction_by_datetime(transaction: RawTransaction) -> bool:
+def filter_transaction_by_datetime(transaction: dict) -> bool:
     """
     Filter transaction based on datetime constraints.
     Returns True if transaction meets the criteria.
     """
-    created_at = parse_datetime(transaction.created_at)
+    created_at = parse_datetime(transaction['created_at'])
     year = created_at.year
     hour = created_at.hour
     
