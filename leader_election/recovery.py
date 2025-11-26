@@ -20,7 +20,7 @@ class FollowerRecoveryManager:
         down_timeout: float = 15.0,
         restart_cooldown: float = 30.0,
         startup_grace: float = 10.0,
-        max_restart_attempts: int = 3,
+        max_restart_attempts: int = 100,
     ):
         self.coordinator = coordinator
         self.my_id = my_id

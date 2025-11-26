@@ -53,7 +53,7 @@ eval "$(python3 ./app_config/config_subscript.py -c "$INI_PATH" election_ports -
 : "${FOLLOWER_DOWN_TIMEOUT_SECONDS:=6.0}"
 : "${FOLLOWER_RESTART_COOLDOWN_SECONDS:=20.0}"
 : "${FOLLOWER_RECOVERY_GRACE_SECONDS:=6.0}"
-: "${FOLLOWER_MAX_RESTART_ATTEMPTS:=3}"
+: "${FOLLOWER_MAX_RESTART_ATTEMPTS:=100}"
 
 cat > "$OUT_PATH" <<YAML
 version: '3.8'

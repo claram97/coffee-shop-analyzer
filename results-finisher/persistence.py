@@ -19,13 +19,9 @@ class FinisherPersistence:
         """Persist a batch payload plus metadata. Returns stored metadata."""
         batch_id = f"{int(time.time() * 1000)}_{uuid.uuid4().hex}"
         data_filename = f"{batch_id}.bin"
-        meta_filename = f"{batch_id}.json"
         data_path = os.path.join(self.batches_dir, data_filename)
-        meta_path = os.path.join(self.batches_dir, meta_filename)
 
         tmp_data = f"{data_path}.tmp"
-        tmp_meta = f"{meta_path}.tmp"
-
         with open(tmp_data, "wb") as fh:
             fh.write(body)
         os.replace(tmp_data, data_path)
@@ -36,10 +32,6 @@ class FinisherPersistence:
             **metadata,
         }
         stored_meta["_data_path"] = data_path
-        stored_meta["_meta_path"] = meta_path
-        with open(tmp_meta, "w", encoding="utf-8") as fh:
-            json.dump(stored_meta, fh)
-        os.replace(tmp_meta, meta_path)
         return stored_meta
 
     def iter_batches(self) -> Generator[Dict[str, str], None, None]:
@@ -57,19 +49,17 @@ class FinisherPersistence:
                 continue
 
             for entry in entries:
-                meta_file = entry.get("meta_file")
                 data_file = entry.get("data_file")
-                if not meta_file:
+                if not data_file:
                     continue
-                meta_path = os.path.join(self.batches_dir, meta_file)
                 data_path = os.path.join(self.batches_dir, data_file)
                 try:
-                    with open(meta_path, "r", encoding="utf-8") as fh:
-                        meta = json.load(fh)
-                    meta["_meta_path"] = meta_path
-                    meta["_data_path"] = data_path
-                    meta["_manifest_path"] = manifest_path
-                    yield meta
+                    yield {
+                        "id": os.path.splitext(data_file)[0],
+                        "data_file": data_file,
+                        "_data_path": data_path,
+                        "_manifest_path": manifest_path,
+                    }
                 except Exception:
                     continue
 
@@ -83,11 +73,8 @@ class FinisherPersistence:
     def delete_batch(self, batch_meta: Dict[str, str]):
         """Remove persisted data/meta files for a batch."""
         data_path = batch_meta.get("_data_path")
-        meta_path = batch_meta.get("_meta_path")
         if data_path and os.path.exists(data_path):
             os.remove(data_path)
-        if meta_path and os.path.exists(meta_path):
-            os.remove(meta_path)
 
     def append_manifest(self, client_id: str, query_id: str, meta_record: Dict[str, str]):
         """Append batch metadata entry to the per-query manifest."""
@@ -103,7 +90,6 @@ class FinisherPersistence:
         entries.append(
             {
                 "data_file": meta_record.get("data_file"),
-                "meta_file": os.path.basename(meta_record.get("_meta_path", "")),
             }
         )
         tmp_path = f"{path}.tmp"

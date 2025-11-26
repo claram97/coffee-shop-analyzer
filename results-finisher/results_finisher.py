@@ -704,19 +704,11 @@ class ResultsFinisher:
         entries = self.persistence.load_manifest(client_id, query_id)
         for entry in entries:
             data_file = entry.get("data_file")
-            meta_file = entry.get("meta_file")
             if data_file:
                 data_path = os.path.join(self.persistence.batches_dir, data_file)
                 if os.path.exists(data_path):
                     try:
                         os.remove(data_path)
-                    except OSError:
-                        pass
-            if meta_file:
-                meta_path = os.path.join(self.persistence.batches_dir, meta_file)
-                if os.path.exists(meta_path):
-                    try:
-                        os.remove(meta_path)
                     except OSError:
                         pass
         self.persistence.delete_manifest(client_id, query_id)
@@ -899,39 +891,22 @@ class ResultsFinisher:
                     entries = self.persistence.load_manifest(client_id, query_id)
                     for entry in entries:
                         data_file = entry.get("data_file")
-                        meta_file = entry.get("meta_file")
-                        if data_file:
-                            data_path = os.path.join(
-                                self.persistence.batches_dir, data_file
+                    if data_file:
+                        data_path = os.path.join(
+                            self.persistence.batches_dir, data_file
+                        )
+                    if os.path.exists(data_path):
+                        try:
+                            os.remove(data_path)
+                            logger.debug(
+                                "Deleted batch data file: %s", data_path
                             )
-                            if os.path.exists(data_path):
-                                try:
-                                    os.remove(data_path)
-                                    logger.debug(
-                                        "Deleted batch data file: %s", data_path
-                                    )
-                                except OSError as e:
-                                    logger.warning(
-                                        "Failed to delete batch data file %s: %s",
-                                        data_path,
-                                        e,
-                                    )
-                        if meta_file:
-                            meta_path = os.path.join(
-                                self.persistence.batches_dir, meta_file
+                        except OSError as e:
+                            logger.warning(
+                                "Failed to delete batch data file %s: %s",
+                                data_path,
+                                e,
                             )
-                            if os.path.exists(meta_path):
-                                try:
-                                    os.remove(meta_path)
-                                    logger.debug(
-                                        "Deleted batch meta file: %s", meta_path
-                                    )
-                                except OSError as e:
-                                    logger.warning(
-                                        "Failed to delete batch meta file %s: %s",
-                                        meta_path,
-                                        e,
-                                    )
 
                     # Delete the manifest file
                     self.persistence.delete_manifest(client_id, query_id)
