@@ -5,6 +5,7 @@ import json
 import logging
 import os
 import threading
+from collections import defaultdict
 from typing import Callable, Dict, List, Optional, Set, Tuple
 
 from middleware.middleware_client import MessageMiddleware
@@ -70,6 +71,14 @@ class JoinerWorker:
 
         self._pending_eofs: Dict[tuple[TableName, str], Set[str]] = {}
 
+        # Calculate number of input queues: number of tables
+        self._num_input_queues = len(in_mw)
+
+        # Track pending cleanup messages by queue: key=(client_id, queue_name) -> set of traces
+        # We need to wait for router_replicas * num_input_queues messages
+        self._pending_cleanups: Dict[tuple[str, str], Set[str]] = defaultdict(set)  # (client_id, queue_name) -> set of traces
+        self._cleanup_lock = threading.Lock()
+
         self._stop_event = stop_event
         self._is_shutting_down = False
 
@@ -80,8 +89,6 @@ class JoinerWorker:
 
         # In-memory batch deduplication: track received batches per (table, client_id, query_ids_tuple)
         # This mitigates duplicate batch propagation from joiner router (no persistence needed)
-        from collections import defaultdict
-
         self._received_batches: Dict[tuple[TableName, str, tuple], set[int]] = (
             defaultdict(set)
         )
@@ -441,12 +448,18 @@ class JoinerWorker:
             for key in keys_to_remove:
                 self._pending_eofs.pop(key, None)
 
-            # Clean received batches deduplication state
-            keys_to_remove = [
-                key for key in self._received_batches.keys() if key[1] == client_id
-            ]
+        # Clean received batches deduplication state
+        keys_to_remove = [
+            key for key in self._received_batches.keys() if key[1] == client_id
+        ]
+        for key in keys_to_remove:
+            del self._received_batches[key]
+
+        # Clean pending cleanups (tracked by (client_id, queue_name))
+        with self._cleanup_lock:
+            keys_to_remove = [key for key in self._pending_cleanups.keys() if key[0] == client_id]
             for key in keys_to_remove:
-                del self._received_batches[key]
+                self._pending_cleanups.pop(key, None)
 
             # Clean written rows tracking
             keys_to_remove = [
@@ -518,32 +531,89 @@ class JoinerWorker:
             "action: cleanup_client_state | result: success | client_id: %s", client_id
         )
 
-    def _handle_client_cleanup(self, cleanup_msg) -> None:
+    def _handle_client_cleanup(self, cleanup_msg, queue_name: Optional[str] = None) -> None:
         """Handle client cleanup message from joiner router."""
         client_id = cleanup_msg.client_id if cleanup_msg.client_id else ""
         if not client_id:
             self._log.warning("Received client_cleanup message with empty client_id")
             return
 
-        # Clean local state first
-        self._cleanup_client_state(client_id)
+        if not queue_name:
+            self._log.warning("CLEANUP without queue_name; cannot track by queue")
+            return
 
-        # Only forward if this is shard ID 0 (to avoid duplicate messages)
-        if self._shard == 0:
-            # Forward to results router pool
-            env = Envelope(type=MessageType.CLEAN_UP_MESSAGE, clean_up=cleanup_msg)
-            raw = env.SerializeToString()
+        # Extract router ID from trace (format: "joiner_router_id")
+        trace = cleanup_msg.trace if cleanup_msg.trace else None
+        router_id = trace if trace else None
+
+        with self._cleanup_lock:
+            queue_key = (client_id, queue_name)
+            recvd_traces = self._pending_cleanups[queue_key]
+            
+            if router_id:
+                if router_id in recvd_traces:
+                    self._log.warning(
+                        "Duplicate CLEANUP ignored: client_id=%s queue=%s router_id=%s",
+                        client_id,
+                        queue_name,
+                        router_id,
+                    )
+                    return
+                recvd_traces.add(router_id)
+            else:
+                # Fallback: use counter if no trace
+                recvd_traces.add(f"router_{len(recvd_traces)}")
+            
+            # Count total unique messages received across all queues
+            total_received = sum(len(traces) for (cid, _), traces in self._pending_cleanups.items() if cid == client_id)
+            expected_count = self._router_replicas * self._num_input_queues
+
             self._log.info(
-                "action: forward_cleanup_to_results_router | result: forwarding | client_id: %s",
+                "CLEANUP recv client_id=%s queue=%s router_id=%s progress=%d/%d",
                 client_id,
+                queue_name,
+                router_id or "no-trace",
+                total_received,
+                expected_count,
             )
-            self._safe_send(raw)
-        else:
-            self._log.debug(
-                "action: cleanup_forward | result: skipped | client_id: %s | shard: %d (only shard 0 forwards)",
-                client_id,
-                self._shard,
-            )
+
+            # Check if we've received cleanup from all joiner router replicas across all input queues
+            if total_received >= expected_count:
+                self._log.info(
+                    "CLEANUP threshold reached for client_id=%s → cleaning up and forwarding",
+                    client_id,
+                )
+                # Clean local state
+                self._cleanup_client_state(client_id)
+
+                # Only forward if this is shard ID 0 (to avoid duplicate messages)
+                if self._shard == 0:
+                    # Forward to results router pool
+                    env = Envelope(type=MessageType.CLEAN_UP_MESSAGE, clean_up=cleanup_msg)
+                    raw = env.SerializeToString()
+                    self._log.info(
+                        "action: forward_cleanup_to_results_router | result: forwarding | client_id: %s",
+                        client_id,
+                    )
+                    self._safe_send(raw)
+                else:
+                    self._log.debug(
+                        "action: cleanup_forward | result: skipped | client_id: %s | shard: %d (only shard 0 forwards)",
+                        client_id,
+                        self._shard,
+                    )
+
+                # Remove all entries for this client_id
+                keys_to_remove = [key for key in self._pending_cleanups.keys() if key[0] == client_id]
+                for key in keys_to_remove:
+                    self._pending_cleanups.pop(key, None)
+            else:
+                self._log.debug(
+                    "CLEANUP deferred: client_id=%s received %d/%d messages",
+                    client_id,
+                    total_received,
+                    expected_count,
+                )
 
     def _log_db(self, where: str, db: DataBatch):
         try:
@@ -646,7 +716,7 @@ class JoinerWorker:
                 redelivered,
             )
         if envelope.type == MessageType.CLEAN_UP_MESSAGE:
-            self._handle_client_cleanup(envelope.clean_up)
+            self._handle_client_cleanup(envelope.clean_up, queue_name=NAME_TO_STR.get(TableName.MENU_ITEMS, "menu_items"))
             return True
         if envelope.type == MessageType.DATA_BATCH:
             db: DataBatch = envelope.data_batch
@@ -691,7 +761,7 @@ class JoinerWorker:
                 redelivered,
             )
         if envelope.type == MessageType.CLEAN_UP_MESSAGE:
-            self._handle_client_cleanup(envelope.clean_up)
+            self._handle_client_cleanup(envelope.clean_up, queue_name=NAME_TO_STR.get(TableName.STORES, "stores"))
             return True
         if envelope.type == MessageType.DATA_BATCH:
             db: DataBatch = envelope.data_batch
@@ -736,7 +806,7 @@ class JoinerWorker:
                 redelivered,
             )
         if envelope.type == MessageType.CLEAN_UP_MESSAGE:
-            self._handle_client_cleanup(envelope.clean_up)
+            self._handle_client_cleanup(envelope.clean_up, queue_name=NAME_TO_STR.get(TableName.TRANSACTION_ITEMS, "transaction_items"))
             return True
         if envelope.type == MessageType.DATA_BATCH:
             db: DataBatch = envelope.data_batch
@@ -819,7 +889,7 @@ class JoinerWorker:
                 redelivered,
             )
         if envelope.type == MessageType.CLEAN_UP_MESSAGE:
-            self._handle_client_cleanup(envelope.clean_up)
+            self._handle_client_cleanup(envelope.clean_up, queue_name=NAME_TO_STR.get(TableName.TRANSACTIONS, "transactions"))
             return True
         if envelope.type == MessageType.DATA_BATCH:
             db: DataBatch = envelope.data_batch
@@ -1115,7 +1185,7 @@ class JoinerWorker:
                 redelivered,
             )
         if envelope.type == MessageType.CLEAN_UP_MESSAGE:
-            self._handle_client_cleanup(envelope.clean_up)
+            self._handle_client_cleanup(envelope.clean_up, queue_name=NAME_TO_STR.get(TableName.USERS, "users"))
             return True
         if envelope.type == MessageType.DATA_BATCH:
             db: DataBatch = envelope.data_batch

@@ -252,10 +252,14 @@ class Aggregator:
             logging.exception("Failed to forward EOF")
             raise
 
-    def _broadcast_cleanup_to_joiners(self, raw: bytes):
+    def _broadcast_cleanup_to_joiners(self, raw: bytes, input_table: str):
         """
-        Broadcast client cleanup message to all joiner router replicas via menu_items queue.
-        The queue doesn't matter - joiner routers just need to receive the message.
+        Broadcast client cleanup message to all joiner router replicas.
+        Send to all queues (all tables) for all joiner router replicas.
+        
+        Args:
+            raw: Raw message bytes
+            input_table: The table name of the input queue that received this cleanup message
         """
         try:
             envelope = Envelope()
@@ -263,31 +267,54 @@ class Aggregator:
             cleanup_msg = envelope.clean_up
             client_id = cleanup_msg.client_id if cleanup_msg.client_id else ""
 
-            table_name = "menu_items"
+            # Base trace: append aggregator_id and input_table to existing trace
+            # Format: {filter_router_id}:{aggregator_id}:{input_table}
+            original_trace = cleanup_msg.trace if cleanup_msg.trace else ""
+            if original_trace:
+                base_trace = f"{original_trace}:{self.id}:{input_table}"
+            else:
+                base_trace = f"{self.id}:{input_table}"
+
+            tables = ["menu_items", "stores", "transactions", "transaction_items", "users"]
+            total_queues = len(tables) * self._jr_replicas
 
             logging.info(
-                "action: broadcast_cleanup_to_joiners | result: broadcasting | client_id: %s | table: %s | replicas: %d",
+                "action: broadcast_cleanup_to_joiners | result: broadcasting | client_id: %s | input_table: %s | tables: %d | replicas: %d | total_queues: %d | base_trace: %s",
                 client_id,
-                table_name,
+                input_table,
+                len(tables),
                 self._jr_replicas,
+                total_queues,
+                base_trace,
             )
 
-            for replica in range(self._jr_replicas):
-                q = self._out_queues.get((table_name, replica))
-                if not q:
-                    logging.error(
-                        "No out queue configured for table=%s replica=%s",
-                        table_name,
+            # Send to all queues (all tables) for all joiner router replicas
+            # Make trace unique per (input_table, output_table) combination
+            # Format: {filter_router_id}:{aggregator_id}:{input_table}:{output_table}
+            for table in tables:
+                # Create unique trace per output table by appending output table name
+                cleanup_msg.trace = f"{base_trace}:{table}"
+                envelope.clean_up.CopyFrom(cleanup_msg)
+                updated_raw = envelope.SerializeToString()
+                
+                for replica in range(self._jr_replicas):
+                    queue = self._out_queues.get((table, replica))
+                    if not queue:
+                        logging.error(
+                            "No out queue configured for table=%s, replica=%d",
+                            table,
+                            replica,
+                        )
+                        continue
+                    queue.send(updated_raw)
+                    logging.debug(
+                        "Forwarded CLEAN_UP_MESSAGE to joiner_router input_table=%s output_table=%s replica=%d client_id=%s trace=%s",
+                        input_table,
+                        table,
                         replica,
+                        client_id,
+                        cleanup_msg.trace,
                     )
-                    continue
-                q.send(raw)
-                logging.debug(
-                    "Forwarded CLEAN_UP_MESSAGE to joiner_router replica=%s table=%s client_id=%s",
-                    replica,
-                    table_name,
-                    client_id,
-                )
         except Exception:
             logging.exception("Failed to broadcast cleanup to joiners")
             raise
@@ -344,7 +371,7 @@ class Aggregator:
                 table_name = TID_TO_NAME[data_batch.payload.name]
                 self._forward_databatch_by_table(data_batch, message, table_name)
             elif envelope.type == MessageType.CLEAN_UP_MESSAGE:
-                self._broadcast_cleanup_to_joiners(message)
+                self._broadcast_cleanup_to_joiners(message, "menu_items")
             else:
                 logging.warning("Unknown message type: %s", envelope.type)
 
@@ -386,6 +413,8 @@ class Aggregator:
                     return False
                 table_name = TID_TO_NAME[data_batch.payload.name]
                 self._forward_databatch_by_table(data_batch, message, table_name)
+            elif envelope.type == MessageType.CLEAN_UP_MESSAGE:
+                self._broadcast_cleanup_to_joiners(message, "stores")
             else:
                 logging.warning("Unknown message type: %s", envelope.type)
 
@@ -507,6 +536,8 @@ class Aggregator:
                         "Unexpected query_id=%s for transaction table", query_id
                     )
                     return False
+            elif envelope.type == MessageType.CLEAN_UP_MESSAGE:
+                self._broadcast_cleanup_to_joiners(message, "transactions")
             else:
                 logging.warning("Unknown message type: %s", envelope.type)
 
@@ -594,6 +625,8 @@ class Aggregator:
                         "Transaction item with query distinct from 1: %s", query_id
                     )
                     return False
+            elif envelope.type == MessageType.CLEAN_UP_MESSAGE:
+                self._broadcast_cleanup_to_joiners(message, "transaction_items")
             else:
                 logging.warning("Unknown message type: %s", envelope.type)
 
@@ -636,6 +669,8 @@ class Aggregator:
                     return False
                 table_name = TID_TO_NAME[data_batch.payload.name]
                 self._forward_databatch_by_table(data_batch, message, table_name)
+            elif envelope.type == MessageType.CLEAN_UP_MESSAGE:
+                self._broadcast_cleanup_to_joiners(message, "users")
             else:
                 logging.warning("Unknown message type: %s", envelope.type)
 

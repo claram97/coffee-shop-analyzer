@@ -46,16 +46,22 @@ class _FanInServer:
     ):
         self._logger = logger
         self._router = router
+        self._in_queues = in_queues
         self._consumers = [MessageMiddlewareQueue(broker_host, q) for q in in_queues]
         self._threads: list[threading.Thread] = []
 
     def run(self, stop_evt: threading.Event):
-        def mk_cb():
-            return lambda body: self._router._on_raw(body)
+        def mk_cb(queue_name: str):
+            def callback(body: bytes, channel=None, delivery_tag=None, redelivered=False):
+                return self._router._on_raw_with_ack(
+                    body, channel, delivery_tag, redelivered, queue_name=queue_name
+                )
+            return callback
 
-        for c in self._consumers:
+        for i, c in enumerate(self._consumers):
+            queue_name = self._in_queues[i]
             t = threading.Thread(
-                target=c.start_consuming, args=(mk_cb(),), daemon=False
+                target=c.start_consuming, args=(mk_cb(queue_name),), daemon=False
             )
             t.start()
             self._threads.append(t)
