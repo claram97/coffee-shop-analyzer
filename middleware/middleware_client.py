@@ -54,6 +54,7 @@ class MessageMiddlewareQueue(MessageMiddleware):
         self._consuming_thread = None
         self._stop_event = threading.Event()
         self._consume_lock = threading.Lock()
+        self._current_callback = None  # Stored for reconnection
         self._connect()
         self._setup_queue()
 
@@ -145,6 +146,8 @@ class MessageMiddlewareQueue(MessageMiddleware):
 
     def _consume_loop(self, callback_wrapper):
         try:
+            # Store callback for potential reconnection
+            self._current_callback = callback_wrapper
             self._consumer_tag = self._channel.basic_consume(
                 queue=self.queue_name, on_message_callback=callback_wrapper
             )
@@ -157,19 +160,44 @@ class MessageMiddlewareQueue(MessageMiddleware):
                 raise MessageMiddlewareMessageError("Consumer error") from e
 
     def _process_events_until_stopped(self):
-        """Process RabbitMQ events until stop is requested"""
+        """Process RabbitMQ events until stop is requested, with automatic reconnection"""
+        reconnect_delay = 1.0
+        max_reconnect_delay = 30.0
+
         while not self._stop_event.is_set():
             try:
                 self._connection.process_data_events(time_limit=10.0)
+                reconnect_delay = 1.0  # Reset delay on successful processing
             except Exception as e:
-                if not self._stop_event.is_set():
-                    logging.error(
-                        f"DEBUG: Exception in process_data_events: {e}", exc_info=True
-                    )
-                    logging.error(
-                        "DEBUG: Consumer loop broke due to exception - this is likely the cause of stuck messages!"
-                    )
+                if self._stop_event.is_set():
                     break
+
+                logging.error(
+                    f"Exception in process_data_events: {e} - attempting reconnect in {reconnect_delay}s",
+                    exc_info=True,
+                )
+
+                # Wait before reconnecting (with stop event check)
+                if self._stop_event.wait(timeout=reconnect_delay):
+                    break
+
+                # Attempt to reconnect
+                try:
+                    self._force_cleanup()
+                    self._connect()
+                    self._setup_queue()
+                    # Re-register consumer with same callback
+                    if hasattr(self, '_current_callback') and self._current_callback:
+                        self._consumer_tag = self._channel.basic_consume(
+                            queue=self.queue_name, on_message_callback=self._current_callback
+                        )
+                    logging.info(f"Successfully reconnected to queue '{self.queue_name}'")
+                    reconnect_delay = 1.0  # Reset delay on successful reconnect
+                except Exception as reconnect_error:
+                    logging.error(
+                        f"Reconnection failed: {reconnect_error} - will retry in {reconnect_delay}s"
+                    )
+                    reconnect_delay = min(reconnect_delay * 2, max_reconnect_delay)
 
     def _cleanup_consumer(self):
         """Clean up consumer resources"""
@@ -263,6 +291,7 @@ class MessageMiddlewareExchange(MessageMiddleware):
         self._consume_lock = threading.Lock()
         self.queue_name = queue_name
         self._send_lock = threading.Lock()
+        self._current_callback = None  # Stored for reconnection
 
         self._connect()
         self._setup_exchange()
@@ -393,23 +422,60 @@ class MessageMiddlewareExchange(MessageMiddleware):
     def _consume_loop(self, callback_wrapper):
         try:
             logging.debug(f"Starting consume loop on queue: {self.queue_name}")
+            # Store callback for potential reconnection
+            self._current_callback = callback_wrapper
             self._consumer_tag = self._channel.basic_consume(
                 queue=self.queue_name, on_message_callback=callback_wrapper
             )
             logging.debug("Entering event processing loop")
+
+            reconnect_delay = 1.0
+            max_reconnect_delay = 30.0
+
             while not self._stop_event.is_set():
                 try:
                     self._connection.process_data_events(time_limit=10.0)
+                    reconnect_delay = 1.0  # Reset delay on successful processing
                 except Exception as e:
-                    if not self._stop_event.is_set():
-                        logging.error(
-                            f"Exception in exchange process_data_events: {e}",
-                            exc_info=True,
-                        )
-                        logging.error(
-                            "Consumer loop broke due to exception - this is likely the cause of stuck messages!"
-                        )
+                    if self._stop_event.is_set():
                         break
+
+                    logging.error(
+                        f"Exception in exchange process_data_events: {e} - attempting reconnect in {reconnect_delay}s",
+                        exc_info=True,
+                    )
+
+                    # Wait before reconnecting (with stop event check)
+                    if self._stop_event.wait(timeout=reconnect_delay):
+                        break
+
+                    # Attempt to reconnect
+                    try:
+                        self._force_cleanup()
+                        self._connect()
+                        self._setup_exchange()
+                        # Recreate queue and bindings
+                        if self.queue_name:
+                            self._channel.queue_declare(queue=self.queue_name, durable=True)
+                            for key in self.route_keys:
+                                self._channel.queue_bind(
+                                    exchange=self.exchange_name,
+                                    queue=self.queue_name,
+                                    routing_key=key,
+                                )
+                            self._channel.basic_qos(prefetch_count=100)
+                        # Re-register consumer
+                        self._consumer_tag = self._channel.basic_consume(
+                            queue=self.queue_name, on_message_callback=callback_wrapper
+                        )
+                        logging.info(f"Successfully reconnected to exchange '{self.exchange_name}' queue '{self.queue_name}'")
+                        reconnect_delay = 1.0  # Reset delay on successful reconnect
+                    except Exception as reconnect_error:
+                        logging.error(
+                            f"Exchange reconnection failed: {reconnect_error} - will retry in {reconnect_delay}s"
+                        )
+                        reconnect_delay = min(reconnect_delay * 2, max_reconnect_delay)
+
             if self._consumer_tag and self._channel and self._channel.is_open:
                 try:
                     self._channel.basic_cancel(self._consumer_tag)

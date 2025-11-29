@@ -136,12 +136,13 @@ class Orchestrator:
             self._publisher_for_rk(rk).send(raw)
 
     def _broadcast_client_cleanup(self, client_id: str):
-        """Broadcast client_cleanup message to all filter router replicas."""
+        """Broadcast client_cleanup message to all worker processes."""
         if not client_id:
             return
         
         cleanup_msg = CleanUpMessage()
         cleanup_msg.client_id = client_id
+        cleanup_msg.trace = ""  # Empty trace initially, workers will add their IDs
         
         env = Envelope()
         env.type = MessageType.CLEAN_UP_MESSAGE
@@ -150,14 +151,30 @@ class Orchestrator:
         payload = env.SerializeToString()
         
         logging.info(
-            "action: broadcast_client_cleanup | result: broadcasting | client_id: %s | replicas: %d",
+            "action: broadcast_client_cleanup | result: broadcasting | client_id: %s | workers: %d",
             client_id,
-            self._num_routers,
+            self._worker_count,
         )
         
-        for pid in range(self._num_routers):
-            rk = self._fr_rk_fmt.format(pid=pid)
-            self._publisher_for_rk(rk).send(payload)
+        # Send cleanup to all workers via task queues (similar to EOF handling)
+        if not getattr(self, "_task_queues", None):
+            raise RuntimeError("no task queues available for workers")
+        
+        for idx, q in enumerate(self._task_queues):
+            try:
+                q.put(("__cleanup__", payload, client_id), timeout=self._queue_put_timeout)
+                logging.debug(
+                    "action: cleanup_enqueue | result: success | worker_queue: %d | client_id: %s",
+                    idx,
+                    client_id,
+                )
+            except queue.Full:
+                logging.error(
+                    "action: cleanup_enqueue | result: fail | reason: timeout | worker_queue: %d | client_id: %s",
+                    idx,
+                    client_id,
+                )
+                # Continue with other workers even if one fails
 
     def _setup_message_processors(self):
         """Setup message processors for different message types."""

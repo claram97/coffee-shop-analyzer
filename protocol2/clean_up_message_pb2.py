@@ -24,7 +24,7 @@ _sym_db = _symbol_database.Default()
 
 
 
-DESCRIPTOR = _descriptor_pool.Default().AddSerializedFile(b'\n\x16\x63lean_up_message.proto\x12\x08protocol\"#\n\x0e\x43leanUpMessage\x12\x11\n\tclient_id\x18\x01 \x01(\tb\x06proto3')
+DESCRIPTOR = _descriptor_pool.Default().AddSerializedFile(b'\n\x16\x63lean_up_message.proto\x12\x08protocol\"2\n\x0e\x43leanUpMessage\x12\x11\n\tclient_id\x18\x01 \x01(\t\x12\r\n\x05trace\x18\x02 \x01(\tb\x06proto3')
 
 _globals = globals()
 _builder.BuildMessageAndEnumDescriptors(DESCRIPTOR, _globals)
@@ -32,5 +32,5 @@ _builder.BuildTopDescriptorsAndMessages(DESCRIPTOR, 'clean_up_message_pb2', _glo
 if not _descriptor._USE_C_DESCRIPTORS:
   DESCRIPTOR._loaded_options = None
   _globals['_CLEANUPMESSAGE']._serialized_start=36
-  _globals['_CLEANUPMESSAGE']._serialized_end=71
+  _globals['_CLEANUPMESSAGE']._serialized_end=86
 # @@protoc_insertion_point(module_scope)
