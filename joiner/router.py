@@ -1,20 +1,20 @@
 from __future__ import annotations
 
 import hashlib
+import json
 import logging
 import os
 import shutil
 import threading
+import time
 from collections import defaultdict
 from random import randint
 from typing import Any, Callable, Dict, List, Optional, Set, Tuple
 
 from app_config.config_loader import Config
-from middleware.middleware_client import (
-    MessageMiddleware,
-    MessageMiddlewareExchange,
-    MessageMiddlewareQueue,
-)
+from middleware.middleware_client import (MessageMiddleware,
+                                          MessageMiddlewareExchange,
+                                          MessageMiddlewareQueue)
 from protocol2.databatch_pb2 import DataBatch, Query, ShardInfo
 from protocol2.envelope_pb2 import Envelope, MessageType
 from protocol2.eof_message_pb2 import EOFMessage
@@ -161,11 +161,13 @@ class JoinerRouter:
         agg_shards = next(iter(route_cfg.values())).agg_shards if route_cfg else 0
         self._num_input_queues = num_tables * agg_shards
 
-        # Track pending cleanup messages by queue: key=(client_id, queue_name) -> bool (received)
-        # We need to wait for fr_replicas * agg_shards messages from each input queue
-        self._pending_cleanups: Dict[tuple[str, str], Set[str]] = defaultdict(set)  # (client_id, queue_name) -> set of traces
-        # Track received delivery_tags for deduplication: key=(client_id, queue_name) -> Set[int]
-        self._cleanup_delivery_tags: Dict[tuple[str, str], Set[int]] = defaultdict(set)
+        # Track pending cleanup messages: key=client_id -> set of traces
+        # We need to wait for fr_replicas * agg_shards messages
+        self._pending_cleanups: Dict[str, Set[str]] = defaultdict(
+            set
+        )  # client_id -> set of traces
+        # Track received delivery_tags for deduplication: key=client_id -> Set[int]
+        self._cleanup_delivery_tags: Dict[str, Set[int]] = defaultdict(set)
         # Store unacked cleanup messages: key=client_id -> list of (channel, delivery_tag)
         self._unacked_cleanups: Dict[str, list] = {}
         self._cleanup_ack_lock = threading.Lock()
@@ -175,6 +177,19 @@ class JoinerRouter:
         self._received_batches: Dict[tuple[TableName, str, tuple], set[int]] = (
             defaultdict(set)
         )
+
+        # Blacklist: client_ids that should have their batches discarded
+        # Format: {client_id: timestamp} - timestamp is when the client was blacklisted
+        self._blacklist: Dict[str, float] = {}
+        self._blacklist_lock = threading.Lock()
+        
+        # Blacklist file path
+        state_dir = os.getenv("JOINER_ROUTER_STATE_DIR", "/tmp/joiner_router_state")
+        os.makedirs(state_dir, exist_ok=True)
+        self._blacklist_file = os.path.join(state_dir, f"blacklist_{router_id}.json")
+        
+        # Load and clean blacklist at bootstrap
+        self._load_and_clean_blacklist()
 
         log.info(
             "JoinerRouter init: tables=%s",
@@ -219,6 +234,67 @@ class JoinerRouter:
         )
         return False
 
+    def _load_and_clean_blacklist(self) -> None:
+        """
+        Load blacklist from file and remove entries older than 10 minutes.
+        Called at bootstrap.
+        """
+        current_time = time.time()
+        cutoff_time = current_time - 600  # 10 minutes ago
+        
+        # Load from file if it exists
+        if os.path.exists(self._blacklist_file):
+            try:
+                with open(self._blacklist_file, 'r') as f:
+                    data = json.load(f)
+                    # Filter out entries older than 10 minutes
+                    self._blacklist = {
+                        client_id: timestamp
+                        for client_id, timestamp in data.items()
+                        if timestamp > cutoff_time
+                    }
+                    log.info(
+                        "Loaded blacklist: %d entries (removed %d old entries)",
+                        len(self._blacklist),
+                        len(data) - len(self._blacklist)
+                    )
+            except Exception as e:
+                log.warning("Failed to load blacklist file: %s", e)
+                self._blacklist = {}
+        else:
+            self._blacklist = {}
+            log.info("Blacklist file not found, starting with empty blacklist")
+        
+        # Save cleaned blacklist back to file
+        self._save_blacklist()
+
+    def _save_blacklist(self) -> None:
+        """Save blacklist to file."""
+        try:
+            with open(self._blacklist_file, 'w') as f:
+                json.dump(self._blacklist, f)
+        except Exception as e:
+            log.error("Failed to save blacklist file: %s", e)
+
+    def _add_to_blacklist(self, client_id: str) -> None:
+        """Add a client_id to the blacklist (both in memory and file)."""
+        if not client_id:
+            return
+        
+        current_time = time.time()
+        with self._blacklist_lock:
+            self._blacklist[client_id] = current_time
+            self._save_blacklist()
+            log.info("Added client_id to blacklist: %s", client_id)
+
+    def _is_blacklisted(self, client_id: str) -> bool:
+        """Check if a client_id is in the blacklist."""
+        if not client_id:
+            return False
+        
+        with self._blacklist_lock:
+            return client_id in self._blacklist
+
     def shutdown(self):
         log.info("Shutting down JoinerRouter...")
         self._is_shutting_down = True
@@ -230,7 +306,12 @@ class JoinerRouter:
         self._in.start_consuming(self._on_raw_with_ack)
 
     def _on_raw_with_ack(
-        self, raw: bytes, channel=None, delivery_tag=None, redelivered=False, queue_name: Optional[str] = None
+        self,
+        raw: bytes,
+        channel=None,
+        delivery_tag=None,
+        redelivered=False,
+        queue_name: Optional[str] = None,
     ):
         """
         Process a message and return whether to ACK immediately.
@@ -256,11 +337,27 @@ class JoinerRouter:
 
         if envelope.type == MessageType.CLEAN_UP_MESSAGE:
             return self._handle_client_cleanup_like(
-                envelope.clean_up, raw, channel, delivery_tag, redelivered, queue_name=queue_name
+                envelope.clean_up,
+                raw,
+                channel,
+                delivery_tag,
+                redelivered,
+                queue_name=queue_name,
             )
 
         if envelope.type == MessageType.DATA_BATCH:
             db = envelope.data_batch
+
+            # Check blacklist - discard batches from clients being cleaned up
+            client_id = db.client_id if db.client_id else ""
+            if self._is_blacklisted(client_id):
+                log.info(
+                    "Discarding batch from blacklisted client: table=%s bn=%s cid=%s",
+                    db.payload.name,
+                    db.payload.batch_number,
+                    client_id,
+                )
+                return True  # ACK and discard
 
             # Check for duplicate batch and discard if already processed
             if self._is_duplicate_batch(db):
@@ -525,13 +622,9 @@ class JoinerRouter:
             self._pending_eofs.pop(key, None)
             self._part_counter.pop(key, None)
 
-        # Clean pending cleanups and delivery tag tracking (tracked by (client_id, queue_name))
-        keys_to_remove = [key for key in self._pending_cleanups.keys() if key[0] == client_id]
-        for key in keys_to_remove:
-            self._pending_cleanups.pop(key, None)
-        keys_to_remove = [key for key in self._cleanup_delivery_tags.keys() if key[0] == client_id]
-        for key in keys_to_remove:
-            self._cleanup_delivery_tags.pop(key, None)
+        # Clean pending cleanups and delivery tag tracking
+        self._pending_cleanups.pop(client_id, None)
+        self._cleanup_delivery_tags.pop(client_id, None)
 
         # Clean received batches deduplication state
         # Remove all entries where client_id matches (second element of tuple key)
@@ -591,38 +684,27 @@ class JoinerRouter:
             log.warning("CLEANUP without queue_name; cannot track by queue")
             return True
 
-        # Get agg_shards from any table config (they should all be the same)
-        # Use menu_items as reference
         menu_cfg = self._cfg.get(TableName.MENU_ITEMS)
-        if menu_cfg is None:
-            log.warning("No route config found for menu_items, cannot determine agg_shards")
-            return True
 
         if redelivered:
-            log.info("CLEANUP REDELIVERED (recovering state): client_id=%s queue=%s", client_id, queue_name)
+            log.info(
+                "CLEANUP REDELIVERED (recovering state): client_id=%s queue=%s",
+                client_id,
+                queue_name,
+            )
         else:
             log.debug("CLEANUP received: client_id=%s queue=%s", client_id, queue_name)
 
-        # Store the channel and delivery_tag for later acking (append to list)
         with self._cleanup_ack_lock:
             if channel is not None and delivery_tag is not None:
                 if client_id not in self._unacked_cleanups:
                     self._unacked_cleanups[client_id] = []
                 self._unacked_cleanups[client_id].append((channel, delivery_tag))
 
-        # Track cleanup messages by (client_id, queue_name)
-        # Each filter router sends cleanup to each aggregator through each input table queue
-        # Each aggregator forwards to all output tables
-        # Trace format: {filter_router_id}:{aggregator_id}:{input_table}:{output_table}
-        # We need to wait for one message per (filter_router, aggregator, input_table, output_table) combination
-        # Total expected: fr_replicas * agg_shards * num_input_tables * num_output_tables
         trace = cleanup_msg.trace if cleanup_msg.trace else None
-        queue_key = (client_id, queue_name)
-        
-        # Track by trace per queue to count unique messages from each queue
-        # Trace is the reliable identifier for message uniqueness
+
         if trace:
-            recvd_traces = self._pending_cleanups[queue_key]
+            recvd_traces = self._pending_cleanups[client_id]
             if trace in recvd_traces:
                 log.warning(
                     "Duplicate CLEANUP trace ignored: client_id=%s queue=%s trace=%s",
@@ -630,13 +712,11 @@ class JoinerRouter:
                     queue_name,
                     trace,
                 )
-                return False  # Delay ACK even for duplicates
+                return False
             recvd_traces.add(trace)
         else:
-            # Fallback: use delivery_tag as identifier if no trace (shouldn't happen in normal operation)
-            # Only use delivery_tag for redelivered messages as a safety check
             if redelivered and delivery_tag is not None:
-                delivery_tags = self._cleanup_delivery_tags[queue_key]
+                delivery_tags = self._cleanup_delivery_tags[client_id]
                 if delivery_tag in delivery_tags:
                     log.warning(
                         "Duplicate CLEANUP (redelivered) ignored: client_id=%s queue=%s delivery_tag=%s",
@@ -646,20 +726,17 @@ class JoinerRouter:
                     )
                     return False
                 delivery_tags.add(delivery_tag)
-                self._pending_cleanups[queue_key].add(f"delivery_tag_{delivery_tag}")
+                self._pending_cleanups[client_id].add(f"delivery_tag_{delivery_tag}")
             elif delivery_tag is not None:
-                # No trace and not redelivered - use delivery_tag as fallback
-                self._pending_cleanups[queue_key].add(f"delivery_tag_{delivery_tag}")
+                self._pending_cleanups[client_id].add(f"delivery_tag_{delivery_tag}")
 
-        # Count total unique messages received across all queues
-        total_received = sum(len(traces) for (cid, _), traces in self._pending_cleanups.items() if cid == client_id)
-        # Expected: one message per (filter_router, aggregator, input_table, output_table) combination
-        # Since each aggregator receives cleanup through all input tables and forwards to all output tables,
-        # and we count across all output table queues, the total is:
-        num_input_tables = len(self._cfg)  # Number of input tables (same as output tables in this system)
-        num_output_tables = len(self._cfg)  # Number of output tables
-        expected_count = self._fr_replicas * menu_cfg.agg_shards * num_input_tables * num_output_tables
-        
+        total_received = sum(
+            len(traces)
+            for cid, traces in self._pending_cleanups.items()
+            if cid == client_id
+        )
+        expected_count = self._fr_replicas * menu_cfg.agg_shards
+
         log.info(
             "CLEANUP recv client_id=%s queue=%s trace=%s progress=%d/%d",
             client_id,
@@ -674,14 +751,11 @@ class JoinerRouter:
                 "CLEANUP threshold reached for client_id=%s → cleaning up and forwarding",
                 client_id,
             )
-            # Clean local state
+            self._add_to_blacklist(client_id)
             self._cleanup_client_state(client_id)
 
-            # Update trace to include joiner router ID
             cleanup_msg.trace = str(self._router_id)
 
-            # Broadcast cleanup message to all joiner workers via all table exchanges
-            # Broadcast to all tables to ensure all workers receive the cleanup
             for table_name, table_cfg in self._cfg.items():
                 env = Envelope(type=MessageType.CLEAN_UP_MESSAGE, clean_up=cleanup_msg)
                 raw = env.SerializeToString()
@@ -693,19 +767,12 @@ class JoinerRouter:
                 )
                 self._broadcast(table_cfg, raw, shards=table_cfg.joiner_shards)
 
-            # Now ACK the cleanup messages since we've successfully processed them
             self._ack_cleanup(client_id)
 
-            # Use safe pops in case concurrent callbacks already cleared these.
-            # Remove all entries for this client_id
-            keys_to_remove = [key for key in self._pending_cleanups.keys() if key[0] == client_id]
-            for key in keys_to_remove:
-                self._pending_cleanups.pop(key, None)
-            keys_to_remove = [key for key in self._cleanup_delivery_tags.keys() if key[0] == client_id]
-            for key in keys_to_remove:
-                self._cleanup_delivery_tags.pop(key, None)
+            # Clean up tracking state for this client
+            self._pending_cleanups.pop(client_id, None)
+            self._cleanup_delivery_tags.pop(client_id, None)
 
-        # Return False to delay ACK until fully processed
         return False
 
     def _ack_cleanup(self, client_id: str) -> None:
@@ -713,7 +780,9 @@ class JoinerRouter:
         with self._cleanup_ack_lock:
             ack_list = self._unacked_cleanups.get(client_id, [])
             if ack_list:
-                log.info("ACKing %d CLEANUP messages: client_id=%s", len(ack_list), client_id)
+                log.info(
+                    "ACKing %d CLEANUP messages: client_id=%s", len(ack_list), client_id
+                )
                 acked_count = 0
                 failed_count = 0
                 for channel, delivery_tag in ack_list:
