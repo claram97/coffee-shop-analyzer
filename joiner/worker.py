@@ -77,7 +77,7 @@ class JoinerWorker:
         # Track pending cleanup messages by queue: key=(client_id, queue_name) -> set of traces
         # We need to wait for router_replicas * num_input_queues messages
         self._pending_cleanups: Dict[tuple[str, str], Set[str]] = defaultdict(set)  # (client_id, queue_name) -> set of traces
-        self._cleanup_lock = threading.Lock()
+        self._cleanup_lock = threading.RLock()  # RLock to allow reentrant acquisition from _cleanup_client_state
 
         self._stop_event = stop_event
         self._is_shutting_down = False
@@ -404,13 +404,39 @@ class JoinerWorker:
 
     def _cleanup_persisted_client(self, client_id: str) -> None:
         """Clean up all persisted data for a client."""
-        for filename in os.listdir(self._persistence_dir):
-            if client_id in filename:
-                try:
-                    os.remove(os.path.join(self._persistence_dir, filename))
-                    self._log.debug("Cleaned up: %s", filename)
-                except Exception as e:
-                    self._log.warning("Failed to cleanup %s: %s", filename, e)
+        try:
+            all_files = os.listdir(self._persistence_dir)
+        except Exception as e:
+            self._log.error(
+                "Failed to list persistence dir %s: %s", self._persistence_dir, e
+            )
+            return
+
+        matching_files = [f for f in all_files if client_id in f]
+        self._log.info(
+            "Cleanup persisted client=%s: found %d files, %d matching in %s",
+            client_id,
+            len(all_files),
+            len(matching_files),
+            self._persistence_dir,
+        )
+
+        deleted_count = 0
+        for filename in matching_files:
+            filepath = os.path.join(self._persistence_dir, filename)
+            try:
+                os.remove(filepath)
+                deleted_count += 1
+                self._log.debug("Cleaned up: %s", filename)
+            except Exception as e:
+                self._log.warning("Failed to cleanup %s: %s", filename, e)
+
+        self._log.info(
+            "Cleanup persisted client=%s: deleted %d/%d files",
+            client_id,
+            deleted_count,
+            len(matching_files),
+        )
 
     def _cleanup_client_state(self, client_id: str) -> None:
         """
@@ -1392,12 +1418,14 @@ class JoinerWorker:
 
         self._log.info("Complete lifecycle for client=%s, cleaning up", client_id)
 
-        # Cleanup caches
-        self._cache_menu.pop(client_id, None)
-        self._cache_stores.pop(client_id, None)
+        # Cleanup caches with proper locking
+        with self._lock:
+            self._cache_menu.pop(client_id, None)
+            self._cache_stores.pop(client_id, None)
 
-        # Cleanup persisted data
-        self._cleanup_persisted_client(client_id)
+        # Cleanup persisted data with proper locking
+        with self._persistence_lock:
+            self._cleanup_persisted_client(client_id)
 
     def _ack_eof(self, key: tuple[TableName, str]) -> None:
         """Acknowledge all EOF messages for this key."""
