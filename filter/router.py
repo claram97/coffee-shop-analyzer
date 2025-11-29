@@ -11,14 +11,14 @@ from collections import defaultdict
 from random import randint
 from typing import Dict, Optional
 
-from middleware.middleware_client import (
-    MessageMiddlewareExchange,
-    MessageMiddlewareQueue,
-)
+from middleware.middleware_client import (MessageMiddlewareExchange,
+                                          MessageMiddlewareQueue)
+from protocol2.clean_up_message_pb2 import CleanUpMessage
 from protocol2.databatch_pb2 import DataBatch, Query
 from protocol2.envelope_pb2 import Envelope, MessageType
 from protocol2.eof_message_pb2 import EOFMessage
-from protocol2.table_data_pb2 import Row, TableData, TableName, TableSchema, TableStatus
+from protocol2.table_data_pb2 import (Row, TableData, TableName, TableSchema,
+                                      TableStatus)
 from protocol2.table_data_utils import iterate_rows_as_dicts
 
 TABLE_NAME_TO_STR = {
@@ -647,9 +647,6 @@ class FilterRouter:
             self._log.warning("CLEANUP without valid client_id; ignoring")
             return (True, True)
 
-        # Add client_id to blacklist when receiving cleanup message
-        self._add_to_blacklist(client_id)
-
         if redelivered:
             self._log.info("CLEANUP REDELIVERED: client_id=%s trace=%s", client_id, cleanup_msg.trace)
         else:
@@ -663,15 +660,11 @@ class FilterRouter:
 
         flush_info = None
         with self._state_lock:
-            # Extract worker ID from trace field (format: "orch_worker_id")
             worker_id = None
             if cleanup_msg.trace:
-                # Trace format from orchestrator worker: "orch_worker_id"
-                # Extract the worker ID part
                 if cleanup_msg.trace.startswith("orch_"):
                     worker_id = cleanup_msg.trace
                 else:
-                    # Fallback: use trace as-is if format is unexpected
                     worker_id = cleanup_msg.trace
                     self._log.warning(
                         "CLEANUP trace format unexpected: client_id=%s trace=%s",
@@ -679,33 +672,27 @@ class FilterRouter:
                         cleanup_msg.trace,
                     )
             else:
-                # No trace - this shouldn't happen if workers are working correctly
                 self._log.warning(
                     "CLEANUP received without trace: client_id=%s", client_id
                 )
-                # Use a fallback identifier
                 worker_id = f"unknown_{len(self._pending_cleanups.get(client_id, set()))}"
 
-            # Get or create the set of received worker IDs for this client
             recvd_workers = self._pending_cleanups.get(client_id, set())
 
-            # Check if this worker ID was already received (deduplication)
             if worker_id in recvd_workers:
                 self._log.warning(
                     "Duplicate CLEANUP ignored: client_id=%s worker_id=%s (already received from this worker)",
                     client_id,
                     worker_id,
                 )
-                # Still return delay ack to ensure proper cleanup
                 return (True, False)
 
-            # Add this worker ID to the set
             recvd_workers.add(worker_id)
             self._pending_cleanups[client_id] = recvd_workers
 
-            # Check if we've received cleanup from all orchestrator workers
             if len(recvd_workers) >= self._orch_workers:
-                flush_info = (client_id, cleanup_msg, max(1, int(self._cfg.aggregators)))
+                self._add_to_blacklist(client_id)
+                flush_info = (client_id, max(1, int(self._cfg.aggregators)))
                 self._pending_cleanups.pop(client_id, None)
                 self._log.info(
                     "CLEANUP complete: client_id=%s received from %d/%d workers",
@@ -725,25 +712,20 @@ class FilterRouter:
         if flush_info:
             self._flush_cleanup(*flush_info)
 
-        return (True, False)  # Delay ack until flushed
+        return (True, False)
 
-    def _flush_cleanup(self, client_id: str, cleanup_msg, total_parts: int):
+    def _flush_cleanup(self, client_id: str, total_parts: int):
         """
         Sends cleanup messages to aggregators and cleans up state.
         This method is called outside of the state lock.
         """
         self._log.info("CLEANUP -> aggregators: client_id=%s parts=%d", client_id, total_parts)
         
-        # Clean local state first
         self._cleanup_client_state(client_id)
 
-        # Update trace to include filter router ID
-        cleanup_msg.trace = str(self._router_id)
-
-        # Broadcast to all aggregator partitions
         for part in range(total_parts):
             try:
-                self._p.send_cleanup_to_aggregator_partition(part, cleanup_msg)
+                self._p.send_cleanup_to_aggregator_partition(part, client_id)
             except Exception as e:
                 self._log.error(
                     "Failed to send CLEANUP to aggregator part=%d client_id=%s: %s",
@@ -753,7 +735,6 @@ class FilterRouter:
                 )
                 raise
 
-        # ACK all cleanup messages for this client
         self._ack_cleanup(client_id)
 
     def _ack_cleanup(self, client_id: str) -> None:
@@ -998,15 +979,16 @@ class ExchangeBusProducer:
             )
 
     def send_cleanup_to_aggregator_partition(
-        self, partition_id: int, cleanup_msg
+        self, partition_id: int, client_id: str
     ) -> None:
         """
         Send client cleanup message to a random aggregator partition.
         The aggregator will broadcast this to joiner routers.
         """
-        # Use MENU_ITEMS table exchange for routing, table does not matter, and light tables queues are less saturated
-        table = TableName.MENU_ITEMS
-        key = self._key_for(table, int(partition_id))
+        cleanup_msg = CleanUpMessage();
+        cleanup_msg.client_id = client_id
+        cleanup_msg.trace = f"{self._router_id}:{partition_id}"
+        key = self._key_for(TableName.MENU_ITEMS, int(partition_id))
         try:
             env = Envelope(type=MessageType.CLEAN_UP_MESSAGE, clean_up=cleanup_msg)
             payload = env.SerializeToString()
