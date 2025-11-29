@@ -254,11 +254,13 @@ cat >> "$OUT_PATH" <<YAML
       - FOLLOWER_DOWN_TIMEOUT_SECONDS=${FOLLOWER_DOWN_TIMEOUT_SECONDS}
       - FOLLOWER_RESTART_COOLDOWN_SECONDS=${FOLLOWER_RESTART_COOLDOWN_SECONDS}
       - FOLLOWER_RECOVERY_GRACE_SECONDS=${FOLLOWER_RECOVERY_GRACE_SECONDS}
+      - JOINER_ROUTER_STATE_DIR=/tmp/joiner_router_state
     networks:
       - testing_net
     volumes:
       - $INI_PATH:/config/config.ini:ro
       - /var/run/docker.sock:/var/run/docker.sock
+      - ./joiner_router_state/router-${i}:/tmp/joiner_router_state
     depends_on:
       rabbitmq:
         condition: service_healthy
