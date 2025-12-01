@@ -1223,6 +1223,17 @@ class JoinerWorker:
                 "TABLE_EOF received: table=%s cid=%s trace=%s", tname, client_id, trace
             )
 
+        # CRITICAL: Check if EOF already complete BEFORE touching _pending_eofs
+        # This prevents duplicate EOF messages from overwriting complete state
+        if key in self._eof:
+            log.info(
+                "EOF already complete for table=%s cid=%s, ignoring duplicate trace=%s",
+                tname,
+                client_id,
+                trace,
+            )
+            return True
+
         recvd = self._pending_eofs.setdefault(key, set())
 
         # Track by trace to make it idempotent
