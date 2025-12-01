@@ -1,7 +1,7 @@
 #!/bin/bash
 
 # Chaos testing script - randomly stops containers and lets the leader revive them
-# Usage: ./chaos_test.sh [number_of_events]
+# Usage: ./chaos_test.sh [number_of_events] [max_wait_seconds]
 
 set -e
 
@@ -22,9 +22,12 @@ COMPONENTS=(
 # Number of times to stop containers (default: 10)
 NUM_EVENTS=${1:-10}
 
+# Maximum seconds to wait between stops (default: 20)
+MAX_WAIT=${2:-20}
+
 echo "=== Chaos Testing Script ==="
 echo "Will perform $NUM_EVENTS container stops"
-echo "Max wait between stops: 20 seconds"
+echo "Max wait between stops: $MAX_WAIT seconds"
 echo ""
 
 # Function to get all running containers matching a pattern
@@ -80,9 +83,9 @@ for i in $(seq 1 "$NUM_EVENTS"); do
     # Stop container and let leader handle recovery
     chaos_stop_container "$target_container"
     
-    # Wait random time before next stop event (0-10 seconds)
+    # Wait random time before next stop event (0-MAX seconds)
     if [[ $i -lt $NUM_EVENTS ]]; then
-        wait_time=$((RANDOM % 20 + 10))
+        wait_time=$((RANDOM % (MAX_WAIT + 1)))
         echo "[$(date +'%H:%M:%S')] Waiting $wait_time seconds before next chaos event..."
         sleep "$wait_time"
     fi
