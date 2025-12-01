@@ -494,61 +494,6 @@ class JoinerWorker:
             for key in keys_to_remove:
                 del self._written_rows[key]
 
-        # Clean unacked messages if they exist (defensive check)
-        if hasattr(self, "_unacked_eofs") and hasattr(self, "_ack_lock"):
-            unacked_eofs = getattr(self, "_unacked_eofs", {})
-            ack_lock = getattr(self, "_ack_lock")
-            with ack_lock:
-                keys_to_remove = [
-                    key for key in unacked_eofs.keys() if key[1] == client_id
-                ]
-                for key in keys_to_remove:
-                    ack_list = unacked_eofs.get(key, [])
-                    if ack_list:
-                        self._log.debug(
-                            "ACKing %d unacked EOFs during cleanup: key=%s",
-                            len(ack_list),
-                            key,
-                        )
-                        for channel, delivery_tag in ack_list:
-                            try:
-                                if channel:
-                                    channel.basic_ack(delivery_tag=delivery_tag)
-                            except Exception as e:
-                                self._log.warning(
-                                    "Failed to ACK EOF during cleanup key=%s: %s",
-                                    key,
-                                    e,
-                                )
-                    unacked_eofs.pop(key, None)
-
-        if hasattr(self, "_unacked_light_tables") and hasattr(self, "_ack_lock"):
-            unacked_light = getattr(self, "_unacked_light_tables", {})
-            ack_lock = getattr(self, "_ack_lock")
-            with ack_lock:
-                keys_to_remove = [
-                    key for key in unacked_light.keys() if key[1] == client_id
-                ]
-                for key in keys_to_remove:
-                    ack_list = unacked_light.get(key, [])
-                    if ack_list:
-                        self._log.debug(
-                            "ACKing %d unacked light table messages during cleanup: key=%s",
-                            len(ack_list),
-                            key,
-                        )
-                        for channel, delivery_tag in ack_list:
-                            try:
-                                if channel:
-                                    channel.basic_ack(delivery_tag=delivery_tag)
-                            except Exception as e:
-                                self._log.warning(
-                                    "Failed to ACK light table during cleanup key=%s: %s",
-                                    key,
-                                    e,
-                                )
-                    unacked_light.pop(key, None)
-
         # Clean persisted data
         with self._persistence_lock:
             self._cleanup_persisted_client(client_id)
@@ -1426,45 +1371,6 @@ class JoinerWorker:
         # Cleanup persisted data with proper locking
         with self._persistence_lock:
             self._cleanup_persisted_client(client_id)
-
-    def _ack_eof(self, key: tuple[TableName, str]) -> None:
-        """Acknowledge all EOF messages for this key."""
-        with self._ack_lock:
-            ack_list = self._unacked_eofs.get(key, [])
-            if ack_list:
-                self._log.info("ACKing %d EOF messages: key=%s", len(ack_list), key)
-                acked_count = 0
-                failed_count = 0
-                for channel, delivery_tag in ack_list:
-                    try:
-                        if not channel:
-                            self._log.warning(
-                                "Channel is None for EOF key=%s delivery_tag=%s - skipping ACK",
-                                key,
-                                delivery_tag,
-                            )
-                            failed_count += 1
-                            continue
-                        channel.basic_ack(delivery_tag=delivery_tag)
-                        acked_count += 1
-                    except Exception as e:
-                        self._log.warning(
-                            "Failed to ACK EOF key=%s delivery_tag=%s (will be redelivered): %s",
-                            key,
-                            delivery_tag,
-                            e,
-                        )
-                        failed_count += 1
-
-                if failed_count > 0:
-                    self._log.warning(
-                        "Failed to ACK %d/%d EOF messages for key=%s - they will be redelivered",
-                        failed_count,
-                        len(ack_list),
-                        key,
-                    )
-
-                del self._unacked_eofs[key]
 
     def _safe_send(self, raw: bytes):
         with self._out_lock:

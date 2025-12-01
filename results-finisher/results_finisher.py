@@ -891,24 +891,22 @@ class ResultsFinisher:
                     entries = self.persistence.load_manifest(client_id, query_id)
                     for entry in entries:
                         data_file = entry.get("data_file")
-                    if data_file:
-                        data_path = os.path.join(
-                            self.persistence.batches_dir, data_file
-                        )
-                    if os.path.exists(data_path):
-                        try:
-                            os.remove(data_path)
-                            logger.debug(
-                                "Deleted batch data file: %s", data_path
+                        if data_file:
+                            data_path = os.path.join(
+                                self.persistence.batches_dir, data_file
                             )
-                        except OSError as e:
-                            logger.warning(
-                                "Failed to delete batch data file %s: %s",
-                                data_path,
-                                e,
-                            )
-
-                    # Delete the manifest file
+                            if os.path.exists(data_path):
+                                try:
+                                    os.remove(data_path)
+                                    logger.debug(
+                                        "Deleted batch data file: %s", data_path
+                                    )
+                                except OSError as e:
+                                    logger.warning(
+                                        "Failed to delete batch data file %s: %s",
+                                        data_path,
+                                        e,
+                                    )                    # Delete the manifest file
                     self.persistence.delete_manifest(client_id, query_id)
                     logger.debug(
                         "Deleted manifest for query '%s' (client %s)",
