@@ -13,6 +13,7 @@ services:
     volumes:
       - ./client/config.yaml:/config.yaml:ro
       - ./.data:/data:ro
+      - ./client_runs:/client_runs
 
   client2:
     container_name: client2
@@ -27,6 +28,8 @@ services:
     volumes:
       - ./client/config.yaml:/config.yaml:ro
       - ./.data:/data:ro
+      - ./client_runs:/client_runs
+
 
   client3:
     container_name: client3
@@ -41,6 +44,7 @@ services:
     volumes:
       - ./client/config.yaml:/config.yaml:ro
       - ./.data:/data:ro
+      - ./client_runs:/client_runs
 
 networks:
   testing_net:
