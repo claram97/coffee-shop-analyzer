@@ -208,8 +208,13 @@ class FilterWorker:
         except Exception:
             logger.debug("raw preview unavailable")
         if self._stop_event.is_set():
-            logger.warning("Shutdown in progress, leaving message unacked for redelivery.")
-            return
+            logger.warning("Shutdown in progress, NACKing message for redelivery.")
+            if channel is not None and delivery_tag is not None:
+                try:
+                    channel.basic_nack(delivery_tag=delivery_tag, requeue=True)
+                except Exception as e:
+                    logger.warning("NACK failed during shutdown: %s", e)
+            return False
         t0 = time.perf_counter()
         env = Envelope()
         try:

@@ -393,7 +393,7 @@ class JoinerRouter:
         - Returns False: Delay ACK (will be done manually later)
         """
         if self._is_shutting_down or self._stop_event.is_set():
-            log.warning("Router is shutting down, nacking new message.")
+            log.warning("Router is shutting down, NACKing message for redelivery.")
             if channel is not None and delivery_tag is not None:
                 try:
                     channel.basic_nack(delivery_tag=delivery_tag, requeue=True)

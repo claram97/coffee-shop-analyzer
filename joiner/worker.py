@@ -77,6 +77,7 @@ class JoinerWorker:
         # Track pending cleanup messages by queue: key=(client_id, queue_name) -> set of traces
         # We need to wait for router_replicas * num_input_queues messages
         self._pending_cleanups: Dict[tuple[str, str], Set[str]] = defaultdict(set)  # (client_id, queue_name) -> set of traces
+        self._completed_cleanups: Set[str] = set()  # Track clients whose cleanup has been forwarded
         self._cleanup_lock = threading.RLock()  # RLock to allow reentrant acquisition from _cleanup_client_state
 
         self._stop_event = stop_event
@@ -513,6 +514,16 @@ class JoinerWorker:
             self._log.warning("CLEANUP without queue_name; cannot track by queue")
             return
 
+        # CRITICAL: Check if cleanup already completed BEFORE touching _pending_cleanups
+        # This prevents duplicate cleanup messages from re-triggering forward after completion
+        with self._cleanup_lock:
+            if client_id in self._completed_cleanups:
+                self._log.info(
+                    "CLEANUP already completed for client_id=%s, ignoring duplicate",
+                    client_id,
+                )
+                return
+
         # Extract router ID from trace (format: "joiner_router_id")
         trace = cleanup_msg.trace if cleanup_msg.trace else None
         router_id = trace if trace else None
@@ -554,6 +565,10 @@ class JoinerWorker:
                     "CLEANUP threshold reached for client_id=%s → cleaning up and forwarding",
                     client_id,
                 )
+                
+                # Mark as completed BEFORE cleanup to prevent re-trigger
+                self._completed_cleanups.add(client_id)
+                
                 # Clean local state
                 self._cleanup_client_state(client_id)
 

@@ -791,14 +791,31 @@ class ResultsFinisher:
         self.input_client.start_consuming(self._process_message)
 
     def stop(self):
+        """Stop the finisher gracefully.
+        
+        IMPORTANT: Order of operations matters to avoid race conditions:
+        1. Stop consuming and wait for in-flight messages to complete
+        2. Clean up active queries (may need to send final results)
+        3. Close output client (no more sends after this)
+        4. Close input client connection
+        """
         logger.info("ResultsFinisher is shutting down...")
+        # First, stop consuming and wait for in-flight messages to complete.
+        # This blocks until the consumer thread has finished processing.
         self.input_client.stop_consuming()
-        self.input_client.close()
-        self.output_client.close()
+        
         # Preserve persisted batches on shutdown so queries can be replayed
         # when the container restarts. Only remove disk state when a query
         # finishes successfully (see _cleanup_query_state defaults).
+        # NOTE: This must happen BEFORE closing output_client in case cleanup
+        # triggers any final result sends.
         self._cleanup_active_queries(remove_persisted=False)
+        
+        # Now it's safe to close output client - no more sends in progress
+        self.output_client.close()
+        
+        # Finally close the input client connection
+        self.input_client.close()
         logger.info("ResultsFinisher has stopped.")
 
     def _cleanup_active_queries(self, *, remove_persisted: bool = True):

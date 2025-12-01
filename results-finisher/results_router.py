@@ -223,12 +223,24 @@ class ResultsRouter:
         self.input_client.start_consuming(self._process_message)
 
     def stop(self):
-        """Stops the consumer and closes all connections gracefully."""
+        """Stops the consumer and closes all connections gracefully.
+        
+        IMPORTANT: We must stop consuming BEFORE closing output clients.
+        stop_consuming() blocks until the consumer thread exits, which ensures
+        all in-flight messages have been fully processed (including their sends
+        to output clients). Only then is it safe to close the output clients.
+        """
         logger.info("ResultsRouter is shutting down...")
+        # First, stop consuming and wait for in-flight messages to complete.
+        # This blocks until the consumer thread has finished processing.
         self.input_client.stop_consuming()
-        self.input_client.close()
+        
+        # Now it's safe to close output clients - no more sends in progress
         for client in self.output_clients.values():
             client.close()
+        
+        # Finally close the input client connection
+        self.input_client.close()
         logger.info("ResultsRouter has stopped.")
 
 # --- Service Entrypoint ---

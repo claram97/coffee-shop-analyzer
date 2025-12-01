@@ -288,15 +288,24 @@ class Aggregator:
         logging.info("Started aggregator server")
 
     def stop(self):
-        """Stop the aggregator server."""
+        """Stop the aggregator server gracefully.
+        
+        IMPORTANT: Order of operations matters to avoid race conditions:
+        1. Set running = False to signal handlers to stop
+        2. Stop consuming on all exchanges and wait for in-flight messages
+        3. Close output queues (no more sends after this)
+        4. Close input exchanges
+        """
         self.running = False
         logging.info("Stopping aggregator server")
-
         for exchange in self._exchanges.values():
             exchange.stop_consuming()
 
         for queue in self._out_queues.values():
             queue.close()
+
+        for exchange in self._exchanges.values():
+            exchange.close()
 
         logging.info("Aggregator server stopped")
 

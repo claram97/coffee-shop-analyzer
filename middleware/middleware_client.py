@@ -106,8 +106,14 @@ class MessageMiddlewareQueue(MessageMiddleware):
                 f"DEBUG: Callback received message, delivery_tag: {method.delivery_tag}, body_size: {len(body)}, redelivered: {method.redelivered}"
             )
 
+            # During shutdown, NACK the message so it's requeued and processed after restart.
+            # This ensures we never lose messages - they'll be redelivered.
             if self._stop_event.is_set():
-                logging.warning("DEBUG: Stop event is set, skipping message processing")
+                logging.warning("DEBUG: Stop event is set, NACKing message for redelivery")
+                try:
+                    ch.basic_nack(delivery_tag=method.delivery_tag, requeue=True)
+                except Exception as e:
+                    logging.warning("Failed to NACK during shutdown: %s", e)
                 return
             try:
                 logging.debug(f"DEBUG: About to call on_message_callback")
@@ -377,10 +383,14 @@ class MessageMiddlewareExchange(MessageMiddleware):
                 f"Exchange callback received message, delivery_tag: {method.delivery_tag}, body_size: {len(body)}, redelivered: {method.redelivered}"
             )
 
+            # During shutdown, NACK the message so it's requeued and processed after restart.
+            # This ensures we never lose messages - they'll be redelivered.
             if self._stop_event.is_set():
-                logging.warning(
-                    "Exchange stop event is set, skipping message processing"
-                )
+                logging.warning("Exchange stop event is set, NACKing message for redelivery")
+                try:
+                    ch.basic_nack(delivery_tag=method.delivery_tag, requeue=True)
+                except Exception as e:
+                    logging.warning("Failed to NACK during shutdown: %s", e)
                 return
 
             try:
