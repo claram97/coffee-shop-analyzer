@@ -76,8 +76,15 @@ class JoinerWorker:
 
         # Track pending cleanup messages by queue: key=(client_id, queue_name) -> set of traces
         # We need to wait for router_replicas * num_input_queues messages
-        self._pending_cleanups: Dict[tuple[str, str], Set[str]] = defaultdict(set)  # (client_id, queue_name) -> set of traces
-        self._cleanup_lock = threading.RLock()  # RLock to allow reentrant acquisition from _cleanup_client_state
+        self._pending_cleanups: Dict[tuple[str, str], Set[str]] = defaultdict(
+            set
+        )  # (client_id, queue_name) -> set of traces
+        self._completed_cleanups: Set[str] = (
+            set()
+        )  # Track clients whose cleanup has been forwarded
+        self._cleanup_lock = (
+            threading.RLock()
+        )  # RLock to allow reentrant acquisition from _cleanup_client_state
 
         self._stop_event = stop_event
         self._is_shutting_down = False
@@ -370,6 +377,40 @@ class JoinerWorker:
                     )
 
         self._log.info("State restoration complete")
+        
+        # Check consistency: if all EOFs received but not marked as completed, fix it
+        self._check_eof_consistency()
+
+    def _check_eof_consistency(self) -> None:
+        """
+        Check consistency between pending EOFs and completed EOFs on bootstrap.
+        If all EOFs were received for a key (all router replicas sent EOF) but it's not marked
+        as completed in _eof (for phase readiness), add it to _eof.
+        Keep entries in _pending_eofs until cleanup removes them.
+        """
+        keys_to_complete = []
+        for key, traces in self._pending_eofs.items():
+            # Check if all router replicas have sent EOF for this key
+            if len(traces) >= self._router_replicas:
+                # All EOFs received, but check if it's marked in _eof for phase readiness
+                if key not in self._eof:
+                    keys_to_complete.append(key)
+                    self._log.info(
+                        "Found inconsistent EOF state: key=%s has all %d traces but not in _eof, fixing...",
+                        key,
+                        len(traces),
+                    )
+        
+        # Add missing keys to _eof for phase readiness
+        # Keep entries in _pending_eofs until cleanup removes them
+        if keys_to_complete:
+            for key in keys_to_complete:
+                self._eof.add(key)
+            
+            self._log.info(
+                "Fixed EOF consistency: added %d keys to _eof for phase readiness",
+                len(keys_to_complete),
+            )
 
     def _is_duplicate_batch(self, data_batch: DataBatch) -> bool:
         """
@@ -462,12 +503,12 @@ class JoinerWorker:
             self._cache_menu.pop(client_id, None)
             self._cache_stores.pop(client_id, None)
 
-            # Clean EOF tracking
+            # Clean EOF tracking (_eof is used for phase readiness)
             eof_keys_to_remove = [key for key in self._eof if key[1] == client_id]
             for key in eof_keys_to_remove:
                 self._eof.discard(key)
 
-            # Clean pending EOFs
+            # Clean pending EOFs (entries remain here until cleanup removes them)
             keys_to_remove = [
                 key for key in self._pending_eofs.keys() if key[1] == client_id
             ]
@@ -483,7 +524,9 @@ class JoinerWorker:
 
         # Clean pending cleanups (tracked by (client_id, queue_name))
         with self._cleanup_lock:
-            keys_to_remove = [key for key in self._pending_cleanups.keys() if key[0] == client_id]
+            keys_to_remove = [
+                key for key in self._pending_cleanups.keys() if key[0] == client_id
+            ]
             for key in keys_to_remove:
                 self._pending_cleanups.pop(key, None)
 
@@ -494,61 +537,6 @@ class JoinerWorker:
             for key in keys_to_remove:
                 del self._written_rows[key]
 
-        # Clean unacked messages if they exist (defensive check)
-        if hasattr(self, "_unacked_eofs") and hasattr(self, "_ack_lock"):
-            unacked_eofs = getattr(self, "_unacked_eofs", {})
-            ack_lock = getattr(self, "_ack_lock")
-            with ack_lock:
-                keys_to_remove = [
-                    key for key in unacked_eofs.keys() if key[1] == client_id
-                ]
-                for key in keys_to_remove:
-                    ack_list = unacked_eofs.get(key, [])
-                    if ack_list:
-                        self._log.debug(
-                            "ACKing %d unacked EOFs during cleanup: key=%s",
-                            len(ack_list),
-                            key,
-                        )
-                        for channel, delivery_tag in ack_list:
-                            try:
-                                if channel:
-                                    channel.basic_ack(delivery_tag=delivery_tag)
-                            except Exception as e:
-                                self._log.warning(
-                                    "Failed to ACK EOF during cleanup key=%s: %s",
-                                    key,
-                                    e,
-                                )
-                    unacked_eofs.pop(key, None)
-
-        if hasattr(self, "_unacked_light_tables") and hasattr(self, "_ack_lock"):
-            unacked_light = getattr(self, "_unacked_light_tables", {})
-            ack_lock = getattr(self, "_ack_lock")
-            with ack_lock:
-                keys_to_remove = [
-                    key for key in unacked_light.keys() if key[1] == client_id
-                ]
-                for key in keys_to_remove:
-                    ack_list = unacked_light.get(key, [])
-                    if ack_list:
-                        self._log.debug(
-                            "ACKing %d unacked light table messages during cleanup: key=%s",
-                            len(ack_list),
-                            key,
-                        )
-                        for channel, delivery_tag in ack_list:
-                            try:
-                                if channel:
-                                    channel.basic_ack(delivery_tag=delivery_tag)
-                            except Exception as e:
-                                self._log.warning(
-                                    "Failed to ACK light table during cleanup key=%s: %s",
-                                    key,
-                                    e,
-                                )
-                    unacked_light.pop(key, None)
-
         # Clean persisted data
         with self._persistence_lock:
             self._cleanup_persisted_client(client_id)
@@ -557,7 +545,9 @@ class JoinerWorker:
             "action: cleanup_client_state | result: success | client_id: %s", client_id
         )
 
-    def _handle_client_cleanup(self, cleanup_msg, queue_name: Optional[str] = None) -> None:
+    def _handle_client_cleanup(
+        self, cleanup_msg, queue_name: Optional[str] = None
+    ) -> None:
         """Handle client cleanup message from joiner router."""
         client_id = cleanup_msg.client_id if cleanup_msg.client_id else ""
         if not client_id:
@@ -568,6 +558,16 @@ class JoinerWorker:
             self._log.warning("CLEANUP without queue_name; cannot track by queue")
             return
 
+        # CRITICAL: Check if cleanup already completed BEFORE touching _pending_cleanups
+        # This prevents duplicate cleanup messages from re-triggering forward after completion
+        with self._cleanup_lock:
+            if client_id in self._completed_cleanups:
+                self._log.info(
+                    "CLEANUP already completed for client_id=%s, ignoring duplicate",
+                    client_id,
+                )
+                return
+
         # Extract router ID from trace (format: "joiner_router_id")
         trace = cleanup_msg.trace if cleanup_msg.trace else None
         router_id = trace if trace else None
@@ -575,7 +575,7 @@ class JoinerWorker:
         with self._cleanup_lock:
             queue_key = (client_id, queue_name)
             recvd_traces = self._pending_cleanups[queue_key]
-            
+
             if router_id:
                 if router_id in recvd_traces:
                     self._log.warning(
@@ -589,9 +589,13 @@ class JoinerWorker:
             else:
                 # Fallback: use counter if no trace
                 recvd_traces.add(f"router_{len(recvd_traces)}")
-            
+
             # Count total unique messages received across all queues
-            total_received = sum(len(traces) for (cid, _), traces in self._pending_cleanups.items() if cid == client_id)
+            total_received = sum(
+                len(traces)
+                for (cid, _), traces in self._pending_cleanups.items()
+                if cid == client_id
+            )
             expected_count = self._router_replicas * self._num_input_queues
 
             self._log.info(
@@ -609,13 +613,19 @@ class JoinerWorker:
                     "CLEANUP threshold reached for client_id=%s → cleaning up and forwarding",
                     client_id,
                 )
+
+                # Mark as completed BEFORE cleanup to prevent re-trigger
+                self._completed_cleanups.add(client_id)
+
                 # Clean local state
                 self._cleanup_client_state(client_id)
 
                 # Only forward if this is shard ID 0 (to avoid duplicate messages)
                 if self._shard == 0:
                     # Forward to results router pool
-                    env = Envelope(type=MessageType.CLEAN_UP_MESSAGE, clean_up=cleanup_msg)
+                    env = Envelope(
+                        type=MessageType.CLEAN_UP_MESSAGE, clean_up=cleanup_msg
+                    )
                     raw = env.SerializeToString()
                     self._log.info(
                         "action: forward_cleanup_to_results_router | result: forwarding | client_id: %s",
@@ -630,7 +640,9 @@ class JoinerWorker:
                     )
 
                 # Remove all entries for this client_id
-                keys_to_remove = [key for key in self._pending_cleanups.keys() if key[0] == client_id]
+                keys_to_remove = [
+                    key for key in self._pending_cleanups.keys() if key[0] == client_id
+                ]
                 for key in keys_to_remove:
                     self._pending_cleanups.pop(key, None)
             else:
@@ -742,7 +754,10 @@ class JoinerWorker:
                 redelivered,
             )
         if envelope.type == MessageType.CLEAN_UP_MESSAGE:
-            self._handle_client_cleanup(envelope.clean_up, queue_name=NAME_TO_STR.get(TableName.MENU_ITEMS, "menu_items"))
+            self._handle_client_cleanup(
+                envelope.clean_up,
+                queue_name=NAME_TO_STR.get(TableName.MENU_ITEMS, "menu_items"),
+            )
             return True
         if envelope.type == MessageType.DATA_BATCH:
             db: DataBatch = envelope.data_batch
@@ -787,7 +802,10 @@ class JoinerWorker:
                 redelivered,
             )
         if envelope.type == MessageType.CLEAN_UP_MESSAGE:
-            self._handle_client_cleanup(envelope.clean_up, queue_name=NAME_TO_STR.get(TableName.STORES, "stores"))
+            self._handle_client_cleanup(
+                envelope.clean_up,
+                queue_name=NAME_TO_STR.get(TableName.STORES, "stores"),
+            )
             return True
         if envelope.type == MessageType.DATA_BATCH:
             db: DataBatch = envelope.data_batch
@@ -832,7 +850,12 @@ class JoinerWorker:
                 redelivered,
             )
         if envelope.type == MessageType.CLEAN_UP_MESSAGE:
-            self._handle_client_cleanup(envelope.clean_up, queue_name=NAME_TO_STR.get(TableName.TRANSACTION_ITEMS, "transaction_items"))
+            self._handle_client_cleanup(
+                envelope.clean_up,
+                queue_name=NAME_TO_STR.get(
+                    TableName.TRANSACTION_ITEMS, "transaction_items"
+                ),
+            )
             return True
         if envelope.type == MessageType.DATA_BATCH:
             db: DataBatch = envelope.data_batch
@@ -915,7 +938,10 @@ class JoinerWorker:
                 redelivered,
             )
         if envelope.type == MessageType.CLEAN_UP_MESSAGE:
-            self._handle_client_cleanup(envelope.clean_up, queue_name=NAME_TO_STR.get(TableName.TRANSACTIONS, "transactions"))
+            self._handle_client_cleanup(
+                envelope.clean_up,
+                queue_name=NAME_TO_STR.get(TableName.TRANSACTIONS, "transactions"),
+            )
             return True
         if envelope.type == MessageType.DATA_BATCH:
             db: DataBatch = envelope.data_batch
@@ -1085,7 +1111,7 @@ class JoinerWorker:
         written_rows = self._written_rows[tracking_key]
         total_rows = len(db.payload.rows)
 
-        self._log.info(
+        self._log.debug(
             "Processing batch with buffering: table=%s client=%s bn=%s total_rows=%d already_written=%d buffer_size=%d",
             source_table,
             cid,
@@ -1134,7 +1160,7 @@ class JoinerWorker:
 
         # Flush ALL accumulated rows as a single output batch
         if current_buffer:
-            self._log.info(
+            self._log.debug(
                 "Flushing complete batch: rows=%d matched out of %d total",
                 len(current_buffer),
                 total_rows,
@@ -1149,7 +1175,7 @@ class JoinerWorker:
             self._flush_buffer([], db, result_table, out_schema)
 
         # All rows processed successfully
-        self._log.info(
+        self._log.debug(
             "Batch fully processed: table=%s client=%s bn=%s total_written=%d",
             source_table,
             cid,
@@ -1171,14 +1197,16 @@ class JoinerWorker:
         result_table: TableName,
         schema: TableSchema,
     ) -> None:
-        """Flush a buffer of processed rows to the output."""
-        if not buffer:
-            return
-
+        """Flush a buffer of processed rows to the output.
+        
+        Even if the buffer is empty, we still send the databatch to maintain
+        batch sequence and ensure the results router receives all batches.
+        """
+        # Always send the batch, even if empty (empty TransactionStores or TransactionItemsMenuItems)
         joined_table = TableData(
             name=result_table,
             schema=schema,
-            rows=buffer,
+            rows=buffer,  # Can be empty list
             batch_number=original_batch.payload.batch_number,
             status=original_batch.payload.status,
         )
@@ -1211,7 +1239,9 @@ class JoinerWorker:
                 redelivered,
             )
         if envelope.type == MessageType.CLEAN_UP_MESSAGE:
-            self._handle_client_cleanup(envelope.clean_up, queue_name=NAME_TO_STR.get(TableName.USERS, "users"))
+            self._handle_client_cleanup(
+                envelope.clean_up, queue_name=NAME_TO_STR.get(TableName.USERS, "users")
+            )
             return True
         if envelope.type == MessageType.DATA_BATCH:
             db: DataBatch = envelope.data_batch
@@ -1290,6 +1320,19 @@ class JoinerWorker:
             )
             return True
 
+        # Check if EOF is already complete (all router replicas received) before adding this trace
+        # This prevents duplicate EOF messages from re-triggering processing after completion
+        already_complete = len(recvd) >= self._router_replicas
+        if already_complete:
+            log.info(
+                "EOF already complete for table=%s cid=%s (received from %d replicas), ignoring duplicate trace=%s",
+                tname,
+                client_id,
+                len(recvd),
+                trace,
+            )
+            return True
+
         recvd.add(trace)
 
         # Persist EOF state
@@ -1309,21 +1352,25 @@ class JoinerWorker:
             self._router_replicas,
         )
 
+        # Check if we've received EOF from all router replicas
+        # Keep entry in _pending_eofs until cleanup removes it
+        # Add to _eof for phase readiness checks
         if len(recvd) >= self._router_replicas:
-            self._pending_eofs.pop(key, None)
-            self._eof.add(key)
-            self._log.info(
-                "EOF marcado table_id=%s cid=%s; eof_set=%s",
-                table_name,
-                client_id,
-                sorted(self._eof),
-            )
+            # Add to _eof for phase readiness (used by _phase_ready)
+            if key not in self._eof:
+                self._eof.add(key)
+                self._log.info(
+                    "EOF marcado table_id=%s cid=%s; eof_set=%s",
+                    table_name,
+                    client_id,
+                    sorted(self._eof),
+                )
 
-            # Process pending batches that are now ready
-            self._process_pending_batches_for_phase(client_id)
+                # Process pending batches that are now ready
+                self._process_pending_batches_for_phase(client_id)
 
-            # Check if we can cleanup for this client
-            self._maybe_cleanup_complete_lifecycle(client_id)
+                # Check if we can cleanup for this client
+                self._maybe_cleanup_complete_lifecycle(client_id)
 
         return True  # ACK immediately
 
@@ -1426,45 +1473,6 @@ class JoinerWorker:
         # Cleanup persisted data with proper locking
         with self._persistence_lock:
             self._cleanup_persisted_client(client_id)
-
-    def _ack_eof(self, key: tuple[TableName, str]) -> None:
-        """Acknowledge all EOF messages for this key."""
-        with self._ack_lock:
-            ack_list = self._unacked_eofs.get(key, [])
-            if ack_list:
-                self._log.info("ACKing %d EOF messages: key=%s", len(ack_list), key)
-                acked_count = 0
-                failed_count = 0
-                for channel, delivery_tag in ack_list:
-                    try:
-                        if not channel:
-                            self._log.warning(
-                                "Channel is None for EOF key=%s delivery_tag=%s - skipping ACK",
-                                key,
-                                delivery_tag,
-                            )
-                            failed_count += 1
-                            continue
-                        channel.basic_ack(delivery_tag=delivery_tag)
-                        acked_count += 1
-                    except Exception as e:
-                        self._log.warning(
-                            "Failed to ACK EOF key=%s delivery_tag=%s (will be redelivered): %s",
-                            key,
-                            delivery_tag,
-                            e,
-                        )
-                        failed_count += 1
-
-                if failed_count > 0:
-                    self._log.warning(
-                        "Failed to ACK %d/%d EOF messages for key=%s - they will be redelivered",
-                        failed_count,
-                        len(ack_list),
-                        key,
-                    )
-
-                del self._unacked_eofs[key]
 
     def _safe_send(self, raw: bytes):
         with self._out_lock:

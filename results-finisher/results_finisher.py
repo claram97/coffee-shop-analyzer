@@ -791,14 +791,31 @@ class ResultsFinisher:
         self.input_client.start_consuming(self._process_message)
 
     def stop(self):
+        """Stop the finisher gracefully.
+        
+        IMPORTANT: Order of operations matters to avoid race conditions:
+        1. Stop consuming and wait for in-flight messages to complete
+        2. Clean up active queries (may need to send final results)
+        3. Close output client (no more sends after this)
+        4. Close input client connection
+        """
         logger.info("ResultsFinisher is shutting down...")
+        # First, stop consuming and wait for in-flight messages to complete.
+        # This blocks until the consumer thread has finished processing.
         self.input_client.stop_consuming()
-        self.input_client.close()
-        self.output_client.close()
+        
         # Preserve persisted batches on shutdown so queries can be replayed
         # when the container restarts. Only remove disk state when a query
         # finishes successfully (see _cleanup_query_state defaults).
+        # NOTE: This must happen BEFORE closing output_client in case cleanup
+        # triggers any final result sends.
         self._cleanup_active_queries(remove_persisted=False)
+        
+        # Now it's safe to close output client - no more sends in progress
+        self.output_client.close()
+        
+        # Finally close the input client connection
+        self.input_client.close()
         logger.info("ResultsFinisher has stopped.")
 
     def _cleanup_active_queries(self, *, remove_persisted: bool = True):
@@ -891,24 +908,22 @@ class ResultsFinisher:
                     entries = self.persistence.load_manifest(client_id, query_id)
                     for entry in entries:
                         data_file = entry.get("data_file")
-                    if data_file:
-                        data_path = os.path.join(
-                            self.persistence.batches_dir, data_file
-                        )
-                    if os.path.exists(data_path):
-                        try:
-                            os.remove(data_path)
-                            logger.debug(
-                                "Deleted batch data file: %s", data_path
+                        if data_file:
+                            data_path = os.path.join(
+                                self.persistence.batches_dir, data_file
                             )
-                        except OSError as e:
-                            logger.warning(
-                                "Failed to delete batch data file %s: %s",
-                                data_path,
-                                e,
-                            )
-
-                    # Delete the manifest file
+                            if os.path.exists(data_path):
+                                try:
+                                    os.remove(data_path)
+                                    logger.debug(
+                                        "Deleted batch data file: %s", data_path
+                                    )
+                                except OSError as e:
+                                    logger.warning(
+                                        "Failed to delete batch data file %s: %s",
+                                        data_path,
+                                        e,
+                                    )                    # Delete the manifest file
                     self.persistence.delete_manifest(client_id, query_id)
                     logger.debug(
                         "Deleted manifest for query '%s' (client %s)",

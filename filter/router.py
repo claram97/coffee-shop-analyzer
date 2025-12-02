@@ -11,14 +11,15 @@ from collections import defaultdict
 from random import randint
 from typing import Dict, Optional
 
-from middleware.middleware_client import (MessageMiddlewareExchange,
-                                          MessageMiddlewareQueue)
+from middleware.middleware_client import (
+    MessageMiddlewareExchange,
+    MessageMiddlewareQueue,
+)
 from protocol2.clean_up_message_pb2 import CleanUpMessage
 from protocol2.databatch_pb2 import DataBatch, Query
 from protocol2.envelope_pb2 import Envelope, MessageType
 from protocol2.eof_message_pb2 import EOFMessage
-from protocol2.table_data_pb2 import (Row, TableData, TableName, TableSchema,
-                                      TableStatus)
+from protocol2.table_data_pb2 import Row, TableData, TableName, TableSchema, TableStatus
 from protocol2.table_data_utils import iterate_rows_as_dicts
 
 TABLE_NAME_TO_STR = {
@@ -114,14 +115,6 @@ class FilterRouter:
         self._orch_workers = orch_workers
         self._router_id = router_id
 
-        # Store unacked EOF messages: key=(table, client_id) -> list of (channel, delivery_tag)
-        self._unacked_eofs: Dict[tuple[TableName, str], list] = {}
-        self._eof_ack_lock = threading.Lock()
-
-        # Store unacked cleanup messages: key=client_id -> list of (channel, delivery_tag)
-        self._unacked_cleanups: Dict[str, list] = {}
-        self._cleanup_ack_lock = threading.Lock()
-
         # Batch deduplication: track received batch numbers per (table, client_id, query_ids_tuple)
         # In-memory only (no persistence)
         # Use regular dict instead of defaultdict to ensure each key gets its own set
@@ -130,8 +123,9 @@ class FilterRouter:
         # Track pending EOFs for LIGHT_TABLES only: key=(table, client_id) -> (set of worker_ids, EOFMessage)
         # Only menu_items and stores tables need EOF broadcasting
         # Worker IDs are extracted from the trace field (format: "orch_worker_id")
+        # EOFs remain in _pending_eof until client cleanup removes them
         self._pending_eof: Dict[tuple[TableName, str], tuple[set[str], EOFMessage]] = {}
-        
+
         # Track pending cleanup messages: key=client_id -> set of worker_ids
         # Worker IDs are extracted from the trace field (format: "orch_worker_id")
         self._pending_cleanups: Dict[str, set[str]] = {}
@@ -141,14 +135,26 @@ class FilterRouter:
         # Format: {client_id: timestamp} - timestamp is when the client was blacklisted
         self._blacklist: Dict[str, float] = {}
         self._blacklist_lock = threading.Lock()
-        
-        # Blacklist file path
-        state_dir = os.getenv("FILTER_ROUTER_STATE_DIR", "/tmp/filter_router_state")
-        os.makedirs(state_dir, exist_ok=True)
-        self._blacklist_file = os.path.join(state_dir, f"blacklist_{router_id}.json")
-        
-        # Load and clean blacklist at bootstrap
+
+        # State directory and file paths
+        self._state_dir = os.getenv(
+            "FILTER_ROUTER_STATE_DIR", "/tmp/filter_router_state"
+        )
+        os.makedirs(self._state_dir, exist_ok=True)
+        self._blacklist_file = os.path.join(
+            self._state_dir, f"blacklist_{router_id}.json"
+        )
+        self._eof_state_file = os.path.join(
+            self._state_dir, f"eof_state_{router_id}.json"
+        )
+        self._cleanup_state_file = os.path.join(
+            self._state_dir, f"cleanup_state_{router_id}.json"
+        )
+
+        # Load state at bootstrap
         self._load_and_clean_blacklist()
+        self._load_eof_state()
+        self._load_cleanup_state()
 
     def _load_and_clean_blacklist(self) -> None:
         """
@@ -157,11 +163,11 @@ class FilterRouter:
         """
         current_time = time.time()
         cutoff_time = current_time - 600  # 10 minutes ago
-        
+
         # Load from file if it exists
         if os.path.exists(self._blacklist_file):
             try:
-                with open(self._blacklist_file, 'r') as f:
+                with open(self._blacklist_file, "r") as f:
                     data = json.load(f)
                     # Filter out entries older than 10 minutes
                     self._blacklist = {
@@ -172,7 +178,7 @@ class FilterRouter:
                     self._log.info(
                         "Loaded blacklist: %d entries (removed %d old entries)",
                         len(self._blacklist),
-                        len(data) - len(self._blacklist)
+                        len(data) - len(self._blacklist),
                     )
             except Exception as e:
                 self._log.warning("Failed to load blacklist file: %s", e)
@@ -180,14 +186,14 @@ class FilterRouter:
         else:
             self._blacklist = {}
             self._log.info("Blacklist file not found, starting with empty blacklist")
-        
+
         # Save cleaned blacklist back to file
         self._save_blacklist()
 
     def _save_blacklist(self) -> None:
         """Save blacklist to file."""
         try:
-            with open(self._blacklist_file, 'w') as f:
+            with open(self._blacklist_file, "w") as f:
                 json.dump(self._blacklist, f)
         except Exception as e:
             self._log.error("Failed to save blacklist file: %s", e)
@@ -196,18 +202,90 @@ class FilterRouter:
         """Add a client_id to the blacklist (both in memory and file)."""
         if not client_id:
             return
-        
+
         current_time = time.time()
         with self._blacklist_lock:
             self._blacklist[client_id] = current_time
             self._save_blacklist()
             self._log.info("Added client_id to blacklist: %s", client_id)
 
+    # ─────────────────────────────────────────────────────────────────────────────
+    # EOF State Persistence
+    # ─────────────────────────────────────────────────────────────────────────────
+
+    def _load_eof_state(self) -> None:
+        """Load EOF state from disk at startup."""
+        if os.path.exists(self._eof_state_file):
+            try:
+                with open(self._eof_state_file, "r") as f:
+                    data = json.load(f)
+                    # Reconstruct pending_eof: {"table_client": ["worker1", "worker2"]}
+                    for key_str, worker_list in data.items():
+                        parts = key_str.split("_", 1)
+                        if len(parts) == 2:
+                            table = int(parts[0])
+                            client_id = parts[1]
+                            key = (table, client_id)
+                            # Create placeholder EOFMessage (will be replaced on first real EOF)
+                            eof_placeholder = EOFMessage(
+                                table=table, client_id=client_id
+                            )
+                            self._pending_eof[key] = (set(worker_list), eof_placeholder)
+                    self._log.info(
+                        "Loaded EOF state: %d pending EOFs", len(self._pending_eof)
+                    )
+            except Exception as e:
+                self._log.warning("Failed to load EOF state file: %s", e)
+
+    def _save_eof_state(self) -> None:
+        """Save EOF state to disk."""
+        try:
+            data = {}
+            for (table, client_id), (workers, _eof) in self._pending_eof.items():
+                key_str = f"{table}_{client_id}"
+                data[key_str] = list(workers)
+            with open(self._eof_state_file, "w") as f:
+                json.dump(data, f)
+        except Exception as e:
+            self._log.error("Failed to save EOF state file: %s", e)
+
+    # ─────────────────────────────────────────────────────────────────────────────
+    # Cleanup State Persistence
+    # ─────────────────────────────────────────────────────────────────────────────
+
+    def _load_cleanup_state(self) -> None:
+        """Load cleanup state from disk at startup."""
+        if os.path.exists(self._cleanup_state_file):
+            try:
+                with open(self._cleanup_state_file, "r") as f:
+                    data = json.load(f)
+                    # Reconstruct pending_cleanups: {"client_id": ["worker1", "worker2"]}
+                    for client_id, worker_list in data.items():
+                        self._pending_cleanups[client_id] = set(worker_list)
+                    self._log.info(
+                        "Loaded cleanup state: %d pending cleanups",
+                        len(self._pending_cleanups),
+                    )
+            except Exception as e:
+                self._log.warning("Failed to load cleanup state file: %s", e)
+
+    def _save_cleanup_state(self) -> None:
+        """Save cleanup state to disk."""
+        try:
+            data = {
+                client_id: list(workers)
+                for client_id, workers in self._pending_cleanups.items()
+            }
+            with open(self._cleanup_state_file, "w") as f:
+                json.dump(data, f)
+        except Exception as e:
+            self._log.error("Failed to save cleanup state file: %s", e)
+
     def _is_blacklisted(self, client_id: str) -> bool:
         """Check if a client_id is in the blacklist."""
         if not client_id:
             return False
-        
+
         with self._blacklist_lock:
             return client_id in self._blacklist
 
@@ -233,7 +311,9 @@ class FilterRouter:
             return self._handle_table_eof(msg.eof, channel, delivery_tag, redelivered)
         elif msg.type == MessageType.CLEAN_UP_MESSAGE:
             # Client cleanup: delay ack until fully processed
-            return self._handle_client_cleanup_like(msg.clean_up, channel, delivery_tag, redelivered)
+            return self._handle_client_cleanup_like(
+                msg.clean_up, channel, delivery_tag, redelivered
+            )
         else:
             self._log.warning("Unknown message type: %r", type(msg))
             return (True, True)
@@ -399,12 +479,6 @@ class FilterRouter:
             self._log.debug("Ignoring EOF for non-light table: key=%s", key)
             return (True, True)  # Ack immediately for non-light tables
 
-        with self._eof_ack_lock:
-            if channel is not None and delivery_tag is not None:
-                if key not in self._unacked_eofs:
-                    self._unacked_eofs[key] = []
-                self._unacked_eofs[key].append((channel, delivery_tag))
-
         flush_info = None
         with self._state_lock:
             # Extract worker ID from trace field (format: "orch_worker_id")
@@ -443,17 +517,30 @@ class FilterRouter:
                     key,
                     worker_id,
                 )
-                # Still return delay ack to ensure proper cleanup
-                return (True, False)
+                return (True, True)  # ACK immediately - already processed this EOF
+
+            # Check if EOF is already complete (all workers received) before adding this worker
+            # This prevents re-broadcasting on duplicate messages after completion
+            already_complete = len(recvd_workers) >= self._orch_workers
+            if already_complete:
+                self._log.info(
+                    "EOF already complete for key=%s (received from %d workers), ignoring duplicate",
+                    key,
+                    len(recvd_workers),
+                )
+                return (True, True)
 
             # Add this worker ID to the set
             recvd_workers.add(worker_id)
             self._pending_eof[key] = (recvd_workers, eof)
 
+            # Persist EOF state before ACKing
+            self._save_eof_state()
+
             # Check if we've received EOF from all orchestrator workers
+            # Keep entry in _pending_eof until cleanup removes it
             if len(recvd_workers) >= self._orch_workers:
                 flush_info = (key, max(1, int(self._cfg.aggregators)))
-                self._pending_eof.pop(key, None)
                 self._log.info(
                     "TABLE_EOF complete: key=%s received from %d/%d workers",
                     key,
@@ -472,7 +559,7 @@ class FilterRouter:
         if flush_info:
             self._flush_eof(*flush_info)
 
-        return (True, False)  # Delay ack until flushed
+        return (True, True)  # ACK immediately - state is persisted to disk
 
     def _flush_eof(self, key: tuple[TableName, str], total_parts: int):
         """
@@ -491,7 +578,10 @@ class FilterRouter:
                     e,
                 )
 
-        self._ack_eof(key)
+        # Save EOF state after flush
+        # Note: entry remains in _pending_eof until cleanup removes it
+        with self._state_lock:
+            self._save_eof_state()
 
         # Clean up deduplication state for this table/client
         with self._state_lock:
@@ -502,26 +592,6 @@ class FilterRouter:
             ]
             for k in keys_to_remove:
                 self._received_batches.pop(k, None)
-
-    def _ack_eof(self, key: tuple[TableName, str]) -> None:
-        """Acknowledge all EOF messages for this key after they have been fully processed."""
-        with self._eof_ack_lock:
-            ack_list = self._unacked_eofs.get(key, [])
-            if ack_list:
-                self._log.info(
-                    "ACKing %d TABLE_EOF messages: key=%s", len(ack_list), key
-                )
-                for channel, delivery_tag in ack_list:
-                    try:
-                        channel.basic_ack(delivery_tag=delivery_tag)
-                    except Exception as e:
-                        self._log.error(
-                            "Failed to ACK EOF key=%s delivery_tag=%s: %s",
-                            key,
-                            delivery_tag,
-                            e,
-                        )
-                del self._unacked_eofs[key]
 
     def _cleanup_client_state(self, client_id: str) -> None:
         """
@@ -539,51 +609,6 @@ class FilterRouter:
         self._log.info(
             "action: cleanup_client_state | result: starting | client_id: %s", client_id
         )
-
-        # Clean unacked EOFs
-        with self._eof_ack_lock:
-            keys_to_remove = [
-                key for key in self._unacked_eofs.keys() if key[1] == client_id
-            ]
-            for key in keys_to_remove:
-                # Try to ack any pending EOFs before removing
-                ack_list = self._unacked_eofs.get(key, [])
-                if ack_list:
-                    self._log.debug(
-                        "ACKing %d unacked EOFs during cleanup: key=%s",
-                        len(ack_list),
-                        key,
-                    )
-                    for channel, delivery_tag in ack_list:
-                        try:
-                            channel.basic_ack(delivery_tag=delivery_tag)
-                        except Exception as e:
-                            self._log.warning(
-                                "Failed to ACK EOF during cleanup key=%s: %s", key, e
-                            )
-                del self._unacked_eofs[key]
-
-        # Clean unacked cleanups
-        with self._cleanup_ack_lock:
-            if client_id in self._unacked_cleanups:
-                ack_list = self._unacked_cleanups.get(client_id, [])
-                if ack_list:
-                    self._log.debug(
-                        "ACKing %d unacked CLEANUPs during cleanup: client_id=%s",
-                        len(ack_list),
-                        client_id,
-                    )
-                    for channel, delivery_tag in ack_list:
-                        try:
-                            if channel:
-                                channel.basic_ack(delivery_tag=delivery_tag)
-                        except Exception as e:
-                            self._log.warning(
-                                "Failed to ACK CLEANUP during cleanup client_id=%s: %s",
-                                client_id,
-                                e,
-                            )
-                del self._unacked_cleanups[client_id]
 
         # Clean received batches deduplication state
         with self._state_lock:
@@ -603,6 +628,10 @@ class FilterRouter:
 
             # Clean pending cleanups
             self._pending_cleanups.pop(client_id, None)
+
+            # Save updated state to disk
+            self._save_eof_state()
+            self._save_cleanup_state()
 
         # Clean persisted state if it exists
         # Note: Currently filter router doesn't persist state, but this is here for future-proofing
@@ -648,15 +677,23 @@ class FilterRouter:
             return (True, True)
 
         if redelivered:
-            self._log.info("CLEANUP REDELIVERED: client_id=%s trace=%s", client_id, cleanup_msg.trace)
+            self._log.info(
+                "CLEANUP REDELIVERED: client_id=%s trace=%s",
+                client_id,
+                cleanup_msg.trace,
+            )
         else:
-            self._log.debug("CLEANUP received: client_id=%s trace=%s", client_id, cleanup_msg.trace)
+            self._log.debug(
+                "CLEANUP received: client_id=%s trace=%s", client_id, cleanup_msg.trace
+            )
 
-        with self._cleanup_ack_lock:
-            if channel is not None and delivery_tag is not None:
-                if client_id not in self._unacked_cleanups:
-                    self._unacked_cleanups[client_id] = []
-                self._unacked_cleanups[client_id].append((channel, delivery_tag))
+        # Check blacklist - if client is already blacklisted, just ACK
+        if self._is_blacklisted(client_id):
+            self._log.info(
+                "CLEANUP for already blacklisted client_id=%s, ACKing immediately",
+                client_id,
+            )
+            return (True, True)
 
         flush_info = None
         with self._state_lock:
@@ -675,7 +712,9 @@ class FilterRouter:
                 self._log.warning(
                     "CLEANUP received without trace: client_id=%s", client_id
                 )
-                worker_id = f"unknown_{len(self._pending_cleanups.get(client_id, set()))}"
+                worker_id = (
+                    f"unknown_{len(self._pending_cleanups.get(client_id, set()))}"
+                )
 
             recvd_workers = self._pending_cleanups.get(client_id, set())
 
@@ -685,10 +724,13 @@ class FilterRouter:
                     client_id,
                     worker_id,
                 )
-                return (True, False)
+                return (True, True)  # ACK immediately - already processed this cleanup
 
             recvd_workers.add(worker_id)
             self._pending_cleanups[client_id] = recvd_workers
+
+            # Persist cleanup state before ACKing
+            self._save_cleanup_state()
 
             if len(recvd_workers) >= self._orch_workers:
                 self._add_to_blacklist(client_id)
@@ -712,69 +754,33 @@ class FilterRouter:
         if flush_info:
             self._flush_cleanup(*flush_info)
 
-        return (True, False)
+        return (True, True)  # ACK immediately - state is persisted to disk
 
     def _flush_cleanup(self, client_id: str, total_parts: int):
         """
         Sends cleanup messages to aggregators and cleans up state.
         This method is called outside of the state lock.
         """
-        self._log.info("CLEANUP -> aggregators: client_id=%s parts=%d", client_id, total_parts)
-        
+        self._log.info(
+            "CLEANUP -> aggregators: client_id=%s parts=%d", client_id, total_parts
+        )
+
         self._cleanup_client_state(client_id)
 
-        for part in range(total_parts):
-            try:
-                self._p.send_cleanup_to_aggregator_partition(part, client_id)
-            except Exception as e:
-                self._log.error(
-                    "Failed to send CLEANUP to aggregator part=%d client_id=%s: %s",
-                    part,
-                    client_id,
-                    e,
-                )
-                raise
+        try:
+            self._p.send_cleanup_to_aggregator_partition(
+                randint(0, total_parts - 1), client_id
+            )
+        except Exception as e:
+            self._log.error(
+                "Failed to send CLEANUP to aggregator client_id=%s: %s",
+                client_id,
+                e,
+            )
+            raise
 
-        self._ack_cleanup(client_id)
-
-    def _ack_cleanup(self, client_id: str) -> None:
-        """Acknowledge all cleanup messages for this client_id after they have been fully processed."""
-        with self._cleanup_ack_lock:
-            ack_list = self._unacked_cleanups.get(client_id, [])
-            if ack_list:
-                self._log.info("ACKing %d CLEANUP messages: client_id=%s", len(ack_list), client_id)
-                acked_count = 0
-                failed_count = 0
-                for channel, delivery_tag in ack_list:
-                    try:
-                        if not channel:
-                            self._log.warning(
-                                "Channel is None for CLEANUP client_id=%s delivery_tag=%s - skipping ACK",
-                                client_id,
-                                delivery_tag,
-                            )
-                            failed_count += 1
-                            continue
-                        channel.basic_ack(delivery_tag=delivery_tag)
-                        acked_count += 1
-                    except Exception as e:
-                        self._log.warning(
-                            "Failed to ACK CLEANUP client_id=%s delivery_tag=%s (will be redelivered): %s",
-                            client_id,
-                            delivery_tag,
-                            e,
-                        )
-                        failed_count += 1
-
-                if failed_count > 0:
-                    self._log.warning(
-                        "Failed to ACK %d/%d CLEANUP messages for client_id=%s - they will be redelivered",
-                        failed_count,
-                        len(ack_list),
-                        client_id,
-                    )
-
-                del self._unacked_cleanups[client_id]
+        with self._state_lock:
+            self._save_cleanup_state()
 
 
 class ExchangeBusProducer:
@@ -985,7 +991,7 @@ class ExchangeBusProducer:
         Send client cleanup message to a random aggregator partition.
         The aggregator will broadcast this to joiner routers.
         """
-        cleanup_msg = CleanUpMessage();
+        cleanup_msg = CleanUpMessage()
         cleanup_msg.client_id = client_id
         cleanup_msg.trace = f"{self._router_id}:{partition_id}"
         key = self._key_for(TableName.MENU_ITEMS, int(partition_id))
@@ -1036,15 +1042,14 @@ class RouterServer:
 
         def _cb(body: bytes, channel=None, delivery_tag=None, redelivered=False):
             if self._stop_event.is_set():
-                self._log.warning("Shutdown in progress, nacking incoming message.")
+                self._log.warning(
+                    "Shutdown in progress, NACKing message for redelivery."
+                )
                 if channel is not None and delivery_tag is not None:
                     try:
                         channel.basic_nack(delivery_tag=delivery_tag, requeue=True)
                     except Exception as e:
-                        self._log.warning(
-                            "NACK failed during shutdown, message may redeliver later: %s",
-                            e,
-                        )
+                        self._log.warning("NACK failed during shutdown: %s", e)
                 return False
             try:
                 if len(body) < 1:

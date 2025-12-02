@@ -42,13 +42,16 @@ class Orchestrator:
         self._publishers: dict[str, MessageMiddlewareExchange] = {}
 
         self.message_handler = MessageHandler()
+        self.message_handler.set_lock_resolver(self._resolve_socket_lock)
         self._client_ids: dict[object, str] = {}
 
         # Per-client state: {client_id: {"finished": bool, "queries_sent": int, "sock": socket}}
         self._client_states: dict[str, dict] = {}
+        self._socket_locks: dict[object, threading.RLock] = {}
 
         self._client_ids_lock = threading.RLock()
         self._client_states_lock = threading.RLock()
+        self._socket_locks_lock = threading.RLock()
 
         results_queue = os.getenv("RESULTS_QUEUE", "orchestrator_results_queue")
         self.results_consumer = ResultsConsumer(results_queue, rabbitmq_host)
@@ -77,6 +80,21 @@ class Orchestrator:
                     queue_timeout_raw,
                     self._queue_put_timeout,
                 )
+
+        retry_sleep_raw = os.getenv("ORCH_PROCESS_QUEUE_RETRY_SLEEP")
+        self._queue_retry_sleep = 0.3
+        if retry_sleep_raw:
+            try:
+                parsed_sleep = float(retry_sleep_raw)
+                if parsed_sleep <= 0:
+                    raise ValueError("non_positive_retry_sleep")
+                self._queue_retry_sleep = parsed_sleep
+            except ValueError:
+                logging.warning(
+                    "action: queue_retry_sleep_parse | result: fail | value: %s | using_default: %s",
+                    retry_sleep_raw,
+                    self._queue_retry_sleep,
+                )
         
         # Use one multiprocessing.Queue per worker so we can route messages
         # to individual workers (one-queue-per-worker). Queues are created
@@ -95,12 +113,24 @@ class Orchestrator:
         with self._client_ids_lock:
             return self._client_ids.get(client_sock)
 
+    def _resolve_socket_lock(self, client_sock):
+        with self._socket_locks_lock:
+            return self._socket_locks.get(client_sock)
+
     def _register_client(self, client_sock, client_id: str):
+        lock = threading.RLock()
         with self._client_ids_lock:
             self._client_ids[client_sock] = client_id
         with self._client_states_lock:
-            self._client_states[client_id] = {"finished": False, "queries_sent": 0, "sock": client_sock}
-        self.results_consumer.register_client(client_sock, client_id)
+            self._client_states[client_id] = {
+                "finished": False,
+                "queries_sent": 0,
+                "sock": client_sock,
+                "lock": lock,
+            }
+        with self._socket_locks_lock:
+            self._socket_locks[client_sock] = lock
+        self.results_consumer.register_client(client_sock, client_id, lock=lock)
 
     def _cleanup_client(self, client_sock):
         with self._client_ids_lock:
@@ -109,6 +139,8 @@ class Orchestrator:
         with self._client_states_lock:
             if client_id and client_id in self._client_states:
                 self._client_states.pop(client_id)
+        with self._socket_locks_lock:
+            self._socket_locks.pop(client_sock, None)
         # Broadcast client_cleanup to all filter router replicas when client disconnects
         if client_id:
             self._broadcast_client_cleanup(client_id)
@@ -197,7 +229,8 @@ class Orchestrator:
             client_id = getattr(msg, "client_id", None)
             if not client_id:
                 logging.error("action: client_hello | result: fail | reason: missing_client_id")
-                ResponseHandler.send_failure(client_sock)
+                lock = self._resolve_socket_lock(client_sock)
+                ResponseHandler.send_failure(client_sock, lock=lock)
                 return False
 
             self._register_client(client_sock, client_id)
@@ -206,7 +239,8 @@ class Orchestrator:
                 client_id,
                 client_sock.fileno(),
             )
-            ResponseHandler.send_success(client_sock)
+            lock = self._resolve_socket_lock(client_sock)
+            ResponseHandler.send_success(client_sock, lock=lock)
             return True
 
         client_id = self._get_client_id(client_sock)
@@ -215,7 +249,8 @@ class Orchestrator:
                 "action: message_received | result: fail | reason: missing_handshake | opcode: %s",
                 msg.opcode,
             )
-            ResponseHandler.send_failure(client_sock)
+            lock = self._resolve_socket_lock(client_sock)
+            ResponseHandler.send_failure(client_sock, lock=lock)
             return False
 
         setattr(msg, "client_id", client_id)
@@ -248,16 +283,25 @@ class Orchestrator:
             state = self._client_states.get(client_id)
             if state and state["finished"] and state["queries_sent"] >= 4:
                 sock = state["sock"]
+                lock = state.get("lock")
                 logging.info("action: close_client | result: closing | client_id: %s", client_id)
                 try:
-                    sock.sendall(Finished().to_bytes())
-                    sock.close()
+                    payload = Finished().to_bytes()
+                    if lock:
+                        with lock:
+                            sock.sendall(payload)
+                            sock.close()
+                    else:
+                        sock.sendall(payload)
+                        sock.close()
                 except Exception:
                     logging.exception("action: close_client | result: fail | client_id: %s", client_id)
                 self.results_consumer.unregister_client(sock)
                 self._client_states.pop(client_id)
                 with self._client_ids_lock:
                     self._client_ids.pop(sock, None)
+                with self._socket_locks_lock:
+                    self._socket_locks.pop(sock, None)
                 # Broadcast client_cleanup to all filter router replicas
                 self._broadcast_client_cleanup(client_id)
 
@@ -266,8 +310,13 @@ class Orchestrator:
         with self._client_states_lock:
             for client_id, state in list(self._client_states.items()):
                 sock = state["sock"]
+                lock = state.get("lock")
                 try:
-                    sock.close()
+                    if lock:
+                        with lock:
+                            sock.close()
+                    else:
+                        sock.close()
                 except Exception:
                     pass
                 self.results_consumer.unregister_client(sock)
@@ -275,11 +324,18 @@ class Orchestrator:
         with self._client_ids_lock:
             for sock in list(self._client_ids.keys()):
                 try:
-                    sock.close()
+                    lock = self._resolve_socket_lock(sock)
+                    if lock:
+                        with lock:
+                            sock.close()
+                    else:
+                        sock.close()
                 except Exception:
                     pass
                 self.results_consumer.unregister_client(sock)
             self._client_ids.clear()
+        with self._socket_locks_lock:
+            self._socket_locks.clear()
 
     def _start_worker_processes(self):
         if self._worker_count <= 0:
@@ -388,7 +444,7 @@ class Orchestrator:
                 # Respect configured timeout: raise to let caller respond with failure
                 raise queue.Full()
 
-            time.sleep(0.1)
+            time.sleep(self._queue_retry_sleep)
 
     def _process_data_message(self, msg, client_sock) -> bool:
         try:
@@ -398,13 +454,16 @@ class Orchestrator:
 
             self._enqueue_processing_task(msg, client_id)
 
-            ResponseHandler.send_success(client_sock)
+            lock = self._resolve_socket_lock(client_sock)
+            ResponseHandler.send_success(client_sock, lock=lock)
             return True
         except queue.Full:
-            ResponseHandler.send_failure(client_sock)
+            lock = self._resolve_socket_lock(client_sock)
+            ResponseHandler.send_failure(client_sock, lock=lock)
             return False
         except Exception as e:
-            return ResponseHandler.handle_processing_error(msg, client_sock, e)
+            lock = self._resolve_socket_lock(client_sock)
+            return ResponseHandler.handle_processing_error(msg, client_sock, e, lock=lock)
 
     def _process_eof_message(self, msg, client_sock) -> bool:
         """Reenvía EOFs al exchange del Filter Router (broadcast a todas las réplicas) usando protocol2 Envelope."""
@@ -486,7 +545,8 @@ class Orchestrator:
                 len(payload),
             )
 
-            ResponseHandler.send_success(client_sock)
+            lock = self._resolve_socket_lock(client_sock)
+            ResponseHandler.send_success(client_sock, lock=lock)
             return True
 
         except Exception as e:
@@ -496,7 +556,8 @@ class Orchestrator:
                 getattr(msg, "batch_number", 0),
                 str(e),
             )
-            return ResponseHandler.handle_processing_error(msg, client_sock, e)
+            lock = self._resolve_socket_lock(client_sock)
+            return ResponseHandler.handle_processing_error(msg, client_sock, e, lock=lock)
 
     def run(self):
         """Start the orchestrator server and results consumer."""
