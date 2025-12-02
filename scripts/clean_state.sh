@@ -6,7 +6,7 @@ clean_dir() {
   local dir="$1"
   if [[ -d "$dir" ]]; then
     echo "Cleaning $dir" >&2
-    find "$dir" -mindepth 1 -maxdepth 1 -type d -exec rm -rf {} +
+    find "$dir" -mindepth 1 -maxdepth 1 -type d -exec sudo rm -rf {} +
   else
     echo "Skipping $dir (not found)" >&2
   fi
