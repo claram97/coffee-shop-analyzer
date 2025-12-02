@@ -9,8 +9,8 @@ bin/
 .vscode
 middleware/__pycache__
 .data/
-full_data/
-partial_data/
+.full_data/
+.partial_data/
 
 # Python
 __pycache__/
