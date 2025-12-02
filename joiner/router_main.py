@@ -291,6 +291,14 @@ def main():
         log.info("Joiner router is running. Press Ctrl+C to exit.")
         stop_event.wait()
         log.info("Stop event received, starting shutdown process.")
+    except Exception as e:
+        # Log unexpected exceptions so we can diagnose why the process exited
+        log.exception("Unhandled exception in main loop, initiating shutdown: %s", e)
+        # Ensure other components know we are stopping
+        try:
+            stop_event.set()
+        except Exception:
+            pass
     finally:
         log.info("Cleaning up resources...")
 

@@ -85,8 +85,12 @@ class JoinerWorker:
 
         # Persistence
         self._persistence_dir = persistence_dir
+        self._quarantine_dir = os.path.join(self._persistence_dir, "quarantine")
         self._persistence_lock = threading.Lock()
         os.makedirs(self._persistence_dir, exist_ok=True)
+        os.makedirs(self._quarantine_dir, exist_ok=True)
+        # Track which clients have been restored from quarantine in this run
+        self._quarantine_restored: Set[str] = set()
 
         # In-memory batch deduplication: track received batches per (table, client_id, query_ids_tuple)
         # This mitigates duplicate batch propagation from joiner router (no persistence needed)
@@ -101,8 +105,15 @@ class JoinerWorker:
             set
         )
 
+        # Persist pending cleanups so elections/restarts do not lose progress
+        self._pending_cleanups_file = os.path.join(
+            self._persistence_dir, "pending_cleanups.json"
+        )
+
         # Restore state from disk
+        self._quarantine_existing_state()
         self._restore_state()
+        self._load_pending_cleanups()
 
     def _get_pending_batch_path(
         self, table_name: TableName, client_id: str, batch_number: int
@@ -264,6 +275,54 @@ class JoinerWorker:
                 os.remove(temp_path)
             raise
 
+    def _persist_pending_cleanups(self) -> None:
+        """Persist pending/complete cleanup traces to disk for crash recovery."""
+        data = {
+            "pending": {
+                f"{cid}|{queue}": list(traces)
+                for (cid, queue), traces in self._pending_cleanups.items()
+            },
+            "completed": list(self._completed_cleanups),
+        }
+        temp_path = f"{self._pending_cleanups_file}.tmp"
+        with self._cleanup_lock:
+            try:
+                with open(temp_path, "w") as f:
+                    json.dump(data, f)
+                os.replace(temp_path, self._pending_cleanups_file)
+                self._log.debug(
+                    "Persisted pending cleanups: %d entries, completed: %d",
+                    len(self._pending_cleanups),
+                    len(self._completed_cleanups),
+                )
+            except Exception as e:
+                self._log.warning("Failed to persist pending cleanups: %s", e)
+                if os.path.exists(temp_path):
+                    os.remove(temp_path)
+
+    def _load_pending_cleanups(self) -> None:
+        """Restore pending/complete cleanup traces from disk."""
+        if not os.path.exists(self._pending_cleanups_file):
+            return
+        try:
+            with open(self._pending_cleanups_file, "r") as f:
+                data = json.load(f)
+            pending = data.get("pending", {})
+            completed = data.get("completed", [])
+            for key, traces in pending.items():
+                parts = key.split("|", 1)
+                if len(parts) != 2:
+                    continue
+                self._pending_cleanups[(parts[0], parts[1])] = set(traces)
+            self._completed_cleanups.update(completed)
+            self._log.info(
+                "Restored pending cleanups: %d entries, completed: %d",
+                len(self._pending_cleanups),
+                len(self._completed_cleanups),
+            )
+        except Exception as e:
+            self._log.warning("Failed to load pending cleanups: %s", e)
+
     def _delete_written_rows_tracking(
         self, table_name: TableName, client_id: str, batch_number: int
     ) -> None:
@@ -290,6 +349,10 @@ class JoinerWorker:
 
         # Restore light tables
         for filename in os.listdir(self._persistence_dir):
+            if filename == "quarantine":
+                continue
+            if os.path.isdir(os.path.join(self._persistence_dir, filename)):
+                continue
             if filename.startswith("light_") and filename.endswith(".json"):
                 try:
                     parts = filename[6:-5].split("_", 1)
@@ -371,6 +434,193 @@ class JoinerWorker:
                     )
 
         self._log.info("State restoration complete")
+
+    def _restore_state_for_client(self, client_id: str) -> None:
+        """Restore persisted state for a specific client from disk."""
+        if not os.path.exists(self._persistence_dir):
+            return
+
+        self._log.info("Restoring state for client %s", client_id)
+
+        for filename in os.listdir(self._persistence_dir):
+            if filename == "quarantine":
+                continue
+            if os.path.isdir(os.path.join(self._persistence_dir, filename)):
+                continue
+            if client_id not in filename:
+                continue
+
+            path = os.path.join(self._persistence_dir, filename)
+
+            if filename.startswith("light_") and filename.endswith(".json"):
+                try:
+                    parts = filename[6:-5].split("_", 1)
+                    table_name = int(parts[0])
+                    cid = parts[1]
+                    if cid != client_id:
+                        continue
+
+                    with open(path, "r") as f:
+                        data = json.load(f)
+
+                    if table_name == TableName.MENU_ITEMS:
+                        self._cache_menu[cid] = data
+                        self._log.info("Restored menu cache for client=%s", cid)
+                    elif table_name == TableName.STORES:
+                        self._cache_stores[cid] = data
+                        self._log.info("Restored stores cache for client=%s", cid)
+                except Exception as e:
+                    self._log.warning(
+                        "Failed to restore light table from %s: %s", filename, e
+                    )
+
+            elif filename.startswith("eof_") and filename.endswith(".json"):
+                try:
+                    parts = filename[4:-5].split("_", 1)
+                    table_name = int(parts[0])
+                    cid = parts[1]
+                    if cid != client_id:
+                        continue
+
+                    with open(path, "r") as f:
+                        eof_data = json.load(f)
+
+                    key = (table_name, cid)
+                    traces = eof_data.get("traces", [])
+
+                    if traces:
+                        self._pending_eofs[key] = set(traces)
+                        self._log.info(
+                            "Restored partial EOF for table=%s client=%s traces=%d",
+                            table_name,
+                            cid,
+                            len(traces),
+                        )
+
+                    if eof_data.get("complete", False):
+                        self._eof.add(key)
+                        self._log.info(
+                            "Restored complete EOF for table=%s client=%s",
+                            table_name,
+                            cid,
+                        )
+                except Exception as e:
+                    self._log.warning("Failed to restore EOF from %s: %s", filename, e)
+
+            elif filename.startswith("written_rows_") and filename.endswith(".json"):
+                try:
+                    parts = filename[13:-5].split("_", 2)
+                    table_name = int(parts[0])
+                    cid = parts[1]
+                    if cid != client_id:
+                        continue
+                    batch_number = int(parts[2])
+
+                    with open(path, "r") as f:
+                        data = json.load(f)
+
+                    key = (table_name, cid, batch_number)
+                    written_rows = set(data.get("written_rows", []))
+                    self._written_rows[key] = written_rows
+                    self._log.info(
+                        "Restored written rows for table=%s client=%s bn=%s count=%d",
+                        table_name,
+                        cid,
+                        batch_number,
+                        len(written_rows),
+                    )
+                except Exception as e:
+                    self._log.warning(
+                        "Failed to restore written rows from %s: %s", filename, e
+                    )
+
+        self._log.info("Client state restoration complete for %s", client_id)
+
+    def _quarantine_existing_state(self) -> None:
+        """
+        Move any persisted state from previous runs into a quarantine folder.
+        This prevents automatic replay on startup; it can be restored on-demand
+        when the same client sends new data.
+        """
+        try:
+            for filename in os.listdir(self._persistence_dir):
+                src_path = os.path.join(self._persistence_dir, filename)
+                if filename == "quarantine" or os.path.isdir(src_path):
+                    continue
+
+                client_id = None
+                if filename.startswith("pending_"):
+                    # pending_{table}_{client}_{batch}.bin
+                    remainder = filename[len("pending_") :]
+                    parts = remainder.split("_", 2)
+                    if len(parts) >= 2:
+                        client_id = parts[1]
+                elif filename.startswith("light_"):
+                    # light_{table}_{client}.json
+                    remainder = filename[len("light_") :]
+                    parts = remainder.split("_", 1)
+                    if len(parts) == 2:
+                        client_id = parts[1].rsplit(".", 1)[0]
+                elif filename.startswith("eof_"):
+                    # eof_{table}_{client}.json
+                    remainder = filename[len("eof_") :]
+                    parts = remainder.split("_", 1)
+                    if len(parts) == 2:
+                        client_id = parts[1].rsplit(".", 1)[0]
+                elif filename.startswith("written_rows_"):
+                    # written_rows_{table}_{client}_{batch}.json
+                    remainder = filename[len("written_rows_") :]
+                    parts = remainder.split("_", 2)
+                    if len(parts) >= 2:
+                        client_id = parts[1]
+
+                if not client_id:
+                    continue
+
+                dst_dir = os.path.join(self._quarantine_dir, client_id)
+                os.makedirs(dst_dir, exist_ok=True)
+                dst_path = os.path.join(dst_dir, filename)
+                os.replace(src_path, dst_path)
+                self._log.info(
+                    "Quarantined persisted file for client=%s: %s -> %s",
+                    client_id,
+                    filename,
+                    dst_path,
+                )
+        except Exception as e:
+            self._log.warning("Failed to quarantine existing state: %s", e)
+
+    def _ensure_client_state_loaded(self, client_id: str) -> None:
+        """Restore quarantined state for a client on first sight in this run."""
+        if not client_id or client_id in self._quarantine_restored:
+            return
+
+        client_dir = os.path.join(self._quarantine_dir, client_id)
+        if not os.path.exists(client_dir):
+            self._quarantine_restored.add(client_id)
+            return
+
+        with self._persistence_lock:
+            try:
+                for filename in os.listdir(client_dir):
+                    src = os.path.join(client_dir, filename)
+                    dst = os.path.join(self._persistence_dir, filename)
+                    os.replace(src, dst)
+                    self._log.info(
+                        "Restoring quarantined file for client=%s: %s",
+                        client_id,
+                        filename,
+                    )
+            except Exception as e:
+                self._log.warning(
+                    "Failed to move quarantine files back for client %s: %s",
+                    client_id,
+                    e,
+                )
+
+        # Now reload that client's state into memory
+        self._restore_state_for_client(client_id)
+        self._quarantine_restored.add(client_id)
 
     def _is_duplicate_batch(self, data_batch: DataBatch) -> bool:
         """
@@ -499,6 +749,9 @@ class JoinerWorker:
         with self._persistence_lock:
             self._cleanup_persisted_client(client_id)
 
+        # Persist cleanup state changes
+        self._persist_pending_cleanups()
+
         self._log.info(
             "action: cleanup_client_state | result: success | client_id: %s", client_id
         )
@@ -513,6 +766,9 @@ class JoinerWorker:
         if not queue_name:
             self._log.warning("CLEANUP without queue_name; cannot track by queue")
             return
+
+        # Ensure any quarantined state for this client is restored before we mutate state
+        self._ensure_client_state_loaded(client_id)
 
         # CRITICAL: Check if cleanup already completed BEFORE touching _pending_cleanups
         # This prevents duplicate cleanup messages from re-triggering forward after completion
@@ -593,6 +849,8 @@ class JoinerWorker:
                 keys_to_remove = [key for key in self._pending_cleanups.keys() if key[0] == client_id]
                 for key in keys_to_remove:
                     self._pending_cleanups.pop(key, None)
+                # Persist updated cleanup state
+                self._persist_pending_cleanups()
             else:
                 self._log.debug(
                     "CLEANUP deferred: client_id=%s received %d/%d messages",
@@ -600,6 +858,7 @@ class JoinerWorker:
                     total_received,
                     expected_count,
                 )
+                self._persist_pending_cleanups()
 
     def _log_db(self, where: str, db: DataBatch):
         try:
@@ -693,6 +952,7 @@ class JoinerWorker:
         envelope.ParseFromString(raw)
         if envelope.type == MessageType.EOF_MESSAGE:
             eof: EOFMessage = envelope.eof
+            self._ensure_client_state_loaded(eof.client_id)
             return self._on_table_eof(
                 eof.table,
                 eof.client_id,
@@ -702,10 +962,12 @@ class JoinerWorker:
                 redelivered,
             )
         if envelope.type == MessageType.CLEAN_UP_MESSAGE:
+            self._ensure_client_state_loaded(envelope.clean_up.client_id)
             self._handle_client_cleanup(envelope.clean_up, queue_name=NAME_TO_STR.get(TableName.MENU_ITEMS, "menu_items"))
             return True
         if envelope.type == MessageType.DATA_BATCH:
             db: DataBatch = envelope.data_batch
+            self._ensure_client_state_loaded(db.client_id)
 
             # Check for duplicate batch and discard if already processed
             if self._is_duplicate_batch(db):
@@ -738,6 +1000,7 @@ class JoinerWorker:
         envelope.ParseFromString(raw)
         if envelope.type == MessageType.EOF_MESSAGE:
             eof: EOFMessage = envelope.eof
+            self._ensure_client_state_loaded(eof.client_id)
             return self._on_table_eof(
                 eof.table,
                 eof.client_id,
@@ -747,10 +1010,12 @@ class JoinerWorker:
                 redelivered,
             )
         if envelope.type == MessageType.CLEAN_UP_MESSAGE:
+            self._ensure_client_state_loaded(envelope.clean_up.client_id)
             self._handle_client_cleanup(envelope.clean_up, queue_name=NAME_TO_STR.get(TableName.STORES, "stores"))
             return True
         if envelope.type == MessageType.DATA_BATCH:
             db: DataBatch = envelope.data_batch
+            self._ensure_client_state_loaded(db.client_id)
 
             # Check for duplicate batch and discard if already processed
             if self._is_duplicate_batch(db):
@@ -783,6 +1048,7 @@ class JoinerWorker:
         envelope.ParseFromString(raw)
         if envelope.type == MessageType.EOF_MESSAGE:
             eof: EOFMessage = envelope.eof
+            self._ensure_client_state_loaded(eof.client_id)
             return self._on_table_eof(
                 eof.table,
                 eof.client_id,
@@ -792,10 +1058,12 @@ class JoinerWorker:
                 redelivered,
             )
         if envelope.type == MessageType.CLEAN_UP_MESSAGE:
+            self._ensure_client_state_loaded(envelope.clean_up.client_id)
             self._handle_client_cleanup(envelope.clean_up, queue_name=NAME_TO_STR.get(TableName.TRANSACTION_ITEMS, "transaction_items"))
             return True
         if envelope.type == MessageType.DATA_BATCH:
             db: DataBatch = envelope.data_batch
+            self._ensure_client_state_loaded(db.client_id)
 
             # Check for duplicate batch and discard if already processed
             if self._is_duplicate_batch(db):
@@ -866,6 +1134,7 @@ class JoinerWorker:
         envelope.ParseFromString(raw)
         if envelope.type == MessageType.EOF_MESSAGE:
             eof: EOFMessage = envelope.eof
+            self._ensure_client_state_loaded(eof.client_id)
             return self._on_table_eof(
                 eof.table,
                 eof.client_id,
@@ -875,10 +1144,12 @@ class JoinerWorker:
                 redelivered,
             )
         if envelope.type == MessageType.CLEAN_UP_MESSAGE:
+            self._ensure_client_state_loaded(envelope.clean_up.client_id)
             self._handle_client_cleanup(envelope.clean_up, queue_name=NAME_TO_STR.get(TableName.TRANSACTIONS, "transactions"))
             return True
         if envelope.type == MessageType.DATA_BATCH:
             db: DataBatch = envelope.data_batch
+            self._ensure_client_state_loaded(db.client_id)
 
             # Check for duplicate batch and discard if already processed
             if self._is_duplicate_batch(db):
@@ -1162,6 +1433,7 @@ class JoinerWorker:
         envelope.ParseFromString(raw)
         if envelope.type == MessageType.EOF_MESSAGE:
             eof: EOFMessage = envelope.eof
+            self._ensure_client_state_loaded(eof.client_id)
             return self._on_table_eof(
                 eof.table,
                 eof.client_id,
@@ -1171,10 +1443,12 @@ class JoinerWorker:
                 redelivered,
             )
         if envelope.type == MessageType.CLEAN_UP_MESSAGE:
+            self._ensure_client_state_loaded(envelope.clean_up.client_id)
             self._handle_client_cleanup(envelope.clean_up, queue_name=NAME_TO_STR.get(TableName.USERS, "users"))
             return True
         if envelope.type == MessageType.DATA_BATCH:
             db: DataBatch = envelope.data_batch
+            self._ensure_client_state_loaded(db.client_id)
 
             # Check for duplicate batch and discard if already processed
             if self._is_duplicate_batch(db):
