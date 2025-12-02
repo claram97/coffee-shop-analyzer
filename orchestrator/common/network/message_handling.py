@@ -5,7 +5,7 @@ standardized responses within a network communication protocol.
 
 import logging
 import os
-from typing import Any, Dict, Optional
+from typing import Any, Callable, Dict, Optional
 
 from common.processing import (
     create_filtered_data_batch,
@@ -26,6 +26,7 @@ class MessageHandler:
     def __init__(self):
         """Initializes the MessageHandler, setting up publishers and registry."""
         self.message_processors: Dict[int, Any] = {}
+        self._lock_resolver: Optional[Callable[[Any], Optional[Any]]] = None
 
         # ---- Publisher hacia el FILTER ROUTER (exchange) ----
         rabbitmq_host = os.getenv("RABBITMQ_HOST", "rabbitmq")
@@ -44,6 +45,15 @@ class MessageHandler:
 
     def register_processor(self, opcode: int, processor_func: Any):
         self.message_processors[opcode] = processor_func
+
+    def set_lock_resolver(self, resolver: Callable[[Any], Optional[Any]]) -> None:
+        """Provide a callback that returns a write lock for a client socket."""
+        self._lock_resolver = resolver
+
+    def _resolve_lock(self, client_sock: Any):
+        if self._lock_resolver is None:
+            return None
+        return self._lock_resolver(client_sock)
 
     def get_status_text(self, batch_status: int) -> str:
         status_names = {0: "Continue", 1: "EOF", 2: "Cancel"}
@@ -187,10 +197,12 @@ class MessageHandler:
             return True
 
     def send_success_response(self, client_sock: Any):
-        BatchRecvSuccess().write_to(client_sock)
+        lock = self._resolve_lock(client_sock)
+        ResponseHandler.send_success(client_sock, lock=lock)
 
     def send_failure_response(self, client_sock: Any):
-        BatchRecvFail().write_to(client_sock)
+        lock = self._resolve_lock(client_sock)
+        ResponseHandler.send_failure(client_sock, lock=lock)
 
     def log_batch_preview(self, msg: Any, status_text: str):
         """
@@ -232,17 +244,25 @@ class ResponseHandler:
     """Provides a collection of static utility methods for sending standardized responses."""
 
     @staticmethod
-    def send_success(client_sock: Any):
+    def _run_with_lock(lock: Optional[Any], fn: Callable[[], None]):
+        if lock is None:
+            fn()
+            return
+        with lock:
+            fn()
+
+    @staticmethod
+    def send_success(client_sock: Any, lock: Optional[Any] = None):
         """Sends a BATCH_RECV_SUCCESS response to the specified client."""
-        BatchRecvSuccess().write_to(client_sock)
+        ResponseHandler._run_with_lock(lock, lambda: BatchRecvSuccess().write_to(client_sock))
 
     @staticmethod
-    def send_failure(client_sock: Any):
+    def send_failure(client_sock: Any, lock: Optional[Any] = None):
         """Sends a BATCH_RECV_FAIL response to the specified client."""
-        BatchRecvFail().write_to(client_sock)
+        ResponseHandler._run_with_lock(lock, lambda: BatchRecvFail().write_to(client_sock))
 
     @staticmethod
-    def handle_processing_error(msg: Any, client_sock: Any, error: Exception) -> bool:
+    def handle_processing_error(msg: Any, client_sock: Any, error: Exception, lock: Optional[Any] = None) -> bool:
         """
         Centralized handler for logging an error and notifying the client.
 
@@ -257,7 +277,7 @@ class ResponseHandler:
         Returns:
             Always returns True to indicate the connection should remain open.
         """
-        ResponseHandler.send_failure(client_sock)
+        ResponseHandler.send_failure(client_sock, lock=lock)
         logging.error(
             "action: message_processing | result: fail | batch_number: %d | amount: %d | error: %s",
             getattr(msg, "batch_number", 0),

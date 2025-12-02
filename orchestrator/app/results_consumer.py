@@ -37,7 +37,7 @@ class ResultsConsumer:
         """
         self.queue_name = queue_name
         self.host = host
-        self.client_connections: Dict[str, object] = {}
+        self.client_connections: Dict[str, Dict[str, object]] = {}
         self.middleware: Optional[MessageMiddlewareQueue] = None
         self.stopping = False
         self.client_lock = threading.Lock()
@@ -88,10 +88,10 @@ class ResultsConsumer:
                 e,
             )
 
-    def register_client(self, client_connection, client_id: str):
-        """Register a client connection to receive results for a specific query."""
+    def register_client(self, client_connection, client_id: str, lock: Optional[object] = None):
+        """Register a client connection (and optional lock) for delivering results."""
         with self.client_lock:
-            self.client_connections[client_id] = client_connection
+            self.client_connections[client_id] = {"conn": client_connection, "lock": lock}
         logging.info(
             "action: client_registered | result: success | client_id: %s",
             client_id,
@@ -107,7 +107,8 @@ class ResultsConsumer:
                 # Lookup by connection object (fallback for legacy callers).
                 key = None
                 removed = False
-                for cid, conn in list(self.client_connections.items()):
+                for cid, entry in list(self.client_connections.items()):
+                    conn = entry.get("conn")
                     if conn is client_identifier:
                         key = cid
                         removed = self.client_connections.pop(cid, None) is not None
@@ -378,15 +379,21 @@ class ResultsConsumer:
     def _forward_result_to_client(self, query_id: str, result_bytes: bytes, client_id: str):
         """Forward the result to the appropriate client."""
         with self.client_lock:
-            client_conn = self.client_connections.get(client_id)
-        if not client_conn:
+            entry = self.client_connections.get(client_id)
+        if not entry:
             logging.warning(
                 "action: forward_result | result: no_client | query_id: %s",
                 query_id,
             )
             return
+        client_conn = entry.get("conn")
+        lock = entry.get("lock")
         try:
-            client_conn.sendall(result_bytes)
+            if lock is not None:
+                with lock:
+                    client_conn.sendall(result_bytes)
+            else:
+                client_conn.sendall(result_bytes)
             logging.info(
                 "action: forward_result | result: success | query_id: %s | bytes_sent: %d",
                 query_id,
