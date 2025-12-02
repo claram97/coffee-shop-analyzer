@@ -150,6 +150,8 @@ class FilterRouter:
         self._load_eof_state()
         self._load_cleanup_state()
         self._load_completed_eof()
+        # Check consistency: if all EOFs received but not marked as completed, fix it
+        self._check_eof_consistency()
 
     def _load_and_clean_blacklist(self) -> None:
         """
@@ -293,6 +295,41 @@ class FilterRouter:
                 json.dump(data, f)
         except Exception as e:
             self._log.error("Failed to save completed EOFs file: %s", e)
+
+    def _check_eof_consistency(self) -> None:
+        """
+        Check consistency between pending EOFs and completed EOFs on bootstrap.
+        If all EOFs were received for a key (all workers sent EOF) but it's not marked
+        as completed, add it to completed EOFs and update the file.
+        """
+        with self._state_lock:
+            keys_to_complete = []
+            for key, (recvd_workers, _eof) in self._pending_eof.items():
+                # Check if all workers have sent EOF for this key
+                if len(recvd_workers) >= self._orch_workers:
+                    # All EOFs received, but check if it's marked as completed
+                    if key not in self._completed_eof:
+                        keys_to_complete.append(key)
+                        self._log.info(
+                            "Found inconsistent EOF state: key=%s has all %d workers but not marked as completed, fixing...",
+                            key,
+                            len(recvd_workers),
+                        )
+            
+            # Add missing keys to completed EOFs
+            if keys_to_complete:
+                for key in keys_to_complete:
+                    self._completed_eof.add(key)
+                    # Remove from pending since it's actually complete
+                    self._pending_eof.pop(key, None)
+                
+                # Save updated state
+                self._save_completed_eof()
+                self._save_eof_state()
+                self._log.info(
+                    "Fixed EOF consistency: added %d keys to completed EOFs",
+                    len(keys_to_complete),
+                )
 
     def _is_blacklisted(self, client_id: str) -> bool:
         """Check if a client_id is in the blacklist."""
