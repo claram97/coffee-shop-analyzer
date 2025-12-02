@@ -9,7 +9,7 @@ import threading
 import time
 from collections import defaultdict
 from random import randint
-from typing import Dict, Optional, Set
+from typing import Dict, Optional
 
 from middleware.middleware_client import (MessageMiddlewareExchange,
                                           MessageMiddlewareQueue)
@@ -122,10 +122,8 @@ class FilterRouter:
         # Track pending EOFs for LIGHT_TABLES only: key=(table, client_id) -> (set of worker_ids, EOFMessage)
         # Only menu_items and stores tables need EOF broadcasting
         # Worker IDs are extracted from the trace field (format: "orch_worker_id")
+        # EOFs remain in _pending_eof until client cleanup removes them
         self._pending_eof: Dict[tuple[TableName, str], tuple[set[str], EOFMessage]] = {}
-        
-        # Track completed EOFs to prevent re-broadcast on duplicates after completion
-        self._completed_eof: Set[tuple[TableName, str]] = set()
         
         # Track pending cleanup messages: key=client_id -> set of worker_ids
         # Worker IDs are extracted from the trace field (format: "orch_worker_id")
@@ -143,15 +141,11 @@ class FilterRouter:
         self._blacklist_file = os.path.join(self._state_dir, f"blacklist_{router_id}.json")
         self._eof_state_file = os.path.join(self._state_dir, f"eof_state_{router_id}.json")
         self._cleanup_state_file = os.path.join(self._state_dir, f"cleanup_state_{router_id}.json")
-        self._completed_eof_file = os.path.join(self._state_dir, f"completed_eof_{router_id}.json")
         
         # Load state at bootstrap
         self._load_and_clean_blacklist()
         self._load_eof_state()
         self._load_cleanup_state()
-        self._load_completed_eof()
-        # Check consistency: if all EOFs received but not marked as completed, fix it
-        self._check_eof_consistency()
 
     def _load_and_clean_blacklist(self) -> None:
         """
@@ -268,68 +262,6 @@ class FilterRouter:
         except Exception as e:
             self._log.error("Failed to save cleanup state file: %s", e)
 
-    def _load_completed_eof(self) -> None:
-        """Load completed EOF keys from file for crash recovery."""
-        if os.path.exists(self._completed_eof_file):
-            try:
-                with open(self._completed_eof_file, 'r') as f:
-                    data = json.load(f)
-                    for key_str in data:
-                        parts = key_str.split(":", 1)
-                        if len(parts) == 2:
-                            table_id = int(parts[0])
-                            client_id = parts[1]
-                            self._completed_eof.add((table_id, client_id))
-                    self._log.info(
-                        "Loaded completed EOFs: %d keys recovered",
-                        len(self._completed_eof)
-                    )
-            except Exception as e:
-                self._log.warning("Failed to load completed EOFs file: %s", e)
-
-    def _save_completed_eof(self) -> None:
-        """Persist completed EOF keys to file."""
-        try:
-            data = [f"{table_id}:{client_id}" for (table_id, client_id) in self._completed_eof]
-            with open(self._completed_eof_file, 'w') as f:
-                json.dump(data, f)
-        except Exception as e:
-            self._log.error("Failed to save completed EOFs file: %s", e)
-
-    def _check_eof_consistency(self) -> None:
-        """
-        Check consistency between pending EOFs and completed EOFs on bootstrap.
-        If all EOFs were received for a key (all workers sent EOF) but it's not marked
-        as completed, add it to completed EOFs and update the file.
-        """
-        with self._state_lock:
-            keys_to_complete = []
-            for key, (recvd_workers, _eof) in self._pending_eof.items():
-                # Check if all workers have sent EOF for this key
-                if len(recvd_workers) >= self._orch_workers:
-                    # All EOFs received, but check if it's marked as completed
-                    if key not in self._completed_eof:
-                        keys_to_complete.append(key)
-                        self._log.info(
-                            "Found inconsistent EOF state: key=%s has all %d workers but not marked as completed, fixing...",
-                            key,
-                            len(recvd_workers),
-                        )
-            
-            # Add missing keys to completed EOFs
-            if keys_to_complete:
-                for key in keys_to_complete:
-                    self._completed_eof.add(key)
-                    # Remove from pending since it's actually complete
-                    self._pending_eof.pop(key, None)
-                
-                # Save updated state
-                self._save_completed_eof()
-                self._save_eof_state()
-                self._log.info(
-                    "Fixed EOF consistency: added %d keys to completed EOFs",
-                    len(keys_to_complete),
-                )
 
     def _is_blacklisted(self, client_id: str) -> bool:
         """Check if a client_id is in the blacklist."""
@@ -527,16 +459,6 @@ class FilterRouter:
             self._log.debug("Ignoring EOF for non-light table: key=%s", key)
             return (True, True)  # Ack immediately for non-light tables
 
-        # CRITICAL: Check if EOF already completed BEFORE touching _pending_eof
-        # This prevents duplicate EOF messages from re-triggering broadcast after completion
-        with self._state_lock:
-            if key in self._completed_eof:
-                self._log.info(
-                    "EOF already completed for key=%s, ignoring duplicate",
-                    key,
-                )
-                return (True, True)
-
         flush_info = None
         with self._state_lock:
             # Extract worker ID from trace field (format: "orch_worker_id")
@@ -577,6 +499,17 @@ class FilterRouter:
                 )
                 return (True, True)  # ACK immediately - already processed this EOF
 
+            # Check if EOF is already complete (all workers received) before adding this worker
+            # This prevents re-broadcasting on duplicate messages after completion
+            already_complete = len(recvd_workers) >= self._orch_workers
+            if already_complete:
+                self._log.info(
+                    "EOF already complete for key=%s (received from %d workers), ignoring duplicate",
+                    key,
+                    len(recvd_workers),
+                )
+                return (True, True)
+
             # Add this worker ID to the set
             recvd_workers.add(worker_id)
             self._pending_eof[key] = (recvd_workers, eof)
@@ -585,9 +518,9 @@ class FilterRouter:
             self._save_eof_state()
 
             # Check if we've received EOF from all orchestrator workers
+            # Keep entry in _pending_eof until cleanup removes it
             if len(recvd_workers) >= self._orch_workers:
                 flush_info = (key, max(1, int(self._cfg.aggregators)))
-                self._pending_eof.pop(key, None)
                 self._log.info(
                     "TABLE_EOF complete: key=%s received from %d/%d workers",
                     key,
@@ -625,11 +558,9 @@ class FilterRouter:
                     e,
                 )
 
-        # Save EOF state after flush (pending_eof was already popped)
+        # Save EOF state after flush
+        # Note: entry remains in _pending_eof until cleanup removes it
         with self._state_lock:
-            # Mark as completed to prevent duplicate re-broadcast
-            self._completed_eof.add(key)
-            self._save_completed_eof()
             self._save_eof_state()
 
         # Clean up deduplication state for this table/client
@@ -675,21 +606,12 @@ class FilterRouter:
             for key in keys_to_remove:
                 del self._pending_eof[key]
 
-            # Clean completed EOF state for this client
-            completed_to_remove = [
-                key for key in self._completed_eof if key[1] == client_id
-            ]
-            for key in completed_to_remove:
-                self._completed_eof.discard(key)
-
             # Clean pending cleanups
             self._pending_cleanups.pop(client_id, None)
             
             # Save updated state to disk
             self._save_eof_state()
             self._save_cleanup_state()
-            if completed_to_remove:
-                self._save_completed_eof()
 
         # Clean persisted state if it exists
         # Note: Currently filter router doesn't persist state, but this is here for future-proofing
