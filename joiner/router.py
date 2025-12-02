@@ -175,6 +175,8 @@ class JoinerRouter:
         # Load EOF state at bootstrap (for crash recovery)
         self._load_eof_state()
         self._load_completed_eofs()
+        # Check consistency: if all EOFs received but not marked as completed, fix it
+        self._check_eof_consistency()
 
         log.info(
             "JoinerRouter init: tables=%s",
@@ -368,6 +370,46 @@ class JoinerRouter:
                 json.dump(data, f)
         except Exception as e:
             log.error("Failed to save completed EOFs file: %s", e)
+
+    def _check_eof_consistency(self) -> None:
+        """
+        Check consistency between pending EOFs and completed EOFs on bootstrap.
+        If all EOFs were received for a key (all workers sent EOF) but it's not marked
+        as completed, add it to completed EOFs and update the file.
+        """
+        keys_to_complete = []
+        for key, traces in self._pending_eofs.items():
+            table_id, client_id = key
+            cfg = self._cfg.get(table_id)
+            if cfg is None:
+                continue
+            
+            # Check if all workers have sent EOF for this key
+            threshold = cfg.agg_shards * self._fr_replicas
+            if len(traces) >= threshold:
+                # All EOFs received, but check if it's marked as completed
+                if key not in self._completed_eofs:
+                    keys_to_complete.append(key)
+                    log.info(
+                        "Found inconsistent EOF state: key=%s has all %d traces but not marked as completed, fixing...",
+                        key,
+                        len(traces),
+                    )
+        
+        # Add missing keys to completed EOFs
+        if keys_to_complete:
+            for key in keys_to_complete:
+                self._completed_eofs.add(key)
+                # Remove from pending since it's actually complete
+                self._pending_eofs.pop(key, None)
+            
+            # Save updated state
+            self._save_completed_eofs()
+            self._save_eof_state()
+            log.info(
+                "Fixed EOF consistency: added %d keys to completed EOFs",
+                len(keys_to_complete),
+            )
 
     def shutdown(self):
         log.info("Shutting down JoinerRouter...")
