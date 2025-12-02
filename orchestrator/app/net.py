@@ -80,6 +80,21 @@ class Orchestrator:
                     queue_timeout_raw,
                     self._queue_put_timeout,
                 )
+
+        retry_sleep_raw = os.getenv("ORCH_PROCESS_QUEUE_RETRY_SLEEP")
+        self._queue_retry_sleep = 0.3
+        if retry_sleep_raw:
+            try:
+                parsed_sleep = float(retry_sleep_raw)
+                if parsed_sleep <= 0:
+                    raise ValueError("non_positive_retry_sleep")
+                self._queue_retry_sleep = parsed_sleep
+            except ValueError:
+                logging.warning(
+                    "action: queue_retry_sleep_parse | result: fail | value: %s | using_default: %s",
+                    retry_sleep_raw,
+                    self._queue_retry_sleep,
+                )
         
         # Use one multiprocessing.Queue per worker so we can route messages
         # to individual workers (one-queue-per-worker). Queues are created
@@ -429,7 +444,7 @@ class Orchestrator:
                 # Respect configured timeout: raise to let caller respond with failure
                 raise queue.Full()
 
-            time.sleep(0.1)
+            time.sleep(self._queue_retry_sleep)
 
     def _process_data_message(self, msg, client_sock) -> bool:
         try:
