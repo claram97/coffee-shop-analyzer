@@ -385,40 +385,30 @@ class JoinerWorker:
         """
         Check consistency between pending EOFs and completed EOFs on bootstrap.
         If all EOFs were received for a key (all router replicas sent EOF) but it's not marked
-        as completed, add it to completed EOFs and update the persisted state.
+        as completed in _eof (for phase readiness), add it to _eof.
+        Keep entries in _pending_eofs until cleanup removes them.
         """
         keys_to_complete = []
-        traces_to_save = {}  # Save traces before removing from pending
         for key, traces in self._pending_eofs.items():
             # Check if all router replicas have sent EOF for this key
             if len(traces) >= self._router_replicas:
-                # All EOFs received, but check if it's marked as completed
+                # All EOFs received, but check if it's marked in _eof for phase readiness
                 if key not in self._eof:
                     keys_to_complete.append(key)
-                    traces_to_save[key] = traces  # Save traces for persistence
                     self._log.info(
-                        "Found inconsistent EOF state: key=%s has all %d traces but not marked as completed, fixing...",
+                        "Found inconsistent EOF state: key=%s has all %d traces but not in _eof, fixing...",
                         key,
                         len(traces),
                     )
         
-        # Add missing keys to completed EOFs
+        # Add missing keys to _eof for phase readiness
+        # Keep entries in _pending_eofs until cleanup removes them
         if keys_to_complete:
             for key in keys_to_complete:
                 self._eof.add(key)
-                # Save traces before removing from pending
-                table_name, client_id = key
-                traces = traces_to_save[key]
-                try:
-                    # Persist with traces - the complete flag will be True since len(traces) >= threshold
-                    self._persist_eof(table_name, client_id, traces)
-                except Exception as e:
-                    self._log.error("Failed to persist EOF consistency fix: %s", e)
-                # Remove from pending since it's actually complete
-                self._pending_eofs.pop(key, None)
             
             self._log.info(
-                "Fixed EOF consistency: added %d keys to completed EOFs",
+                "Fixed EOF consistency: added %d keys to _eof for phase readiness",
                 len(keys_to_complete),
             )
 
@@ -513,12 +503,12 @@ class JoinerWorker:
             self._cache_menu.pop(client_id, None)
             self._cache_stores.pop(client_id, None)
 
-            # Clean EOF tracking
+            # Clean EOF tracking (_eof is used for phase readiness)
             eof_keys_to_remove = [key for key in self._eof if key[1] == client_id]
             for key in eof_keys_to_remove:
                 self._eof.discard(key)
 
-            # Clean pending EOFs
+            # Clean pending EOFs (entries remain here until cleanup removes them)
             keys_to_remove = [
                 key for key in self._pending_eofs.keys() if key[1] == client_id
             ]
@@ -1318,17 +1308,6 @@ class JoinerWorker:
                 "TABLE_EOF received: table=%s cid=%s trace=%s", tname, client_id, trace
             )
 
-        # CRITICAL: Check if EOF already complete BEFORE touching _pending_eofs
-        # This prevents duplicate EOF messages from overwriting complete state
-        if key in self._eof:
-            log.info(
-                "EOF already complete for table=%s cid=%s, ignoring duplicate trace=%s",
-                tname,
-                client_id,
-                trace,
-            )
-            return True
-
         recvd = self._pending_eofs.setdefault(key, set())
 
         # Track by trace to make it idempotent
@@ -1338,6 +1317,19 @@ class JoinerWorker:
                 trace,
                 tname,
                 client_id,
+            )
+            return True
+
+        # Check if EOF is already complete (all router replicas received) before adding this trace
+        # This prevents duplicate EOF messages from re-triggering processing after completion
+        already_complete = len(recvd) >= self._router_replicas
+        if already_complete:
+            log.info(
+                "EOF already complete for table=%s cid=%s (received from %d replicas), ignoring duplicate trace=%s",
+                tname,
+                client_id,
+                len(recvd),
+                trace,
             )
             return True
 
@@ -1360,21 +1352,25 @@ class JoinerWorker:
             self._router_replicas,
         )
 
+        # Check if we've received EOF from all router replicas
+        # Keep entry in _pending_eofs until cleanup removes it
+        # Add to _eof for phase readiness checks
         if len(recvd) >= self._router_replicas:
-            self._pending_eofs.pop(key, None)
-            self._eof.add(key)
-            self._log.info(
-                "EOF marcado table_id=%s cid=%s; eof_set=%s",
-                table_name,
-                client_id,
-                sorted(self._eof),
-            )
+            # Add to _eof for phase readiness (used by _phase_ready)
+            if key not in self._eof:
+                self._eof.add(key)
+                self._log.info(
+                    "EOF marcado table_id=%s cid=%s; eof_set=%s",
+                    table_name,
+                    client_id,
+                    sorted(self._eof),
+                )
 
-            # Process pending batches that are now ready
-            self._process_pending_batches_for_phase(client_id)
+                # Process pending batches that are now ready
+                self._process_pending_batches_for_phase(client_id)
 
-            # Check if we can cleanup for this client
-            self._maybe_cleanup_complete_lifecycle(client_id)
+                # Check if we can cleanup for this client
+                self._maybe_cleanup_complete_lifecycle(client_id)
 
         return True  # ACK immediately
 

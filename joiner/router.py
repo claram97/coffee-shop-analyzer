@@ -143,8 +143,9 @@ class JoinerRouter:
         self._in = in_mw
         self._pool = publisher_pool
         self._cfg = route_cfg
+        # Track pending EOFs: key=(table, client_id) -> set of traces
+        # EOFs remain in _pending_eofs until client cleanup removes them
         self._pending_eofs: Dict[tuple[TableName, str], Set[str]] = {}
-        self._completed_eofs: Set[tuple[TableName, str]] = set()  # Track completed EOFs to prevent re-broadcast
         self._part_counter: Dict[tuple[TableName, str], int] = {}
         self._fr_replicas = fr_replicas
         self._stop_event = stop_event
@@ -167,16 +168,12 @@ class JoinerRouter:
         os.makedirs(state_dir, exist_ok=True)
         self._blacklist_file = os.path.join(state_dir, f"blacklist_{router_id}.json")
         self._eof_state_file = os.path.join(state_dir, f"eof_state_{router_id}.json")
-        self._completed_eofs_file = os.path.join(state_dir, f"completed_eofs_{router_id}.json")
         
         # Load and clean blacklist at bootstrap
         self._load_and_clean_blacklist()
         
         # Load EOF state at bootstrap (for crash recovery)
         self._load_eof_state()
-        self._load_completed_eofs()
-        # Check consistency: if all EOFs received but not marked as completed, fix it
-        self._check_eof_consistency()
 
         log.info(
             "JoinerRouter init: tables=%s",
@@ -328,88 +325,6 @@ class JoinerRouter:
         except Exception as e:
             log.error("Failed to save EOF state file: %s", e)
 
-    def _remove_eof_state_for_key(self, key: tuple) -> None:
-        """Remove a specific key from persisted EOF state after successful broadcast."""
-        try:
-            if os.path.exists(self._eof_state_file):
-                with open(self._eof_state_file, 'r') as f:
-                    data = json.load(f)
-                
-                key_str = f"{key[0]}:{key[1]}"
-                if key_str in data:
-                    del data[key_str]
-                    with open(self._eof_state_file, 'w') as f:
-                        json.dump(data, f)
-        except Exception as e:
-            log.warning("Failed to remove EOF state for key %s: %s", key, e)
-
-    def _load_completed_eofs(self) -> None:
-        """Load completed EOF keys from file for crash recovery."""
-        if os.path.exists(self._completed_eofs_file):
-            try:
-                with open(self._completed_eofs_file, 'r') as f:
-                    data = json.load(f)
-                    for key_str in data:
-                        parts = key_str.split(":", 1)
-                        if len(parts) == 2:
-                            table_id = int(parts[0])
-                            client_id = parts[1]
-                            self._completed_eofs.add((table_id, client_id))
-                    log.info(
-                        "Loaded completed EOFs: %d keys recovered",
-                        len(self._completed_eofs)
-                    )
-            except Exception as e:
-                log.warning("Failed to load completed EOFs file: %s", e)
-
-    def _save_completed_eofs(self) -> None:
-        """Persist completed EOF keys to file."""
-        try:
-            data = [f"{table_id}:{client_id}" for (table_id, client_id) in self._completed_eofs]
-            with open(self._completed_eofs_file, 'w') as f:
-                json.dump(data, f)
-        except Exception as e:
-            log.error("Failed to save completed EOFs file: %s", e)
-
-    def _check_eof_consistency(self) -> None:
-        """
-        Check consistency between pending EOFs and completed EOFs on bootstrap.
-        If all EOFs were received for a key (all workers sent EOF) but it's not marked
-        as completed, add it to completed EOFs and update the file.
-        """
-        keys_to_complete = []
-        for key, traces in self._pending_eofs.items():
-            table_id, client_id = key
-            cfg = self._cfg.get(table_id)
-            if cfg is None:
-                continue
-            
-            # Check if all workers have sent EOF for this key
-            threshold = cfg.agg_shards * self._fr_replicas
-            if len(traces) >= threshold:
-                # All EOFs received, but check if it's marked as completed
-                if key not in self._completed_eofs:
-                    keys_to_complete.append(key)
-                    log.info(
-                        "Found inconsistent EOF state: key=%s has all %d traces but not marked as completed, fixing...",
-                        key,
-                        len(traces),
-                    )
-        
-        # Add missing keys to completed EOFs
-        if keys_to_complete:
-            for key in keys_to_complete:
-                self._completed_eofs.add(key)
-                # Remove from pending since it's actually complete
-                self._pending_eofs.pop(key, None)
-            
-            # Save updated state
-            self._save_completed_eofs()
-            self._save_eof_state()
-            log.info(
-                "Fixed EOF consistency: added %d keys to completed EOFs",
-                len(keys_to_complete),
-            )
 
     def shutdown(self):
         log.info("Shutting down JoinerRouter...")
@@ -574,26 +489,44 @@ class JoinerRouter:
         else:
             log.debug("TABLE_EOF received: key=%s", key)
 
-        # CRITICAL: Check if EOF already completed BEFORE touching _pending_eofs
-        # This prevents duplicate EOF messages from re-triggering broadcast after completion
-        if key in self._completed_eofs:
-            log.info(
-                "EOF already completed for key=%s, ignoring duplicate",
-                key,
-            )
-            return True
-
         # Use trace field to detect duplicates
         trace = eof.trace if eof.trace else None
+        threshold = cfg.agg_shards * self._fr_replicas
+        
         if trace:
             recvd = self._pending_eofs.setdefault(key, set())
+            
+            # Check if this trace was already received (deduplication)
             if trace in recvd:
                 log.warning("Duplicate EOF ignored: key=%s trace=%s", key, trace)
                 return True  # ACK duplicate immediately
+            
+            # Check if EOF is already complete (all workers received) before adding this trace
+            # This prevents re-broadcasting on duplicate messages after completion
+            already_complete = len(recvd) >= threshold
+            if already_complete:
+                log.info(
+                    "EOF already complete for key=%s (received from %d workers), ignoring duplicate",
+                    key,
+                    len(recvd),
+                )
+                return True
+            
             recvd.add(trace)
         else:
             # Fallback to old behavior if no trace (backward compatibility)
             recvd = self._pending_eofs.setdefault(key, set())
+            
+            # Check if already complete before adding
+            already_complete = len(recvd) >= threshold
+            if already_complete:
+                log.info(
+                    "EOF already complete for key=%s (received from %d workers), ignoring duplicate",
+                    key,
+                    len(recvd),
+                )
+                return True
+            
             next_idx = self._part_counter.get(key, 0) + 1
             self._part_counter[key] = next_idx
             recvd.add(str(next_idx))  # Convert to string for consistency
@@ -606,10 +539,12 @@ class JoinerRouter:
             key,
             trace or "no-trace",
             len(recvd),
-            cfg.agg_shards * self._fr_replicas,
+            threshold,
         )
 
-        if len(recvd) >= cfg.agg_shards * self._fr_replicas:
+        # Check if we've received EOF from all workers
+        # Keep entry in _pending_eofs until cleanup removes it
+        if len(recvd) >= threshold:
             log.info(
                 "EOF threshold reached for key=%s → broadcast to %d shards",
                 key,
@@ -622,17 +557,8 @@ class JoinerRouter:
             env_updated = Envelope(type=MessageType.EOF_MESSAGE, eof=eof_updated)
             raw_updated = env_updated.SerializeToString()
             self._broadcast(cfg, raw_updated, shards=cfg.joiner_shards)
-
-            # Clean up in-memory state
-            self._pending_eofs.pop(key, None)
-            self._part_counter.pop(key, None)
             
-            # Mark as completed to prevent duplicate re-broadcast
-            self._completed_eofs.add(key)
-            self._save_completed_eofs()
-            
-            # Remove from persisted state after successful broadcast
-            self._remove_eof_state_for_key(key)
+            # Note: entry remains in _pending_eofs until cleanup removes it
 
         # ACK immediately - state is persisted, so we can recover if we crash
         return True
@@ -662,18 +588,9 @@ class JoinerRouter:
             self._pending_eofs.pop(key, None)
             self._part_counter.pop(key, None)
         
-        # Clean completed EOFs for this client
-        completed_to_remove = [
-            key for key in self._completed_eofs if key[1] == client_id
-        ]
-        for key in completed_to_remove:
-            self._completed_eofs.discard(key)
-        
         # Persist the cleaned state
         if keys_to_remove:
             self._save_eof_state()
-        if completed_to_remove:
-            self._save_completed_eofs()
 
         # Clean received batches deduplication state
         # Remove all entries where client_id matches (second element of tuple key)
