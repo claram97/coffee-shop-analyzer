@@ -377,6 +377,50 @@ class JoinerWorker:
                     )
 
         self._log.info("State restoration complete")
+        
+        # Check consistency: if all EOFs received but not marked as completed, fix it
+        self._check_eof_consistency()
+
+    def _check_eof_consistency(self) -> None:
+        """
+        Check consistency between pending EOFs and completed EOFs on bootstrap.
+        If all EOFs were received for a key (all router replicas sent EOF) but it's not marked
+        as completed, add it to completed EOFs and update the persisted state.
+        """
+        keys_to_complete = []
+        traces_to_save = {}  # Save traces before removing from pending
+        for key, traces in self._pending_eofs.items():
+            # Check if all router replicas have sent EOF for this key
+            if len(traces) >= self._router_replicas:
+                # All EOFs received, but check if it's marked as completed
+                if key not in self._eof:
+                    keys_to_complete.append(key)
+                    traces_to_save[key] = traces  # Save traces for persistence
+                    self._log.info(
+                        "Found inconsistent EOF state: key=%s has all %d traces but not marked as completed, fixing...",
+                        key,
+                        len(traces),
+                    )
+        
+        # Add missing keys to completed EOFs
+        if keys_to_complete:
+            for key in keys_to_complete:
+                self._eof.add(key)
+                # Save traces before removing from pending
+                table_name, client_id = key
+                traces = traces_to_save[key]
+                try:
+                    # Persist with traces - the complete flag will be True since len(traces) >= threshold
+                    self._persist_eof(table_name, client_id, traces)
+                except Exception as e:
+                    self._log.error("Failed to persist EOF consistency fix: %s", e)
+                # Remove from pending since it's actually complete
+                self._pending_eofs.pop(key, None)
+            
+            self._log.info(
+                "Fixed EOF consistency: added %d keys to completed EOFs",
+                len(keys_to_complete),
+            )
 
     def _is_duplicate_batch(self, data_batch: DataBatch) -> bool:
         """
