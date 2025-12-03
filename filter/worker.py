@@ -394,6 +394,89 @@ class FilterWorker:
             )
             self._send_to_router(raw, bn)
 
+    def _handle_data_batch(self, env: Envelope, raw: bytes) -> None:
+        """Procesa un Envelope de tipo DATA_BATCH aplicando filtros si corresponde."""
+        db = env.data_batch
+
+        if self._discard_if_blacklisted(db):
+            return
+
+        self._log_databatch_summary(env, db)
+        bn = self._safe_batch_number(db)
+        inner = self._payload_or_forward(db, raw, bn)
+        if inner is None:
+            return
+
+        step = self._step_or_forward(db, inner, raw, bn)
+        if step is None:
+            return
+
+        if not inner.rows:
+            logger.debug(
+                "Batch sin 'rows': reenvío sin cambios | table_id=%s step=%s",
+                inner.name,
+                step,
+            )
+            self._send_to_router(raw, bn)
+            return
+
+        queries_key, fn = self._resolve_filter(inner, step, list(db.query_ids))
+        if fn is None:
+            logger.warning(
+                "No hay filtro registrado para queries=%s: reenvío sin cambios | table_id=%s step=%s",
+                queries_key,
+                inner.name,
+                step,
+            )
+            self._send_to_router(raw, bn)
+            return
+
+        self._apply_filter_and_forward(env, db, inner, fn, queries_key, step, bn, raw)
+
+    def _discard_if_blacklisted(self, db) -> bool:
+        """Descarta el batch si el client_id está en blacklist."""
+        cid = getattr(db, "client_id", None) or ""
+        if not cid:
+            return False
+        if self._is_blacklisted(cid):
+            logger.info(
+                "Discarding batch from blacklisted client: cid=%s table_id=%s",
+                cid,
+                getattr(getattr(db, "payload", None), "name", None),
+            )
+            return True
+        return False
+
+    def _payload_or_forward(self, db, raw: bytes, bn: int | None):
+        """Devuelve el payload del batch o lo reenvía sin cambios si falta."""
+        inner = getattr(db, "payload", None)
+        if inner:
+            return inner
+        logger.warning("Batch sin batch_msg: reenvío sin cambios")
+        self._send_to_router(raw, bn)
+        return None
+
+    def _step_or_forward(self, db, inner, raw: bytes, bn: int | None) -> int | None:
+        """Obtiene el step activo o reenvía el batch sin cambios."""
+        step = current_step_from_mask(getattr(db, "filter_steps", 0))
+        if step is not None:
+            return step
+        logger.debug(
+            "Sin step activo en máscara: reenvío sin cambios | table_id=%s mask=%s",
+            inner.name,
+            getattr(db, "filter_steps", None),
+        )
+        self._send_to_router(raw, bn)
+        return None
+
+    def _resolve_filter(
+        self, inner, step: int, queries: List[Query]
+    ) -> Tuple[str, Optional[FilterFn]]:
+        """Obtiene la función de filtro registrada para tabla/step/queries."""
+        queries_key = qkey(list(queries))
+        key = (inner.name, step, queries_key)
+        return queries_key, self._filters.get(key)
+
     def _on_raw(self, raw: bytes, channel=None, delivery_tag=None) -> None:
         """Handler principal de mensajes del pool de filtros."""
         logger.debug("Mensaje recibido, tamaño=%d bytes", len(raw))
@@ -412,62 +495,7 @@ class FilterWorker:
         if env.type != MessageType.DATA_BATCH:
             logger.warning("Expected databatch, got %s", env.type)
             return
-        db = env.data_batch
-
-        cid = getattr(db, "client_id", None) or ""
-        if self._is_blacklisted(cid):
-            logger.info(
-                "Discarding batch from blacklisted client: cid=%s table_id=%s",
-                cid,
-                getattr(db.payload, "name", None),
-            )
-            return
-        self._log_databatch_summary(env, db)
-
-        bn = self._safe_batch_number(db)
-        if not db.payload:
-            logger.warning("Batch sin batch_msg: reenvío sin cambios")
-            self._send_to_router(raw, bn)
-            return
-
-        inner = db.payload
-        step_mask = db.filter_steps
-        step = current_step_from_mask(step_mask)
-        if step is None:
-            logger.debug(
-                "Sin step activo en máscara: reenvío sin cambios | table_id=%s mask=%s",
-                inner.name,
-                step_mask,
-            )
-            self._send_to_router(raw, bn)
-            return
-        if inner is None or not inner.rows:
-            logger.debug(
-                "Batch sin 'rows': reenvío sin cambios | table_id=%s step=%s",
-                inner.name,
-                step,
-            )
-            self._send_to_router(raw, bn)
-            return
-
-        queries = list(db.query_ids)
-        queries_key = qkey(queries)
-        key = (inner.name, step, queries_key)
-
-        fn = self._filters.get(key)
-        if fn is None:
-            logger.warning(
-                "No hay filtro registrado para queries=%s: reenvío sin cambios | table_id=%s step=%s",
-                queries_key,
-                inner.name,
-                step,
-            )
-            self._send_to_router(raw, bn)
-            return
-
-        self._apply_filter_and_forward(
-            env, db, inner, fn, queries_key, step, bn, raw
-        )
+        self._handle_data_batch(env, raw)
 
     def _load_and_clean_blacklist(self) -> None:
         """Carga la blacklist desde disco y purga entradas antiguas (10 min)."""
