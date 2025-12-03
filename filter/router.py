@@ -1,5 +1,12 @@
 from __future__ import annotations
 
+"""
+Filter Router: recibe DataBatch/EOF/CLEAN_UP de los orchestrators, fanout o
+duplica batches según política de queries, mantiene estado de EOF/cleanup, y
+publica hacia los aggregators o reinyecta a filtros. Blacklist persistente para
+descartar clientes limpiados.
+"""
+
 import json
 import logging
 import os

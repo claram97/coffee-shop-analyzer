@@ -1,5 +1,14 @@
 from __future__ import annotations
 
+"""
+Filter Worker: consumes batches from the filters pool, applies the registered
+per-table/step filters, handles CLEAN_UP blacklisting, and forwards results to
+the Filter Router exchange.
+"""
+
+BLACKLIST_TTL_SECONDS = 600
+RAW_LOG_PREVIEW_BYTES = 48
+
 import json
 import logging
 import os
@@ -37,6 +46,7 @@ _setup_logging()
 
 
 def current_step_from_mask(mask: int) -> Optional[int]:
+    """Devuelve el índice del bit menos significativo en 0 (paso actual)."""
     if mask == 0:
         return None
     i = 0
@@ -47,6 +57,7 @@ def current_step_from_mask(mask: int) -> Optional[int]:
 
 
 def _parse_dt_local(value: Optional[str]) -> Optional[datetime]:
+    """Parsea ISO datetime en local; None en caso de error."""
     if not value:
         return None
     try:
@@ -57,6 +68,7 @@ def _parse_dt_local(value: Optional[str]) -> Optional[datetime]:
 
 
 def _parse_final_amount(value: Any) -> Optional[float]:
+    """Normaliza final_amount a float, None en caso de error."""
     if value is None:
         return None
     try:
@@ -67,6 +79,7 @@ def _parse_final_amount(value: Any) -> Optional[float]:
 
 
 def hour_filter(td) -> List[Any]:
+    """Filtro Q3: solo filas con created_at entre 6 y 23 hs."""
     return [
         r
         for r in iterate_rows_as_dicts(td)
@@ -75,6 +88,7 @@ def hour_filter(td) -> List[Any]:
 
 
 def final_amount_filter(td) -> List[Any]:
+    """Filtro Q1: solo transacciones con final_amount >= 75."""
     return [
         r
         for r in iterate_rows_as_dicts(td)
@@ -84,6 +98,7 @@ def final_amount_filter(td) -> List[Any]:
 
 
 def year_filter(td, min_year: int = 2024, max_year: int = 2025) -> List[Any]:
+    """Filtra filas cuyo created_at cae dentro del rango de años."""
     return [
         r
         for r in iterate_rows_as_dicts(td)
@@ -108,6 +123,7 @@ QUERY_TO_INT = {
 
 
 def qkey(queries: List[Query]) -> str:
+    """Clave determinística para un set de queries (ordenada y sin duplicados)."""
     return ",".join(str(q) for q in sorted(set(QUERY_TO_INT[x] for x in queries)))
 
 
@@ -139,6 +155,7 @@ class FilterWorker:
         state_dir: str | None = None,
         worker_id: int = 0,
     ):
+        """Inicializa conexiones, blacklist y configuración de filtrado."""
         self._host = host
         self._in = MessageMiddlewareQueue(host, in_queue)
         self._filters = filters or REGISTRY
@@ -173,7 +190,7 @@ class FilterWorker:
         )
 
     def shutdown(self):
-        """Stops the consumer and closes all publisher connections."""
+        """Detiene el consumo y cierra publishers."""
         logger.info("Shutting down FilterWorker...")
 
         try:
@@ -192,6 +209,7 @@ class FilterWorker:
         logger.info("FilterWorker shutdown complete.")
 
     def _publisher_for_rk(self, rk: str) -> MessageMiddlewareExchange:
+        """Crea o reutiliza publisher hacia la RK dada."""
         pub = self._pub_cache.get(rk)
         if pub is None:
             logger.info("Creando publisher a exchange=%s rk=%s", self._out_ex, rk)
@@ -204,6 +222,7 @@ class FilterWorker:
         return pub
 
     def _send_to_router(self, raw: bytes, batch_number: int | None) -> None:
+        """Encola un mensaje al Filter Router usando batch_number para elegir RK."""
         logger.debug("Enviando batch al router | batch_number=%s", batch_number)
         pid = 0 if batch_number is None else int(batch_number) % self._num_routers
         rk = self._rk_fmt.format(pid=pid)
@@ -211,14 +230,16 @@ class FilterWorker:
         pub.send(raw)
 
     def run(self) -> None:
+        """Arranca el consumo de la cola de filtros."""
         logger.info("Comenzando consumo de mensajes…")
         self._in.start_consuming(self._on_raw)
 
     def _on_raw(self, raw: bytes) -> None:
+        """Handler principal de mensajes del pool de filtros."""
         logger.debug("Mensaje recibido, tamaño=%d bytes", len(raw))
         # Small hex preview to help identify message payload in logs (first 48 bytes)
         try:
-            preview = raw[:48].hex()
+            preview = raw[:RAW_LOG_PREVIEW_BYTES].hex()
             logger.debug("raw preview: %s", preview)
         except Exception:
             logger.debug("raw preview unavailable")
@@ -250,6 +271,7 @@ class FilterWorker:
             if not cid:
                 logger.warning("CLEANUP sin client_id: se descarta")
                 return
+            # Bloquea al cliente para descartar cualquier batch rezagado
             self._add_to_blacklist(cid)
             logger.info("Recibido CLEANUP → agregado a blacklist | client_id=%s", cid)
             return
@@ -385,7 +407,7 @@ class FilterWorker:
             self._send_to_router(raw, bn)
 
     def _load_and_clean_blacklist(self) -> None:
-        """Load blacklist from disk and drop entries older than 10 minutes."""
+        """Carga la blacklist desde disco y purga entradas antiguas (10 min)."""
         current_time = time.time()
         cutoff_time = current_time - 600
 
@@ -413,7 +435,7 @@ class FilterWorker:
         self._save_blacklist()
 
     def _save_blacklist(self) -> None:
-        """Persist blacklist to disk."""
+        """Persiste la blacklist en disco."""
         try:
             with open(self._blacklist_file, "w") as f:
                 json.dump(self._blacklist, f)
@@ -421,7 +443,7 @@ class FilterWorker:
             logger.error("Failed to save blacklist file: %s", e)
 
     def _add_to_blacklist(self, client_id: str) -> None:
-        """Add a client to the blacklist (memory + disk)."""
+        """Agrega un client_id a la blacklist (memoria + disco)."""
         if not client_id:
             return
 
@@ -432,7 +454,7 @@ class FilterWorker:
             logger.info("Added client_id to blacklist: %s", client_id)
 
     def _is_blacklisted(self, client_id: str) -> bool:
-        """Check if a client_id is blacklisted."""
+        """True si el client_id está bloqueado."""
         if not client_id:
             return False
 
