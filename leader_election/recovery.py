@@ -124,13 +124,14 @@ class FollowerRecoveryManager:
             container_name,
             stale_for,
         )
+        restart_timeout = 60
         try:
             result = subprocess.run(
                 [self._docker_cli, "restart", container_name],
                 check=False,
                 capture_output=True,
                 text=True,
-                timeout=60,
+                timeout=restart_timeout,
             )
             if result.returncode == 0:
                 logger.info(
@@ -147,6 +148,15 @@ class FollowerRecoveryManager:
                     result.returncode,
                     result.stderr.strip(),
                 )
+        except subprocess.TimeoutExpired as exc:
+            logger.error(
+                "Docker restart timed out after %ss for follower %s (container=%s, stdout=%s, stderr=%s)",
+                exc.timeout or restart_timeout,
+                node_id,
+                container_name,
+                (exc.stdout or "").strip(),
+                (exc.stderr or "").strip(),
+            )
         except Exception as exc:
             logger.error(
                 "Exception restarting container %s for follower %s: %s",
