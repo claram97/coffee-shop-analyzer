@@ -30,6 +30,7 @@ TABLE_NAME_TO_STR = {
     TableName.USERS: "users",
 }
 LIGHT_TABLES = {TableName.MENU_ITEMS, TableName.STORES}
+BLACKLIST_TTL_SECONDS = 600
 
 
 def is_bit_set(mask: int, idx: int) -> bool:
@@ -162,7 +163,7 @@ class FilterRouter:
         Called at bootstrap.
         """
         current_time = time.time()
-        cutoff_time = current_time - 600  # 10 minutes ago
+        cutoff_time = current_time - BLACKLIST_TTL_SECONDS  # 10 minutes ago
 
         # Load from file if it exists
         if os.path.exists(self._blacklist_file):
