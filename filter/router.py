@@ -38,17 +38,21 @@ TABLE_NAME_TO_STR = {
 }
 LIGHT_TABLES = {TableName.MENU_ITEMS, TableName.STORES}
 BLACKLIST_TTL_SECONDS = 600
+UNKNOWN_TRACE_HASH_MOD = 10_000
 
 
 def is_bit_set(mask: int, idx: int) -> bool:
+    """Return True if the bit at position ``idx`` is set in ``mask``."""
     return ((mask >> idx) & 1) == 1
 
 
 def set_bit(mask: int, idx: int) -> int:
+    """Set the bit at position ``idx`` in ``mask`` and return the new mask."""
     return mask | (1 << idx)
 
 
 def first_zero_bit(mask: int, total_bits: int) -> Optional[int]:
+    """Return the first index whose bit is zero, bounded by ``total_bits``."""
     for i in range(total_bits):
         if not is_bit_set(mask, i):
             return i
@@ -57,6 +61,7 @@ def first_zero_bit(mask: int, total_bits: int) -> Optional[int]:
 
 class TableConfig:
     def __init__(self, aggregators: int):
+        """Simple holder for the number of aggregator partitions."""
         self.aggregators = aggregators
 
 
@@ -64,6 +69,7 @@ class QueryPolicyResolver:
     def steps_remaining(
         self, batch_table_name: TableName, batch_queries: list[Query], steps_done: int
     ) -> bool:
+        """Return True if a batch should keep flowing through per-query filters."""
         if batch_table_name == TableName.TRANSACTIONS:
             if len(batch_queries) == 3:
                 return steps_done == 0
@@ -80,11 +86,13 @@ class QueryPolicyResolver:
         return False
 
     def get_duplication_count(self, batch_queries: list[Query]) -> int:
+        """How many copies of the batch should be produced for fan-out."""
         return 2 if len(batch_queries) > 1 else 1
 
     def get_new_batch_queries(
         self, batch_table_name: TableName, batch_queries: list[Query], copy_number: int
     ) -> list[Query]:
+        """Return the list of queries assigned to the ``copy_number`` fan-out copy."""
         if batch_table_name == TableName.TRANSACTIONS:
             if len(batch_queries) == 3:
                 return [Query.Q4] if copy_number == 1 else [Query.Q1, Query.Q3]
@@ -95,6 +103,7 @@ class QueryPolicyResolver:
     def total_steps(
         self, batch_table_name: TableName, batch_queries: list[Query]
     ) -> int:
+        """Return how many filtering steps a batch must complete for its queries."""
         if batch_table_name == TableName.TRANSACTIONS:
             if len(batch_queries) == 3:
                 return 3
@@ -116,6 +125,7 @@ class FilterRouter:
         orch_workers: int,
         router_id: int = 0,
     ):
+        """Stateful router that fans out batches, tracks EOF/CLEANUP, and enforces blacklists."""
         self._p = producer
         self._pol = policy
         self._cfg = table_cfg
@@ -382,6 +392,7 @@ class FilterRouter:
             return False
 
     def _handle_data(self, batch: DataBatch) -> None:
+        """Process an incoming ``DataBatch`` through filters or forward it downstream."""
         table = batch.payload.name
         queries = batch.query_ids
         mask = batch.filter_steps
@@ -462,6 +473,7 @@ class FilterRouter:
             raise
 
     def _send_to_some_aggregator(self, batch: DataBatch) -> None:
+        """Pick a random aggregator partition and forward the batch."""
         if batch.payload.name in [TableName.MENU_ITEMS, TableName.STORES]:
             self._log.debug(
                 "_send_to_some_aggregator table=%s bn=%s",
@@ -474,6 +486,7 @@ class FilterRouter:
     def _handle_table_eof(
         self, eof: EOFMessage, channel=None, delivery_tag=None, redelivered=False
     ) -> tuple[bool, bool]:
+        """Track EOF quorum for light tables and broadcast once all workers reported."""
         key = (eof.table, eof.client_id)
 
         if redelivered:
@@ -513,7 +526,7 @@ class FilterRouter:
                 self._log.warning(
                     "EOF without trace field, using fallback deduplication: key=%s", key
                 )
-                worker_id = f"unknown_{hash(eof.SerializeToString()) % 10000}"
+                worker_id = f"unknown_{hash(eof.SerializeToString()) % UNKNOWN_TRACE_HASH_MOD}"
 
             # Get or create the set of received worker IDs for this key
             (recvd_workers, _eof) = self._pending_eof.get(key, (set(), eof))
@@ -805,6 +818,7 @@ class ExchangeBusProducer:
         base_backoff_ms: int = 100,
         backoff_multiplier: float = 2.0,
     ):
+        """Publish batches to filters, routers, or aggregators with retry/backoff."""
         self._log = logging.getLogger("filter-router.bus")
         self._host = host
         self._filters_pub = MessageMiddlewareQueue(host, filters_pool_queue)
@@ -838,12 +852,14 @@ class ExchangeBusProducer:
         self._log.info("ExchangeBusProducer shutdown complete.")
 
     def _key_for(self, table_name: TableName, pid: int) -> tuple[TableName, str]:
+        """Return the exchange/routing-key tuple for ``table_name`` and partition."""
         table = TABLE_NAME_TO_STR[table_name]
         ex = self._exchange_fmt.format(table=table)
         rk = self._rk_fmt.format(table=table, pid=pid)
         return (ex, rk)
 
     def _get_pub(self, table_name: str, pid: int) -> MessageMiddlewareExchange:
+        """Fetch or lazily create a publisher bound to the given table partition."""
         table = TABLE_NAME_TO_STR[table_name]
         key = self._key_for(table, pid)
         pub = self._pub_cache.get(key)
@@ -870,6 +886,7 @@ class ExchangeBusProducer:
         return pub
 
     def _drop_pub(self, key: tuple[TableName, str]) -> None:
+        """Remove a cached publisher and close it if still open."""
         pub = self._pub_cache.pop(key, None)
         if pub is not None:
             try:
@@ -926,6 +943,7 @@ class ExchangeBusProducer:
             ) from last_error
 
     def send_to_filters_pool(self, batch: DataBatch) -> None:
+        """Serialize ``batch`` and push it back to the filters worker pool."""
         try:
             self._log.debug("publish → filters_pool")
             envelope = Envelope(type=MessageType.DATA_BATCH, data_batch=batch)
@@ -936,6 +954,7 @@ class ExchangeBusProducer:
             raise
 
     def send_to_aggregator_partition(self, partition_id: int, batch: DataBatch) -> None:
+        """Send ``batch`` to the aggregator partition identified by ``partition_id``."""
         table = batch.payload.name
         key = self._key_for(table, int(partition_id))
         try:
@@ -955,6 +974,7 @@ class ExchangeBusProducer:
             raise
 
     def requeue_to_router(self, batch: DataBatch) -> None:
+        """Re-inject a batch into the router input exchange for another pass."""
         env = Envelope(type=MessageType.DATA_BATCH, data_batch=batch)
         try:
             self._log.info(
@@ -970,6 +990,7 @@ class ExchangeBusProducer:
     def send_table_eof_to_aggregator_partition(
         self, key: tuple[TableName, str], partition_id: int
     ) -> None:
+        """Forward an EOF message for ``key`` to a specific aggregator partition."""
         try:
             # Add trace: "filter_router_id:aggregator_id"
             trace = f"{self._router_id}:{partition_id}"
@@ -1033,6 +1054,7 @@ class RouterServer:
         orch_workers: int,
         router_id: int = 0,
     ):
+        """Wire FilterRouter with middleware endpoints and shared stop event."""
         self._producer = producer
         self._mw_in = router_in
         self._router = FilterRouter(
@@ -1046,9 +1068,11 @@ class RouterServer:
         self._stop_event = stop_event
 
     def run(self) -> None:
+        """Start consuming orchestrator traffic and delegate to ``FilterRouter``."""
         self._log.debug("RouterServer starting consume")
 
         def _cb(body: bytes, channel=None, delivery_tag=None, redelivered=False):
+            """Consumer callback that decodes envelopes and handles graceful shutdown."""
             if self._stop_event.is_set():
                 self._log.warning(
                     "Shutdown in progress, NACKing message for redelivery."

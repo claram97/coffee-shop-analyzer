@@ -13,8 +13,23 @@ from worker import FilterWorker
 from app_config.config_loader import Config
 from leader_election import ElectionCoordinator, HeartbeatClient, FollowerRecoveryManager
 
+HOST_HASH_MODULUS = 100
+DEFAULT_HEARTBEAT_INTERVAL = 1.0
+DEFAULT_HEARTBEAT_TIMEOUT = 1.0
+DEFAULT_HEARTBEAT_MAX_MISSES = 3
+DEFAULT_HEARTBEAT_STARTUP_GRACE = 5.0
+DEFAULT_HEARTBEAT_ELECTION_COOLDOWN = 10.0
+DEFAULT_HEARTBEAT_COOLDOWN_JITTER = 0.5
+DEFAULT_FOLLOWER_DOWN_TIMEOUT = 10.0
+DEFAULT_FOLLOWER_RESTART_COOLDOWN = 30.0
+DEFAULT_FOLLOWER_RECOVERY_GRACE = 6.0
+DEFAULT_FOLLOWER_MAX_RESTART_ATTEMPTS = 100
+MIN_FOLLOWER_CHECK_INTERVAL = 1.0
+ELECTION_TIMEOUT_SECONDS = 5.0
+
 
 def main():
+    """Configure the worker process, wire leader election, and start consuming."""
     log_level = os.getenv("LOG_LEVEL", "INFO").upper()
     logging.basicConfig(
         level=getattr(logging, log_level),
@@ -27,7 +42,7 @@ def main():
         worker_id = int(worker_id_env)
     else:
         # Fallback to a deterministic value based on hostname for ad-hoc runs
-        worker_id = hash(os.getenv("HOSTNAME", "filter-worker")) % 100
+        worker_id = hash(os.getenv("HOSTNAME", "filter-worker")) % HOST_HASH_MODULUS
 
     stop_event = threading.Event()
 
@@ -53,16 +68,42 @@ def main():
     logger.info(f"Input queue (filters pool): {filters_pool_queue}")
     logger.info(f"Output exchange (router input): {router_exchange}")
 
-    heartbeat_interval = float(os.getenv("HEARTBEAT_INTERVAL_SECONDS", "1.0"))
-    heartbeat_timeout = float(os.getenv("HEARTBEAT_TIMEOUT_SECONDS", "1.0"))
-    heartbeat_max_misses = int(os.getenv("HEARTBEAT_MAX_MISSES", "3"))
-    heartbeat_startup_grace = float(os.getenv("HEARTBEAT_STARTUP_GRACE_SECONDS", "5.0"))
-    heartbeat_election_cooldown = float(os.getenv("HEARTBEAT_ELECTION_COOLDOWN_SECONDS", "10.0"))
-    heartbeat_cooldown_jitter = float(os.getenv("HEARTBEAT_COOLDOWN_JITTER_SECONDS", "0.5"))
-    follower_down_timeout = float(os.getenv("FOLLOWER_DOWN_TIMEOUT_SECONDS", "10.0"))
-    follower_restart_cooldown = float(os.getenv("FOLLOWER_RESTART_COOLDOWN_SECONDS", "30.0"))
-    follower_recovery_grace = float(os.getenv("FOLLOWER_RECOVERY_GRACE_SECONDS", "6.0"))
-    follower_max_restart_attempts = int(os.getenv("FOLLOWER_MAX_RESTART_ATTEMPTS", "100"))
+    heartbeat_interval = float(
+        os.getenv("HEARTBEAT_INTERVAL_SECONDS") or DEFAULT_HEARTBEAT_INTERVAL
+    )
+    heartbeat_timeout = float(
+        os.getenv("HEARTBEAT_TIMEOUT_SECONDS") or DEFAULT_HEARTBEAT_TIMEOUT
+    )
+    heartbeat_max_misses = int(
+        os.getenv("HEARTBEAT_MAX_MISSES") or DEFAULT_HEARTBEAT_MAX_MISSES
+    )
+    heartbeat_startup_grace = float(
+        os.getenv("HEARTBEAT_STARTUP_GRACE_SECONDS")
+        or DEFAULT_HEARTBEAT_STARTUP_GRACE
+    )
+    heartbeat_election_cooldown = float(
+        os.getenv("HEARTBEAT_ELECTION_COOLDOWN_SECONDS")
+        or DEFAULT_HEARTBEAT_ELECTION_COOLDOWN
+    )
+    heartbeat_cooldown_jitter = float(
+        os.getenv("HEARTBEAT_COOLDOWN_JITTER_SECONDS")
+        or DEFAULT_HEARTBEAT_COOLDOWN_JITTER
+    )
+    follower_down_timeout = float(
+        os.getenv("FOLLOWER_DOWN_TIMEOUT_SECONDS") or DEFAULT_FOLLOWER_DOWN_TIMEOUT
+    )
+    follower_restart_cooldown = float(
+        os.getenv("FOLLOWER_RESTART_COOLDOWN_SECONDS")
+        or DEFAULT_FOLLOWER_RESTART_COOLDOWN
+    )
+    follower_recovery_grace = float(
+        os.getenv("FOLLOWER_RECOVERY_GRACE_SECONDS")
+        or DEFAULT_FOLLOWER_RECOVERY_GRACE
+    )
+    follower_max_restart_attempts = int(
+        os.getenv("FOLLOWER_MAX_RESTART_ATTEMPTS")
+        or DEFAULT_FOLLOWER_MAX_RESTART_ATTEMPTS
+    )
 
     election_coordinator = None
     heartbeat_client = None
@@ -102,7 +143,7 @@ def main():
             my_port=election_port,
             all_nodes=all_nodes,
             on_leader_change=handle_leader_change,
-            election_timeout=5.0
+            election_timeout=ELECTION_TIMEOUT_SECONDS,
         )
 
         heartbeat_client = HeartbeatClient(
@@ -122,7 +163,7 @@ def main():
             coordinator=election_coordinator,
             my_id=worker_id,
             node_container_map=node_container_map,
-            check_interval=max(1.0, heartbeat_interval),
+            check_interval=max(MIN_FOLLOWER_CHECK_INTERVAL, heartbeat_interval),
             down_timeout=follower_down_timeout,
             restart_cooldown=follower_restart_cooldown,
             startup_grace=follower_recovery_grace,

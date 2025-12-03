@@ -8,6 +8,11 @@ the Filter Router exchange.
 
 BLACKLIST_TTL_SECONDS = 600
 RAW_LOG_PREVIEW_BYTES = 48
+HOUR_FILTER_START = 6
+HOUR_FILTER_END = 23
+FINAL_AMOUNT_MIN = 75.0
+YEAR_FILTER_MIN = 2024
+YEAR_FILTER_MAX = 2025
 
 import json
 import logging
@@ -83,7 +88,8 @@ def hour_filter(td) -> List[Any]:
     return [
         r
         for r in iterate_rows_as_dicts(td)
-        if (dt := _parse_dt_local(r["created_at"])) is not None and 6 <= dt.hour <= 23
+        if (dt := _parse_dt_local(r["created_at"])) is not None
+        and HOUR_FILTER_START <= dt.hour <= HOUR_FILTER_END
     ]
 
 
@@ -93,11 +99,15 @@ def final_amount_filter(td) -> List[Any]:
         r
         for r in iterate_rows_as_dicts(td)
         if (amount := _parse_final_amount(r["final_amount"])) is not None
-        and amount >= 75.0
+        and amount >= FINAL_AMOUNT_MIN
     ]
 
 
-def year_filter(td, min_year: int = 2024, max_year: int = 2025) -> List[Any]:
+def year_filter(
+    td,
+    min_year: int = YEAR_FILTER_MIN,
+    max_year: int = YEAR_FILTER_MAX,
+) -> List[Any]:
     """Filtra filas cuyo created_at cae dentro del rango de años."""
     return [
         r
@@ -234,7 +244,7 @@ class FilterWorker:
         logger.info("Comenzando consumo de mensajes…")
         self._in.start_consuming(self._on_raw)
 
-    def _on_raw(self, raw: bytes) -> None:
+    def _on_raw(self, raw: bytes, channel=None, delivery_tag=None) -> None:
         """Handler principal de mensajes del pool de filtros."""
         logger.debug("Mensaje recibido, tamaño=%d bytes", len(raw))
         # Small hex preview to help identify message payload in logs (first 48 bytes)
@@ -409,7 +419,7 @@ class FilterWorker:
     def _load_and_clean_blacklist(self) -> None:
         """Carga la blacklist desde disco y purga entradas antiguas (10 min)."""
         current_time = time.time()
-        cutoff_time = current_time - 600
+        cutoff_time = current_time - BLACKLIST_TTL_SECONDS
 
         if os.path.exists(self._blacklist_file):
             try:
