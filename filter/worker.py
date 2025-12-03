@@ -273,7 +273,7 @@ class FilterWorker:
             self._send_to_router(raw, bn)
             return
         if inner is None or not inner.rows:
-            logger.warning(
+            logger.debug(
                 "Batch sin 'rows': reenvío sin cambios | table_id=%s step=%s",
                 inner.name,
                 step,
