@@ -5,6 +5,7 @@ import json
 import logging
 import os
 import threading
+import time
 from collections import defaultdict
 from typing import Callable, Dict, List, Optional, Set, Tuple
 
@@ -71,43 +72,29 @@ class JoinerWorker:
 
         self._pending_eofs: Dict[tuple[TableName, str], Set[str]] = {}
 
-        # Calculate number of input queues: number of tables
         self._num_input_queues = len(in_mw)
-
-        # Track pending cleanup messages by queue: key=(client_id, queue_name) -> set of traces
-        # We need to wait for router_replicas * num_input_queues messages
-        self._pending_cleanups: Dict[tuple[str, str], Set[str]] = defaultdict(
-            set
-        )  # (client_id, queue_name) -> set of traces
-        self._completed_cleanups: Set[str] = (
-            set()
-        )  # Track clients whose cleanup has been forwarded
-        self._cleanup_lock = (
-            threading.RLock()
-        )  # RLock to allow reentrant acquisition from _cleanup_client_state
 
         self._stop_event = stop_event
         self._is_shutting_down = False
 
-        # Persistence
         self._persistence_dir = persistence_dir
         self._persistence_lock = threading.Lock()
         os.makedirs(self._persistence_dir, exist_ok=True)
 
-        # In-memory batch deduplication: track received batches per (table, client_id, query_ids_tuple)
-        # This mitigates duplicate batch propagation from joiner router (no persistence needed)
-        self._received_batches: Dict[tuple[TableName, str, tuple], set[int]] = (
-            defaultdict(set)
-        )
-
-        # Buffered disk writes configuration
         self._write_buffer_size = write_buffer_size
-        # Track which rows have been written per batch: (table, client, batch_number) -> set of row indices
         self._written_rows: Dict[tuple[TableName, str, int], set[int]] = defaultdict(
             set
         )
 
-        # Restore state from disk
+        self._blacklist: Dict[str, float] = {}
+        self._blacklist_lock = threading.Lock()
+
+        self._blacklist_file = os.path.join(
+            self._persistence_dir, f"blacklist_{shard_index}.json"
+        )
+
+        self._load_and_clean_blacklist()
+
         self._restore_state()
 
     def _get_pending_batch_path(
@@ -193,7 +180,7 @@ class JoinerWorker:
                     with open(path, "rb") as f:
                         raw_data = f.read()
                     batches.append((batch_number, raw_data))
-            return sorted(batches)  # Process in order
+            return sorted(batches)
         except Exception as e:
             self._log.error("Failed to load pending batches: %s", e)
             return []
@@ -287,6 +274,139 @@ class JoinerWorker:
         except Exception as e:
             self._log.warning("Failed to delete written rows tracking %s: %s", path, e)
 
+    def _load_and_clean_blacklist(self) -> None:
+        """
+        Load blacklist from file and remove entries older than 10 minutes.
+        Called at bootstrap.
+        """
+        current_time = time.time()
+        cutoff_time = current_time - 600
+
+        if os.path.exists(self._blacklist_file):
+            try:
+                with open(self._blacklist_file, "r") as f:
+                    data = json.load(f)
+                    self._blacklist = {
+                        client_id: timestamp
+                        for client_id, timestamp in data.items()
+                        if timestamp > cutoff_time
+                    }
+                    self._log.info(
+                        "Loaded blacklist: %d entries (removed %d old entries)",
+                        len(self._blacklist),
+                        len(data) - len(self._blacklist),
+                    )
+            except Exception as e:
+                self._log.warning("Failed to load blacklist file: %s", e)
+                self._blacklist = {}
+        else:
+            self._blacklist = {}
+            self._log.info("Blacklist file not found, starting with empty blacklist")
+
+        self._save_blacklist()
+
+    def _save_blacklist(self) -> None:
+        """Save blacklist to file."""
+        try:
+            with open(self._blacklist_file, "w") as f:
+                json.dump(self._blacklist, f)
+        except Exception as e:
+            self._log.error("Failed to save blacklist file: %s", e)
+
+    def _add_to_blacklist(self, client_id: str) -> None:
+        """Add a client_id to the blacklist (both in memory and file)."""
+        if not client_id:
+            return
+
+        current_time = time.time()
+        with self._blacklist_lock:
+            self._blacklist[client_id] = current_time
+            self._save_blacklist()
+            self._log.info("Added client_id to blacklist: %s", client_id)
+
+    def _is_blacklisted(self, client_id: str) -> bool:
+        """Check if a client_id is in the blacklist."""
+        if not client_id:
+            return False
+
+        with self._blacklist_lock:
+            return client_id in self._blacklist
+
+    def _restore_light_tables(self, filename):
+        try:
+            parts = filename[6:-5].split("_", 1)
+            table_name = int(parts[0])
+            client_id = parts[1]
+
+            path = os.path.join(self._persistence_dir, filename)
+            with open(path, "r") as f:
+                data = json.load(f)
+
+            if table_name == TableName.MENU_ITEMS:
+                self._cache_menu[client_id] = data
+                self._log.info("Restored menu cache for client=%s", client_id)
+            elif table_name == TableName.STORES:
+                self._cache_stores[client_id] = data
+                self._log.info("Restored stores cache for client=%s", client_id)
+        except Exception as e:
+            self._log.warning("Failed to restore light table from %s: %s", filename, e)
+
+    def _restore_eof_state(self, filename):
+        try:
+            parts = filename[4:-5].split("_", 1)
+            table_name = int(parts[0])
+            client_id = parts[1]
+
+            path = os.path.join(self._persistence_dir, filename)
+            with open(path, "r") as f:
+                eof_data = json.load(f)
+
+            key = (table_name, client_id)
+            traces = eof_data.get("traces", [])
+
+            if traces:
+                self._pending_eofs[key] = set(traces)
+                self._log.info(
+                    "Restored partial EOF for table=%s client=%s traces=%d",
+                    table_name,
+                    client_id,
+                    len(traces),
+                )
+
+            if eof_data.get("complete", False):
+                self._eof.add(key)
+                self._log.info(
+                    "Restored complete EOF for table=%s client=%s",
+                    table_name,
+                    client_id,
+                )
+        except Exception as e:
+            self._log.warning("Failed to restore EOF from %s: %s", filename, e)
+
+    def _restore_written_rows(self, filename):
+        try:
+            parts = filename[13:-5].split("_", 2)
+            table_name = int(parts[0])
+            client_id = parts[1]
+            batch_number = int(parts[2])
+
+            path = os.path.join(self._persistence_dir, filename)
+            with open(path, "r") as f:
+                data = json.load(f)
+
+            key = (table_name, client_id, batch_number)
+            written_rows = set(data.get("written_rows", []))
+            self._written_rows[key] = written_rows
+            self._log.info(
+                "Restored written rows for table=%s client=%s bn=%s count=%d",
+                table_name,
+                client_id,
+                batch_number,
+                len(written_rows),
+            )
+        except Exception as e:
+            self._log.warning("Failed to restore written rows from %s: %s", filename, e)
+
     def _restore_state(self) -> None:
         """Restore state from disk on startup."""
         if not os.path.exists(self._persistence_dir):
@@ -294,154 +414,17 @@ class JoinerWorker:
 
         self._log.info("Restoring state from disk: %s", self._persistence_dir)
 
-        # Restore light tables
         for filename in os.listdir(self._persistence_dir):
             if filename.startswith("light_") and filename.endswith(".json"):
-                try:
-                    parts = filename[6:-5].split("_", 1)
-                    table_name = int(parts[0])
-                    client_id = parts[1]
-
-                    path = os.path.join(self._persistence_dir, filename)
-                    with open(path, "r") as f:
-                        data = json.load(f)
-
-                    if table_name == TableName.MENU_ITEMS:
-                        self._cache_menu[client_id] = data
-                        self._log.info("Restored menu cache for client=%s", client_id)
-                    elif table_name == TableName.STORES:
-                        self._cache_stores[client_id] = data
-                        self._log.info("Restored stores cache for client=%s", client_id)
-                except Exception as e:
-                    self._log.warning(
-                        "Failed to restore light table from %s: %s", filename, e
-                    )
+                self._restore_light_tables(filename)
 
             elif filename.startswith("eof_") and filename.endswith(".json"):
-                try:
-                    parts = filename[4:-5].split("_", 1)
-                    table_name = int(parts[0])
-                    client_id = parts[1]
-
-                    path = os.path.join(self._persistence_dir, filename)
-                    with open(path, "r") as f:
-                        eof_data = json.load(f)
-
-                    key = (table_name, client_id)
-                    traces = eof_data.get("traces", [])
-
-                    if traces:
-                        self._pending_eofs[key] = set(traces)
-                        self._log.info(
-                            "Restored partial EOF for table=%s client=%s traces=%d",
-                            table_name,
-                            client_id,
-                            len(traces),
-                        )
-
-                    if eof_data.get("complete", False):
-                        self._eof.add(key)
-                        self._log.info(
-                            "Restored complete EOF for table=%s client=%s",
-                            table_name,
-                            client_id,
-                        )
-                except Exception as e:
-                    self._log.warning("Failed to restore EOF from %s: %s", filename, e)
+                self._restore_eof_state(filename)
 
             elif filename.startswith("written_rows_") and filename.endswith(".json"):
-                try:
-                    # Parse: written_rows_{table}_{client}_{batch}.json
-                    parts = filename[13:-5].split("_", 2)
-                    table_name = int(parts[0])
-                    client_id = parts[1]
-                    batch_number = int(parts[2])
-
-                    path = os.path.join(self._persistence_dir, filename)
-                    with open(path, "r") as f:
-                        data = json.load(f)
-
-                    key = (table_name, client_id, batch_number)
-                    written_rows = set(data.get("written_rows", []))
-                    self._written_rows[key] = written_rows
-                    self._log.info(
-                        "Restored written rows for table=%s client=%s bn=%s count=%d",
-                        table_name,
-                        client_id,
-                        batch_number,
-                        len(written_rows),
-                    )
-                except Exception as e:
-                    self._log.warning(
-                        "Failed to restore written rows from %s: %s", filename, e
-                    )
+                self._restore_written_rows(filename)
 
         self._log.info("State restoration complete")
-        
-        # Check consistency: if all EOFs received but not marked as completed, fix it
-        self._check_eof_consistency()
-
-    def _check_eof_consistency(self) -> None:
-        """
-        Check consistency between pending EOFs and completed EOFs on bootstrap.
-        If all EOFs were received for a key (all router replicas sent EOF) but it's not marked
-        as completed in _eof (for phase readiness), add it to _eof.
-        Keep entries in _pending_eofs until cleanup removes them.
-        """
-        keys_to_complete = []
-        for key, traces in self._pending_eofs.items():
-            # Check if all router replicas have sent EOF for this key
-            if len(traces) >= self._router_replicas:
-                # All EOFs received, but check if it's marked in _eof for phase readiness
-                if key not in self._eof:
-                    keys_to_complete.append(key)
-                    self._log.info(
-                        "Found inconsistent EOF state: key=%s has all %d traces but not in _eof, fixing...",
-                        key,
-                        len(traces),
-                    )
-        
-        # Add missing keys to _eof for phase readiness
-        # Keep entries in _pending_eofs until cleanup removes them
-        if keys_to_complete:
-            for key in keys_to_complete:
-                self._eof.add(key)
-            
-            self._log.info(
-                "Fixed EOF consistency: added %d keys to _eof for phase readiness",
-                len(keys_to_complete),
-            )
-
-    def _is_duplicate_batch(self, data_batch: DataBatch) -> bool:
-        """
-        Check if a batch is a duplicate. Returns True if duplicate, False otherwise.
-        Tracks batches by (table, client_id, query_ids_tuple, batch_number).
-        In-memory only - no persistence (loss on restart is acceptable).
-        """
-        table = data_batch.payload.name
-        client_id = data_batch.client_id
-        batch_number = data_batch.payload.batch_number
-        query_ids_tuple = tuple(sorted(data_batch.query_ids))
-
-        dedup_key = (table, client_id, query_ids_tuple)
-
-        # if batch_number in self._received_batches[dedup_key]:
-        #     self._log.warning(
-        #         "DUPLICATE batch detected and discarded in joiner worker: table=%s bn=%s client=%s queries=%s",
-        #         table, batch_number, client_id, data_batch.query_ids
-        #     )
-        #     return True
-
-        # Mark batch as received
-        self._received_batches[dedup_key].add(batch_number)
-        self._log.debug(
-            "Batch marked as received: table=%s bn=%s client=%s queries=%s",
-            table,
-            batch_number,
-            client_id,
-            data_batch.query_ids,
-        )
-        return False
 
     def _cleanup_persisted_client(self, client_id: str) -> None:
         """Clean up all persisted data for a client."""
@@ -499,45 +482,25 @@ class JoinerWorker:
         )
 
         with self._lock:
-            # Clean caches
             self._cache_menu.pop(client_id, None)
             self._cache_stores.pop(client_id, None)
 
-            # Clean EOF tracking (_eof is used for phase readiness)
             eof_keys_to_remove = [key for key in self._eof if key[1] == client_id]
             for key in eof_keys_to_remove:
                 self._eof.discard(key)
 
-            # Clean pending EOFs (entries remain here until cleanup removes them)
             keys_to_remove = [
                 key for key in self._pending_eofs.keys() if key[1] == client_id
             ]
             for key in keys_to_remove:
                 self._pending_eofs.pop(key, None)
 
-        # Clean received batches deduplication state
-        keys_to_remove = [
-            key for key in self._received_batches.keys() if key[1] == client_id
-        ]
-        for key in keys_to_remove:
-            del self._received_batches[key]
-
-        # Clean pending cleanups (tracked by (client_id, queue_name))
-        with self._cleanup_lock:
-            keys_to_remove = [
-                key for key in self._pending_cleanups.keys() if key[0] == client_id
-            ]
-            for key in keys_to_remove:
-                self._pending_cleanups.pop(key, None)
-
-            # Clean written rows tracking
             keys_to_remove = [
                 key for key in self._written_rows.keys() if key[1] == client_id
             ]
             for key in keys_to_remove:
                 del self._written_rows[key]
 
-        # Clean persisted data
         with self._persistence_lock:
             self._cleanup_persisted_client(client_id)
 
@@ -554,104 +517,29 @@ class JoinerWorker:
             self._log.warning("Received client_cleanup message with empty client_id")
             return
 
-        if not queue_name:
-            self._log.warning("CLEANUP without queue_name; cannot track by queue")
-            return
+        self._log.info(
+            "CLEANUP recv client_id=%s",
+            client_id,
+        )
 
-        # CRITICAL: Check if cleanup already completed BEFORE touching _pending_cleanups
-        # This prevents duplicate cleanup messages from re-triggering forward after completion
-        with self._cleanup_lock:
-            if client_id in self._completed_cleanups:
-                self._log.info(
-                    "CLEANUP already completed for client_id=%s, ignoring duplicate",
-                    client_id,
-                )
-                return
+        self._add_to_blacklist(client_id)
 
-        # Extract router ID from trace (format: "joiner_router_id")
-        trace = cleanup_msg.trace if cleanup_msg.trace else None
-        router_id = trace if trace else None
+        self._cleanup_client_state(client_id)
 
-        with self._cleanup_lock:
-            queue_key = (client_id, queue_name)
-            recvd_traces = self._pending_cleanups[queue_key]
-
-            if router_id:
-                if router_id in recvd_traces:
-                    self._log.warning(
-                        "Duplicate CLEANUP ignored: client_id=%s queue=%s router_id=%s",
-                        client_id,
-                        queue_name,
-                        router_id,
-                    )
-                    return
-                recvd_traces.add(router_id)
-            else:
-                # Fallback: use counter if no trace
-                recvd_traces.add(f"router_{len(recvd_traces)}")
-
-            # Count total unique messages received across all queues
-            total_received = sum(
-                len(traces)
-                for (cid, _), traces in self._pending_cleanups.items()
-                if cid == client_id
-            )
-            expected_count = self._router_replicas * self._num_input_queues
-
+        if self._shard == 0:
+            env = Envelope(type=MessageType.CLEAN_UP_MESSAGE, clean_up=cleanup_msg)
+            raw = env.SerializeToString()
             self._log.info(
-                "CLEANUP recv client_id=%s queue=%s router_id=%s progress=%d/%d",
+                "action: forward_cleanup_to_results_router | result: forwarding | client_id: %s",
                 client_id,
-                queue_name,
-                router_id or "no-trace",
-                total_received,
-                expected_count,
             )
-
-            # Check if we've received cleanup from all joiner router replicas across all input queues
-            if total_received >= expected_count:
-                self._log.info(
-                    "CLEANUP threshold reached for client_id=%s → cleaning up and forwarding",
-                    client_id,
-                )
-
-                # Mark as completed BEFORE cleanup to prevent re-trigger
-                self._completed_cleanups.add(client_id)
-
-                # Clean local state
-                self._cleanup_client_state(client_id)
-
-                # Only forward if this is shard ID 0 (to avoid duplicate messages)
-                if self._shard == 0:
-                    # Forward to results router pool
-                    env = Envelope(
-                        type=MessageType.CLEAN_UP_MESSAGE, clean_up=cleanup_msg
-                    )
-                    raw = env.SerializeToString()
-                    self._log.info(
-                        "action: forward_cleanup_to_results_router | result: forwarding | client_id: %s",
-                        client_id,
-                    )
-                    self._safe_send(raw)
-                else:
-                    self._log.debug(
-                        "action: cleanup_forward | result: skipped | client_id: %s | shard: %d (only shard 0 forwards)",
-                        client_id,
-                        self._shard,
-                    )
-
-                # Remove all entries for this client_id
-                keys_to_remove = [
-                    key for key in self._pending_cleanups.keys() if key[0] == client_id
-                ]
-                for key in keys_to_remove:
-                    self._pending_cleanups.pop(key, None)
-            else:
-                self._log.debug(
-                    "CLEANUP deferred: client_id=%s received %d/%d messages",
-                    client_id,
-                    total_received,
-                    expected_count,
-                )
+            self._safe_send(raw)
+        else:
+            self._log.debug(
+                "action: cleanup_forward | result: skipped | client_id: %s | shard: %d (only shard 0 forwards)",
+                client_id,
+                self._shard,
+            )
 
     def _log_db(self, where: str, db: DataBatch):
         try:
@@ -722,7 +610,7 @@ class JoinerWorker:
         elif table_name == TableName.TRANSACTIONS:
             need = [TableName.MENU_ITEMS, TableName.STORES]
         elif table_name == TableName.USERS:
-            need = []  # USERS doesn't need to wait for any table
+            need = []
         else:
             need = []
         return all((t, client_id) in self._eof for t in need)
@@ -737,42 +625,60 @@ class JoinerWorker:
         except Exception as e:
             self._log.error("requeue failed table_id=%s: %s", table_name, e)
 
-    def _on_raw_menu(
-        self, raw: bytes, channel=None, delivery_tag=None, redelivered=False
-    ):
-        """Process menu_items messages. Returns True to ACK immediately."""
-        envelope = Envelope()
-        envelope.ParseFromString(raw)
+    def _handle_eof_or_cleanup(self, envelope: Envelope, table: TableName):
         if envelope.type == MessageType.EOF_MESSAGE:
             eof: EOFMessage = envelope.eof
+            if self._is_blacklisted(eof.client_id):
+                self._log.info(
+                    "Discarding EOF from blacklisted client: table=%s cid=%s",
+                    eof.table,
+                    eof.client_id,
+                )
+                return True
             return self._on_table_eof(
                 eof.table,
                 eof.client_id,
                 eof.trace,
-                channel,
-                delivery_tag,
-                redelivered,
             )
         if envelope.type == MessageType.CLEAN_UP_MESSAGE:
             self._handle_client_cleanup(
                 envelope.clean_up,
-                queue_name=NAME_TO_STR.get(TableName.MENU_ITEMS, "menu_items"),
+                queue_name=NAME_TO_STR.get(table),
             )
             return True
-        if envelope.type == MessageType.DATA_BATCH:
-            db: DataBatch = envelope.data_batch
 
-            # Check for duplicate batch and discard if already processed
-            if self._is_duplicate_batch(db):
-                return True  # ACK duplicate batch
-        else:
+    def _on_raw_light_table(self, raw: bytes, table: TableName):
+        """Process menu_items messages. Returns True to ACK immediately."""
+        envelope = Envelope()
+        envelope.ParseFromString(raw)
+
+        if envelope.type not in [
+            MessageType.EOF_MESSAGE,
+            MessageType.CLEAN_UP_MESSAGE,
+            MessageType.DATA_BATCH,
+        ]:
             self._log.warning("Unknown message type: %s. Skipping.", envelope.type)
             return True
+
+        if envelope.type != MessageType.DATA_BATCH:
+            self._handle_eof_or_cleanup(envelope, table)
+
+        db: DataBatch = envelope.data_batch
         cid = db.client_id
+
+        if self._is_blacklisted(cid):
+            self._log.info(
+                "Discarding batch from blacklisted client: table=%s bn=%s cid=%s",
+                db.payload.name,
+                db.payload.batch_number,
+                cid,
+            )
+            return True
         bn = db.payload.batch_number
 
         self._log.debug(
-            "IN: menu_items batch_number=%s shard=%s shards_info=%s queries=%s cid=%s",
+            "IN: light table id=%i batch_number=%s shard=%s shards_info=%s queries=%s cid=%s",
+            table,
             bn,
             self._shard,
             db.shards_info,
@@ -780,47 +686,59 @@ class JoinerWorker:
             cid,
         )
 
-        # Use buffered processing for light table
-        return self._process_light_table_buffered(
-            db, cid, bn, TableName.MENU_ITEMS, "item_id", self._cache_menu
-        )
+        if table == TableName.MENU_ITEMS:
+            return self._process_light_table_buffered(
+                db, cid, bn, table, "item_id", self._cache_menu
+            )
+        else:
+            return self._process_light_table_buffered(
+                db, cid, bn, TableName.STORES, "store_id", self._cache_stores
+            )
+
+    def _on_raw_menu(
+        self, raw: bytes, channel=None, delivery_tag=None, redelivered=False
+    ):
+        """Process menu_items messages. Returns True to ACK immediately."""
+        self._on_raw_light_table(raw, TableName.MENU_ITEMS)
 
     def _on_raw_stores(
         self, raw: bytes, channel=None, delivery_tag=None, redelivered=False
     ):
         """Process stores messages. Returns True to ACK immediately."""
+        self._on_raw_light_table(raw, TableName.STORES)
+
+    def _on_raw_heavy_table(self, raw: bytes, table: TableName):
         envelope = Envelope()
         envelope.ParseFromString(raw)
-        if envelope.type == MessageType.EOF_MESSAGE:
-            eof: EOFMessage = envelope.eof
-            return self._on_table_eof(
-                eof.table,
-                eof.client_id,
-                eof.trace,
-                channel,
-                delivery_tag,
-                redelivered,
-            )
-        if envelope.type == MessageType.CLEAN_UP_MESSAGE:
-            self._handle_client_cleanup(
-                envelope.clean_up,
-                queue_name=NAME_TO_STR.get(TableName.STORES, "stores"),
-            )
-            return True
-        if envelope.type == MessageType.DATA_BATCH:
-            db: DataBatch = envelope.data_batch
 
-            # Check for duplicate batch and discard if already processed
-            if self._is_duplicate_batch(db):
-                return True  # ACK duplicate batch
-        else:
+        if envelope.type not in [
+            MessageType.EOF_MESSAGE,
+            MessageType.CLEAN_UP_MESSAGE,
+            MessageType.DATA_BATCH,
+        ]:
             self._log.warning("Unknown message type: %s. Skipping.", envelope.type)
             return True
+
+        if envelope.type != MessageType.DATA_BATCH:
+            self._handle_eof_or_cleanup(envelope, TableName.TRANSACTION_ITEMS)
+
+        db: DataBatch = envelope.data_batch
         cid = db.client_id
+
+        if self._is_blacklisted(cid):
+            self._log.info(
+                "Discarding batch from blacklisted client: table=%s bn=%s cid=%s",
+                db.payload.name,
+                db.payload.batch_number,
+                cid,
+            )
+            return True
+
         bn = db.payload.batch_number
 
         self._log.debug(
-            "IN: stores batch_number=%s shard=%s shards_info=%s queries=%s cid=%s",
+            "IN: %s batch_number=%s shard=%s shards_info=%s queries=%s cid=%s",
+            NAME_TO_STR.get(table),
             bn,
             self._shard,
             db.shards_info,
@@ -828,68 +746,32 @@ class JoinerWorker:
             cid,
         )
 
-        # Use buffered processing for light table
-        return self._process_light_table_buffered(
-            db, cid, bn, TableName.STORES, "store_id", self._cache_stores
-        )
+        if not self._phase_ready(table, cid):
+            self._log.info(
+                "phase not ready for table %s, saving batch to disk (cid=%s batch=%d)",
+                NAME_TO_STR.get(table),
+                cid,
+                bn,
+            )
+            try:
+                self._save_pending_batch(table, cid, bn, raw)
+            except Exception as e:
+                self._log.error("Failed to save pending batch: %s", e)
+                raise
+            return True
+
+        if table == TableName.TRANSACTION_ITEMS:
+            return self._process_ti_batch(raw, cid, bn)
+        elif table == TableName.TRANSACTIONS:
+            return self._process_tx_batch(raw, cid, bn)
+        else:
+            return self._process_users_batch(raw, cid, bn)
 
     def _on_raw_ti(
         self, raw: bytes, channel=None, delivery_tag=None, redelivered=False
     ):
         """Process transaction_items messages. Returns True to ACK immediately."""
-        envelope = Envelope()
-        envelope.ParseFromString(raw)
-        if envelope.type == MessageType.EOF_MESSAGE:
-            eof: EOFMessage = envelope.eof
-            return self._on_table_eof(
-                eof.table,
-                eof.client_id,
-                eof.trace,
-                channel,
-                delivery_tag,
-                redelivered,
-            )
-        if envelope.type == MessageType.CLEAN_UP_MESSAGE:
-            self._handle_client_cleanup(
-                envelope.clean_up,
-                queue_name=NAME_TO_STR.get(
-                    TableName.TRANSACTION_ITEMS, "transaction_items"
-                ),
-            )
-            return True
-        if envelope.type == MessageType.DATA_BATCH:
-            db: DataBatch = envelope.data_batch
-
-            # Check for duplicate batch and discard if already processed
-            if self._is_duplicate_batch(db):
-                return True  # ACK duplicate batch
-        else:
-            self._log.warning("Unknown message type: %s. Skipping.", envelope.type)
-            return True
-        cid = db.client_id
-        bn = db.payload.batch_number
-
-        self._log.debug(
-            "IN: transaction_items batch_number=%s shard=%s shards_info=%s queries=%s cid=%s",
-            bn,
-            self._shard,
-            db.shards_info,
-            db.query_ids,
-            cid,
-        )
-
-        if not self._phase_ready(TableName.TRANSACTION_ITEMS, cid):
-            self._log.info(
-                "TI fase NO lista, saving batch to disk (cid=%s batch=%d)", cid, bn
-            )
-            try:
-                self._save_pending_batch(TableName.TRANSACTION_ITEMS, cid, bn, raw)
-            except Exception as e:
-                self._log.error("Failed to save pending batch: %s", e)
-                raise  # Re-raise to cause NACK and redelivery
-            return True  # ACK immediately - batch saved to disk
-
-        return self._process_ti_batch(raw, cid, bn)
+        self._on_raw_heavy_table(raw, TableName.TRANSACTION_ITEMS)
 
     def _process_ti_batch(self, raw: bytes, cid: str, bn: int) -> bool:
         """Process a transaction_items batch with buffered writes (either fresh or from disk)."""
@@ -908,7 +790,6 @@ class JoinerWorker:
             self._log.warning("Menu cache no disponible; cannot process batch=%d", bn)
             return False
 
-        # Use buffered write for Q2 join
         return self._process_batch_buffered(
             db,
             cid,
@@ -925,57 +806,7 @@ class JoinerWorker:
         self, raw: bytes, channel=None, delivery_tag=None, redelivered=False
     ):
         """Process transactions messages. Returns True to ACK immediately."""
-        envelope = Envelope()
-        envelope.ParseFromString(raw)
-        if envelope.type == MessageType.EOF_MESSAGE:
-            eof: EOFMessage = envelope.eof
-            return self._on_table_eof(
-                eof.table,
-                eof.client_id,
-                eof.trace,
-                channel,
-                delivery_tag,
-                redelivered,
-            )
-        if envelope.type == MessageType.CLEAN_UP_MESSAGE:
-            self._handle_client_cleanup(
-                envelope.clean_up,
-                queue_name=NAME_TO_STR.get(TableName.TRANSACTIONS, "transactions"),
-            )
-            return True
-        if envelope.type == MessageType.DATA_BATCH:
-            db: DataBatch = envelope.data_batch
-
-            # Check for duplicate batch and discard if already processed
-            if self._is_duplicate_batch(db):
-                return True  # ACK duplicate batch
-        else:
-            self._log.warning("Unknown message type: %s. Skipping.", envelope.type)
-            return True
-        cid = db.client_id
-        bn = db.payload.batch_number
-
-        self._log.debug(
-            "IN: transactions batch_number=%s shard=%s shards_info=%s queries=%s cid=%s",
-            bn,
-            self._shard,
-            db.shards_info,
-            db.query_ids,
-            cid,
-        )
-
-        if not self._phase_ready(TableName.TRANSACTIONS, cid):
-            self._log.info(
-                "TX fase NO lista, saving batch to disk (cid=%s batch=%d)", cid, bn
-            )
-            try:
-                self._save_pending_batch(TableName.TRANSACTIONS, cid, bn, raw)
-            except Exception as e:
-                self._log.error("Failed to save pending batch: %s", e)
-                raise  # Re-raise to cause NACK and redelivery
-            return True  # ACK immediately
-
-        return self._process_tx_batch(raw, cid, bn)
+        self._on_raw_heavy_table(raw, TableName.TRANSACTIONS)
 
     def _process_tx_batch(self, raw: bytes, cid: str, bn: int) -> bool:
         """Process a transactions batch with buffered writes (either fresh or from disk)."""
@@ -994,7 +825,6 @@ class JoinerWorker:
             self._log.warning("Stores cache no disponible; cannot process batch=%d", bn)
             return False
 
-        # Use buffered write for Q3 join
         return self._process_batch_buffered(
             db,
             cid,
@@ -1035,20 +865,16 @@ class JoinerWorker:
             self._write_buffer_size,
         )
 
-        # Initialize cache if needed
         if cid not in cache_dict:
             cache_dict[cid] = {}
 
-        # Process rows in chunks
         rows_processed = 0
         rows_to_process = list(enumerate(iterate_rows_as_dicts(db.payload)))
 
         for row_idx, row_dict in rows_to_process:
-            # Skip already written rows (from previous delivery)
             if row_idx in written_rows:
                 continue
 
-            # Index the row by key attribute
             key_val = norm(row_dict[key_attr])
             if key_val:
                 cache_dict[cid][key_val] = row_dict
@@ -1056,25 +882,22 @@ class JoinerWorker:
             written_rows.add(row_idx)
             rows_processed += 1
 
-            # Persist cache progress when buffer is full
             if rows_processed >= self._write_buffer_size:
                 try:
                     self._persist_light_table(table, cid, cache_dict[cid])
                     self._persist_written_rows(table, cid, bn, written_rows)
                 except Exception as e:
                     self._log.error("Failed to persist light table progress: %s", e)
-                    return False  # NACK to retry
+                    return False
                 rows_processed = 0
 
-        # Final persistence for remaining rows
         if rows_processed > 0 or len(written_rows) == total_rows:
             try:
                 self._persist_light_table(table, cid, cache_dict[cid])
             except Exception as e:
                 self._log.error("Failed to persist final light table state: %s", e)
-                return False  # NACK to retry
+                return False
 
-        # All rows processed successfully
         self._log.info(
             "Light table batch fully processed: table=%s client=%s bn=%s total_written=%d cache_size=%d",
             table,
@@ -1084,11 +907,10 @@ class JoinerWorker:
             len(cache_dict[cid]),
         )
 
-        # Cleanup tracking
         del self._written_rows[tracking_key]
         self._delete_written_rows_tracking(table, cid, bn)
 
-        return True  # ACK
+        return True
 
     def _process_batch_buffered(
         self,
@@ -1123,21 +945,17 @@ class JoinerWorker:
 
         out_schema = TableSchema(columns=out_cols)
 
-        # Process rows in chunks
         current_buffer: List[Row] = []
         rows_to_process = list(enumerate(iterate_rows_as_dicts(db.payload)))
 
         for row_idx, r in rows_to_process:
-            # Skip already written rows (from previous delivery)
             if row_idx in written_rows:
                 continue
 
-            # Join logic
             key_val = norm(r[join_key])
             joined_item = join_index.get(key_val)
             if not joined_item:
                 self._log.warning("No join match for %s=%s", join_key, key_val)
-                # Mark as written even if no match (to skip on redelivery)
                 written_rows.add(row_idx)
                 continue
 
@@ -1150,15 +968,13 @@ class JoinerWorker:
             current_buffer.append(Row(values=joined_values))
             written_rows.add(row_idx)
 
-            # Persist progress when buffer is full (but don't flush yet - accumulate all rows)
             if len(current_buffer) >= self._write_buffer_size:
                 try:
                     self._persist_written_rows(source_table, cid, bn, written_rows)
                 except Exception as e:
                     self._log.error("Failed to persist written rows progress: %s", e)
-                    return False  # NACK to retry
+                    return False
 
-        # Flush ALL accumulated rows as a single output batch
         if current_buffer:
             self._log.debug(
                 "Flushing complete batch: rows=%d matched out of %d total",
@@ -1171,10 +987,8 @@ class JoinerWorker:
             self._log.warning(
                 "No rows in buffer to flush (all rows skipped or no matches)"
             )
-            # Still need to send an empty batch to maintain batch sequence
             self._flush_buffer([], db, result_table, out_schema)
 
-        # All rows processed successfully
         self._log.debug(
             "Batch fully processed: table=%s client=%s bn=%s total_written=%d",
             source_table,
@@ -1183,12 +997,11 @@ class JoinerWorker:
             len(written_rows),
         )
 
-        # Cleanup tracking
         del self._written_rows[tracking_key]
         self._delete_written_rows_tracking(source_table, cid, bn)
         self._delete_pending_batch(source_table, cid, bn)
 
-        return True  # ACK
+        return True
 
     def _flush_buffer(
         self,
@@ -1198,15 +1011,14 @@ class JoinerWorker:
         schema: TableSchema,
     ) -> None:
         """Flush a buffer of processed rows to the output.
-        
+
         Even if the buffer is empty, we still send the databatch to maintain
         batch sequence and ensure the results router receives all batches.
         """
-        # Always send the batch, even if empty (empty TransactionStores or TransactionItemsMenuItems)
         joined_table = TableData(
             name=result_table,
             schema=schema,
-            rows=buffer,  # Can be empty list
+            rows=buffer,
             batch_number=original_batch.payload.batch_number,
             status=original_batch.payload.status,
         )
@@ -1226,56 +1038,7 @@ class JoinerWorker:
         self, raw: bytes, channel=None, delivery_tag=None, redelivered=False
     ):
         """Process users messages. Returns True to ACK immediately."""
-        envelope = Envelope()
-        envelope.ParseFromString(raw)
-        if envelope.type == MessageType.EOF_MESSAGE:
-            eof: EOFMessage = envelope.eof
-            return self._on_table_eof(
-                eof.table,
-                eof.client_id,
-                eof.trace,
-                channel,
-                delivery_tag,
-                redelivered,
-            )
-        if envelope.type == MessageType.CLEAN_UP_MESSAGE:
-            self._handle_client_cleanup(
-                envelope.clean_up, queue_name=NAME_TO_STR.get(TableName.USERS, "users")
-            )
-            return True
-        if envelope.type == MessageType.DATA_BATCH:
-            db: DataBatch = envelope.data_batch
-
-            # Check for duplicate batch and discard if already processed
-            if self._is_duplicate_batch(db):
-                return True  # ACK duplicate batch
-        else:
-            self._log.warning("Unknown message type: %s. Skipping.", envelope.type)
-            return True
-        cid = db.client_id
-        bn = db.payload.batch_number
-
-        self._log.debug(
-            "IN: users batch_number=%s shard=%s shards_info=%s queries=%s cid=%s",
-            bn,
-            self._shard,
-            db.shards_info,
-            db.query_ids,
-            cid,
-        )
-
-        if not self._phase_ready(TableName.USERS, cid):
-            self._log.info(
-                "USERS fase NO lista, saving batch to disk (cid=%s batch=%d)", cid, bn
-            )
-            try:
-                self._save_pending_batch(TableName.USERS, cid, bn, raw)
-            except Exception as e:
-                self._log.error("Failed to save pending batch: %s", e)
-                raise  # Re-raise to cause NACK and redelivery
-            return True  # ACK immediately
-
-        return self._process_users_batch(raw, cid, bn)
+        self._on_raw_heavy_table(raw, TableName.USERS)
 
     def _process_users_batch(self, raw: bytes, cid: str, bn: int) -> bool:
         """Process a users batch (either fresh or from disk)."""
@@ -1296,21 +1059,12 @@ class JoinerWorker:
         key = (table_name, client_id)
         tname = NAME_TO_STR.get(table_name, f"#{table_name}")
 
-        if redelivered:
-            log.info(
-                "TABLE_EOF REDELIVERED: table=%s cid=%s trace=%s",
-                tname,
-                client_id,
-                trace,
-            )
-        else:
-            log.debug(
-                "TABLE_EOF received: table=%s cid=%s trace=%s", tname, client_id, trace
-            )
+        log.debug(
+            "TABLE_EOF received: table=%s cid=%s trace=%s", tname, client_id, trace
+        )
 
         recvd = self._pending_eofs.setdefault(key, set())
 
-        # Track by trace to make it idempotent
         if trace in recvd:
             log.info(
                 "EOF from trace=%s already received for table=%s cid=%s",
@@ -1320,8 +1074,6 @@ class JoinerWorker:
             )
             return True
 
-        # Check if EOF is already complete (all router replicas received) before adding this trace
-        # This prevents duplicate EOF messages from re-triggering processing after completion
         already_complete = len(recvd) >= self._router_replicas
         if already_complete:
             log.info(
@@ -1335,7 +1087,6 @@ class JoinerWorker:
 
         recvd.add(trace)
 
-        # Persist EOF state
         try:
             self._persist_eof(table_name, client_id, recvd)
         except Exception as e:
@@ -1352,11 +1103,7 @@ class JoinerWorker:
             self._router_replicas,
         )
 
-        # Check if we've received EOF from all router replicas
-        # Keep entry in _pending_eofs until cleanup removes it
-        # Add to _eof for phase readiness checks
         if len(recvd) >= self._router_replicas:
-            # Add to _eof for phase readiness (used by _phase_ready)
             if key not in self._eof:
                 self._eof.add(key)
                 self._log.info(
@@ -1366,17 +1113,12 @@ class JoinerWorker:
                     sorted(self._eof),
                 )
 
-                # Process pending batches that are now ready
                 self._process_pending_batches_for_phase(client_id)
 
-                # Check if we can cleanup for this client
-                self._maybe_cleanup_complete_lifecycle(client_id)
-
-        return True  # ACK immediately
+        return True
 
     def _process_pending_batches_for_phase(self, client_id: str) -> None:
         """Process pending batches that may now be ready after EOF received."""
-        # Check TRANSACTION_ITEMS (needs MENU_ITEMS and STORES)
         if self._phase_ready(TableName.TRANSACTION_ITEMS, client_id):
             batches = self._load_pending_batches(TableName.TRANSACTION_ITEMS, client_id)
             if batches:
@@ -1393,7 +1135,6 @@ class JoinerWorker:
                             "Failed to process pending TI batch=%d: %s", bn, e
                         )
 
-        # Check TRANSACTIONS (needs MENU_ITEMS and STORES)
         if self._phase_ready(TableName.TRANSACTIONS, client_id):
             batches = self._load_pending_batches(TableName.TRANSACTIONS, client_id)
             if batches:
@@ -1409,70 +1150,6 @@ class JoinerWorker:
                         self._log.error(
                             "Failed to process pending TX batch=%d: %s", bn, e
                         )
-
-        # Check USERS (needs TRANSACTIONS)
-        if self._phase_ready(TableName.USERS, client_id):
-            batches = self._load_pending_batches(TableName.USERS, client_id)
-            if batches:
-                self._log.info(
-                    "Processing %d pending USERS batches for client=%s",
-                    len(batches),
-                    client_id,
-                )
-                for bn, raw_data in batches:
-                    try:
-                        self._process_users_batch(raw_data, client_id, bn)
-                    except Exception as e:
-                        self._log.error(
-                            "Failed to process pending USERS batch=%d: %s", bn, e
-                        )
-
-    def _maybe_cleanup_complete_lifecycle(self, client_id: str) -> None:
-        """Check if all EOFs received and no pending batches, then cleanup."""
-        required_eofs = [
-            (TableName.MENU_ITEMS, client_id),
-            (TableName.STORES, client_id),
-            (TableName.TRANSACTION_ITEMS, client_id),
-            (TableName.TRANSACTIONS, client_id),
-            (TableName.USERS, client_id),
-        ]
-
-        if not all(eof_key in self._eof for eof_key in required_eofs):
-            return
-
-        # Check if there are pending batches
-        has_pending = False
-        for table_name in [
-            TableName.TRANSACTION_ITEMS,
-            TableName.TRANSACTIONS,
-            TableName.USERS,
-        ]:
-            batches = self._load_pending_batches(table_name, client_id)
-            if batches:
-                has_pending = True
-                self._log.info(
-                    "Client %s has %d pending batches for table=%s",
-                    client_id,
-                    len(batches),
-                    table_name,
-                )
-
-        if has_pending:
-            self._log.info(
-                "Client %s has pending batches, not cleaning up yet", client_id
-            )
-            return
-
-        self._log.info("Complete lifecycle for client=%s, cleaning up", client_id)
-
-        # Cleanup caches with proper locking
-        with self._lock:
-            self._cache_menu.pop(client_id, None)
-            self._cache_stores.pop(client_id, None)
-
-        # Cleanup persisted data with proper locking
-        with self._persistence_lock:
-            self._cleanup_persisted_client(client_id)
 
     def _safe_send(self, raw: bytes):
         with self._out_lock:
