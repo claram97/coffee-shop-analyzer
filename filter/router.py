@@ -628,59 +628,57 @@ class FilterRouter:
         self._log.info(
             "action: cleanup_client_state | result: starting | client_id: %s", client_id
         )
+        self._purge_client_memory_state(client_id)
+        self._purge_client_disk_state(client_id)
 
-        # Clean received batches deduplication state
+        self._log.info(
+            "action: cleanup_client_state | result: success | client_id: %s", client_id
+        )
+
+    def _purge_client_memory_state(self, client_id: str) -> None:
+        """Removes all in-memory tracking for the given client id."""
         with self._state_lock:
-            # Remove all entries where client_id matches (second element of tuple key)
             keys_to_remove = [
                 key for key in self._received_batches.keys() if key[1] == client_id
             ]
             for key in keys_to_remove:
                 del self._received_batches[key]
 
-            # Clean pending EOF state
             keys_to_remove = [
                 key for key in self._pending_eof.keys() if key[1] == client_id
             ]
             for key in keys_to_remove:
                 del self._pending_eof[key]
 
-            # Clean pending cleanups
             self._pending_cleanups.pop(client_id, None)
 
-            # Save updated state to disk
             self._save_eof_state()
             self._save_cleanup_state()
 
-        # Clean persisted state if it exists
-        # Note: Currently filter router doesn't persist state, but this is here for future-proofing
-        # If persistence is added later, this is where it should be cleaned
+    def _purge_client_disk_state(self, client_id: str) -> None:
+        """Best-effort deletion of any persisted artifacts referencing client_id."""
         state_dir = os.getenv("FILTER_ROUTER_STATE_DIR")
-        if state_dir and os.path.exists(state_dir):
-            try:
-                # Look for any files/directories related to this client_id
-                for item in os.listdir(state_dir):
-                    if client_id in item:
-                        item_path = os.path.join(state_dir, item)
-                        try:
-                            if os.path.isfile(item_path):
-                                os.remove(item_path)
-                                self._log.debug("Removed persisted file: %s", item_path)
-                            elif os.path.isdir(item_path):
-                                shutil.rmtree(item_path)
-                                self._log.debug(
-                                    "Removed persisted directory: %s", item_path
-                                )
-                        except Exception as e:
-                            self._log.warning(
-                                "Failed to remove persisted state %s: %s", item_path, e
-                            )
-            except Exception as e:
-                self._log.warning("Failed to clean persisted state directory: %s", e)
+        if not (state_dir and os.path.exists(state_dir)):
+            return
 
-        self._log.info(
-            "action: cleanup_client_state | result: success | client_id: %s", client_id
-        )
+        try:
+            for item in os.listdir(state_dir):
+                if client_id not in item:
+                    continue
+                item_path = os.path.join(state_dir, item)
+                try:
+                    if os.path.isfile(item_path):
+                        os.remove(item_path)
+                        self._log.debug("Removed persisted file: %s", item_path)
+                    elif os.path.isdir(item_path):
+                        shutil.rmtree(item_path)
+                        self._log.debug("Removed persisted directory: %s", item_path)
+                except Exception as e:
+                    self._log.warning(
+                        "Failed to remove persisted state %s: %s", item_path, e
+                    )
+        except Exception as e:
+            self._log.warning("Failed to clean persisted state directory: %s", e)
 
     def _handle_client_cleanup_like(
         self, cleanup_msg, channel=None, delivery_tag=None, redelivered=False
