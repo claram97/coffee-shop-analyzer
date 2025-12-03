@@ -230,7 +230,6 @@ class FilterWorker:
                 except Exception as e:
                     logger.warning("NACK failed during shutdown: %s", e)
             return False
-        t0 = time.perf_counter()
         env = Envelope()
         try:
             env.ParseFromString(raw)
