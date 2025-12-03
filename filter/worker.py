@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import logging
 import os
 import threading
@@ -135,6 +136,8 @@ class FilterWorker:
         num_routers: int,
         stop_event: threading.Event,
         filters: FilterRegistry | None = None,
+        state_dir: str | None = None,
+        worker_id: int = 0,
     ):
         self._host = host
         self._in = MessageMiddlewareQueue(host, in_queue)
@@ -147,6 +150,18 @@ class FilterWorker:
         self._pub_cache: Dict[str, MessageMiddlewareExchange] = {}
 
         self._stop_event = stop_event
+
+        self._state_dir = state_dir or os.getenv(
+            "FILTER_WORKER_STATE_DIR", "/tmp/filter_worker_state"
+        )
+        self._worker_id = int(worker_id)
+        os.makedirs(self._state_dir, exist_ok=True)
+        self._blacklist: Dict[str, float] = {}
+        self._blacklist_lock = threading.Lock()
+        self._blacklist_file = os.path.join(
+            self._state_dir, f"blacklist_{self._worker_id}.json"
+        )
+        self._load_and_clean_blacklist()
 
         logger.info(
             "FilterWorker inicializado | host=%s in_queue=%s out_exchange=%s rk_fmt=%s num_routers=%d",
@@ -230,10 +245,28 @@ class FilterWorker:
                 logger.warning("Failed to re-send raw message after parse error")
                 raise  # Re-raise to cause NACK and redelivery
             return
+        if env.type == MessageType.CLEAN_UP_MESSAGE:
+            cleanup = env.clean_up
+            cid = cleanup.client_id if cleanup.client_id else ""
+            if not cid:
+                logger.warning("CLEANUP sin client_id: se descarta")
+                return
+            self._add_to_blacklist(cid)
+            logger.info("Recibido CLEANUP → agregado a blacklist | client_id=%s", cid)
+            return
         if env.type != MessageType.DATA_BATCH:
             logger.warning("Expected databatch, got %s", env.type)
             return
         db = env.data_batch
+
+        cid = getattr(db, "client_id", None) or ""
+        if self._is_blacklisted(cid):
+            logger.info(
+                "Discarding batch from blacklisted client: cid=%s table_id=%s",
+                cid,
+                getattr(db.payload, "name", None),
+            )
+            return
         # Log envelope / DataBatch summary
         try:
             rows_count = len(db.payload.rows) if db and db.payload and db.payload.rows is not None else 0
@@ -351,3 +384,58 @@ class FilterWorker:
                 getattr(fn, "__name__", "unknown"),
             )
             self._send_to_router(raw, bn)
+
+    def _load_and_clean_blacklist(self) -> None:
+        """Load blacklist from disk and drop entries older than 10 minutes."""
+        current_time = time.time()
+        cutoff_time = current_time - 600
+
+        if os.path.exists(self._blacklist_file):
+            try:
+                with open(self._blacklist_file, "r") as f:
+                    data = json.load(f)
+                    self._blacklist = {
+                        client_id: ts
+                        for client_id, ts in data.items()
+                        if ts > cutoff_time
+                    }
+                    logger.info(
+                        "Loaded blacklist: %d entries (removed %d old entries)",
+                        len(self._blacklist),
+                        len(data) - len(self._blacklist),
+                    )
+            except Exception as e:
+                logger.warning("Failed to load blacklist file: %s", e)
+                self._blacklist = {}
+        else:
+            self._blacklist = {}
+            logger.info("Blacklist file not found, starting with empty blacklist")
+
+        self._save_blacklist()
+
+    def _save_blacklist(self) -> None:
+        """Persist blacklist to disk."""
+        try:
+            with open(self._blacklist_file, "w") as f:
+                json.dump(self._blacklist, f)
+        except Exception as e:
+            logger.error("Failed to save blacklist file: %s", e)
+
+    def _add_to_blacklist(self, client_id: str) -> None:
+        """Add a client to the blacklist (memory + disk)."""
+        if not client_id:
+            return
+
+        current_time = time.time()
+        with self._blacklist_lock:
+            self._blacklist[client_id] = current_time
+            self._save_blacklist()
+            logger.info("Added client_id to blacklist: %s", client_id)
+
+    def _is_blacklisted(self, client_id: str) -> bool:
+        """Check if a client_id is blacklisted."""
+        if not client_id:
+            return False
+
+        with self._blacklist_lock:
+            return client_id in self._blacklist

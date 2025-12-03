@@ -321,11 +321,13 @@ services:
       - FOLLOWER_DOWN_TIMEOUT_SECONDS=6.0
       - FOLLOWER_RESTART_COOLDOWN_SECONDS=20.0
       - FOLLOWER_RECOVERY_GRACE_SECONDS=6.0
+      - FILTER_WORKER_STATE_DIR=/tmp/filter_worker_state
     networks:
       - testing_net
     volumes:
       - ./app_config/config.ini:/config/config.ini:ro
       - /var/run/docker.sock:/var/run/docker.sock
+      - ./filter_worker_state/worker-0:/tmp/filter_worker_state
     depends_on:
       rabbitmq:
         condition: service_healthy
@@ -353,11 +355,13 @@ services:
       - FOLLOWER_DOWN_TIMEOUT_SECONDS=6.0
       - FOLLOWER_RESTART_COOLDOWN_SECONDS=20.0
       - FOLLOWER_RECOVERY_GRACE_SECONDS=6.0
+      - FILTER_WORKER_STATE_DIR=/tmp/filter_worker_state
     networks:
       - testing_net
     volumes:
       - ./app_config/config.ini:/config/config.ini:ro
       - /var/run/docker.sock:/var/run/docker.sock
+      - ./filter_worker_state/worker-1:/tmp/filter_worker_state
     depends_on:
       rabbitmq:
         condition: service_healthy
@@ -385,11 +389,13 @@ services:
       - FOLLOWER_DOWN_TIMEOUT_SECONDS=6.0
       - FOLLOWER_RESTART_COOLDOWN_SECONDS=20.0
       - FOLLOWER_RECOVERY_GRACE_SECONDS=6.0
+      - FILTER_WORKER_STATE_DIR=/tmp/filter_worker_state
     networks:
       - testing_net
     volumes:
       - ./app_config/config.ini:/config/config.ini:ro
       - /var/run/docker.sock:/var/run/docker.sock
+      - ./filter_worker_state/worker-2:/tmp/filter_worker_state
     depends_on:
       rabbitmq:
         condition: service_healthy
@@ -417,11 +423,13 @@ services:
       - FOLLOWER_DOWN_TIMEOUT_SECONDS=6.0
       - FOLLOWER_RESTART_COOLDOWN_SECONDS=20.0
       - FOLLOWER_RECOVERY_GRACE_SECONDS=6.0
+      - FILTER_WORKER_STATE_DIR=/tmp/filter_worker_state
     networks:
       - testing_net
     volumes:
       - ./app_config/config.ini:/config/config.ini:ro
       - /var/run/docker.sock:/var/run/docker.sock
+      - ./filter_worker_state/worker-3:/tmp/filter_worker_state
     depends_on:
       rabbitmq:
         condition: service_healthy
@@ -449,11 +457,13 @@ services:
       - FOLLOWER_DOWN_TIMEOUT_SECONDS=6.0
       - FOLLOWER_RESTART_COOLDOWN_SECONDS=20.0
       - FOLLOWER_RECOVERY_GRACE_SECONDS=6.0
+      - FILTER_WORKER_STATE_DIR=/tmp/filter_worker_state
     networks:
       - testing_net
     volumes:
       - ./app_config/config.ini:/config/config.ini:ro
       - /var/run/docker.sock:/var/run/docker.sock
+      - ./filter_worker_state/worker-4:/tmp/filter_worker_state
     depends_on:
       rabbitmq:
         condition: service_healthy
@@ -481,11 +491,13 @@ services:
       - FOLLOWER_DOWN_TIMEOUT_SECONDS=6.0
       - FOLLOWER_RESTART_COOLDOWN_SECONDS=20.0
       - FOLLOWER_RECOVERY_GRACE_SECONDS=6.0
+      - FILTER_WORKER_STATE_DIR=/tmp/filter_worker_state
     networks:
       - testing_net
     volumes:
       - ./app_config/config.ini:/config/config.ini:ro
       - /var/run/docker.sock:/var/run/docker.sock
+      - ./filter_worker_state/worker-5:/tmp/filter_worker_state
     depends_on:
       rabbitmq:
         condition: service_healthy
@@ -513,11 +525,13 @@ services:
       - FOLLOWER_DOWN_TIMEOUT_SECONDS=6.0
       - FOLLOWER_RESTART_COOLDOWN_SECONDS=20.0
       - FOLLOWER_RECOVERY_GRACE_SECONDS=6.0
+      - FILTER_WORKER_STATE_DIR=/tmp/filter_worker_state
     networks:
       - testing_net
     volumes:
       - ./app_config/config.ini:/config/config.ini:ro
       - /var/run/docker.sock:/var/run/docker.sock
+      - ./filter_worker_state/worker-6:/tmp/filter_worker_state
     depends_on:
       rabbitmq:
         condition: service_healthy
@@ -545,11 +559,13 @@ services:
       - FOLLOWER_DOWN_TIMEOUT_SECONDS=6.0
       - FOLLOWER_RESTART_COOLDOWN_SECONDS=20.0
       - FOLLOWER_RECOVERY_GRACE_SECONDS=6.0
+      - FILTER_WORKER_STATE_DIR=/tmp/filter_worker_state
     networks:
       - testing_net
     volumes:
       - ./app_config/config.ini:/config/config.ini:ro
       - /var/run/docker.sock:/var/run/docker.sock
+      - ./filter_worker_state/worker-7:/tmp/filter_worker_state
     depends_on:
       rabbitmq:
         condition: service_healthy
@@ -576,6 +592,7 @@ services:
       - FOLLOWER_DOWN_TIMEOUT_SECONDS=6.0
       - FOLLOWER_RESTART_COOLDOWN_SECONDS=20.0
       - FOLLOWER_RECOVERY_GRACE_SECONDS=6.0
+      - JOINER_WORKER_STATE_DIR=/tmp/joiner_state
     networks:
       - testing_net
     volumes:
@@ -607,6 +624,7 @@ services:
       - FOLLOWER_DOWN_TIMEOUT_SECONDS=6.0
       - FOLLOWER_RESTART_COOLDOWN_SECONDS=20.0
       - FOLLOWER_RECOVERY_GRACE_SECONDS=6.0
+      - JOINER_WORKER_STATE_DIR=/tmp/joiner_state
     networks:
       - testing_net
     volumes:
@@ -638,6 +656,7 @@ services:
       - FOLLOWER_DOWN_TIMEOUT_SECONDS=6.0
       - FOLLOWER_RESTART_COOLDOWN_SECONDS=20.0
       - FOLLOWER_RECOVERY_GRACE_SECONDS=6.0
+      - JOINER_WORKER_STATE_DIR=/tmp/joiner_state
     networks:
       - testing_net
     volumes:
@@ -669,6 +688,7 @@ services:
       - FOLLOWER_DOWN_TIMEOUT_SECONDS=6.0
       - FOLLOWER_RESTART_COOLDOWN_SECONDS=20.0
       - FOLLOWER_RECOVERY_GRACE_SECONDS=6.0
+      - JOINER_WORKER_STATE_DIR=/tmp/joiner_state
     networks:
       - testing_net
     volumes:
@@ -700,11 +720,13 @@ services:
       - FOLLOWER_DOWN_TIMEOUT_SECONDS=6.0
       - FOLLOWER_RESTART_COOLDOWN_SECONDS=20.0
       - FOLLOWER_RECOVERY_GRACE_SECONDS=6.0
+      - JOINER_ROUTER_STATE_DIR=/tmp/joiner_router_state
     networks:
       - testing_net
     volumes:
       - ./app_config/config.ini:/config/config.ini:ro
       - /var/run/docker.sock:/var/run/docker.sock
+      - ./joiner_router_state/router-0:/tmp/joiner_router_state
     depends_on:
       rabbitmq:
         condition: service_healthy
@@ -731,11 +753,13 @@ services:
       - FOLLOWER_DOWN_TIMEOUT_SECONDS=6.0
       - FOLLOWER_RESTART_COOLDOWN_SECONDS=20.0
       - FOLLOWER_RECOVERY_GRACE_SECONDS=6.0
+      - JOINER_ROUTER_STATE_DIR=/tmp/joiner_router_state
     networks:
       - testing_net
     volumes:
       - ./app_config/config.ini:/config/config.ini:ro
       - /var/run/docker.sock:/var/run/docker.sock
+      - ./joiner_router_state/router-1:/tmp/joiner_router_state
     depends_on:
       rabbitmq:
         condition: service_healthy
@@ -762,11 +786,13 @@ services:
       - FOLLOWER_DOWN_TIMEOUT_SECONDS=6.0
       - FOLLOWER_RESTART_COOLDOWN_SECONDS=20.0
       - FOLLOWER_RECOVERY_GRACE_SECONDS=6.0
+      - JOINER_ROUTER_STATE_DIR=/tmp/joiner_router_state
     networks:
       - testing_net
     volumes:
       - ./app_config/config.ini:/config/config.ini:ro
       - /var/run/docker.sock:/var/run/docker.sock
+      - ./joiner_router_state/router-2:/tmp/joiner_router_state
     depends_on:
       rabbitmq:
         condition: service_healthy

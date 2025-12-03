@@ -169,6 +169,7 @@ def main(argv=None):
     follower_restart_cooldown = float(os.getenv("FOLLOWER_RESTART_COOLDOWN_SECONDS", "30.0"))
     follower_recovery_grace = float(os.getenv("FOLLOWER_RECOVERY_GRACE_SECONDS", "6.0"))
     follower_max_restart_attempts = int(os.getenv("FOLLOWER_MAX_RESTART_ATTEMPTS", "100"))
+    persistence_dir = os.getenv("JOINER_WORKER_STATE_DIR", "/tmp/joiner_state")
 
     election_coordinator = None
     heartbeat_client = None
@@ -273,6 +274,7 @@ def main(argv=None):
         out_factory=make_results_pub,
         stop_event=stop_event,
         write_buffer_size=write_buffer_size,
+        persistence_dir=persistence_dir,
     )
 
     log.info(

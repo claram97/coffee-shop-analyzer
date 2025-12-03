@@ -180,11 +180,13 @@ cat >> "$OUT_PATH" <<YAML
       - FOLLOWER_DOWN_TIMEOUT_SECONDS=${FOLLOWER_DOWN_TIMEOUT_SECONDS}
       - FOLLOWER_RESTART_COOLDOWN_SECONDS=${FOLLOWER_RESTART_COOLDOWN_SECONDS}
       - FOLLOWER_RECOVERY_GRACE_SECONDS=${FOLLOWER_RECOVERY_GRACE_SECONDS}
+      - FILTER_WORKER_STATE_DIR=/tmp/filter_worker_state
     networks:
       - testing_net
     volumes:
       - $INI_PATH:/config/config.ini:ro
       - /var/run/docker.sock:/var/run/docker.sock
+      - ./filter_worker_state/worker-${i}:/tmp/filter_worker_state
     depends_on:
       rabbitmq:
         condition: service_healthy
@@ -217,6 +219,7 @@ cat >> "$OUT_PATH" <<YAML
       - FOLLOWER_DOWN_TIMEOUT_SECONDS=${FOLLOWER_DOWN_TIMEOUT_SECONDS}
       - FOLLOWER_RESTART_COOLDOWN_SECONDS=${FOLLOWER_RESTART_COOLDOWN_SECONDS}
       - FOLLOWER_RECOVERY_GRACE_SECONDS=${FOLLOWER_RECOVERY_GRACE_SECONDS}
+      - JOINER_WORKER_STATE_DIR=/tmp/joiner_state
     networks:
       - testing_net
     volumes:

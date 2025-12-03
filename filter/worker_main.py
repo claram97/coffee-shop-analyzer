@@ -47,6 +47,7 @@ def main():
     router_exchange = cfg.names.orch_to_fr_exchange
     router_rk_fmt = cfg.names.orch_to_fr_rk_fmt
     num_routers = cfg.routers.filter
+    state_dir = os.getenv("FILTER_WORKER_STATE_DIR", "/tmp/filter_worker_state")
 
     logger.info(f"Connecting to RabbitMQ at {rabbitmq_host}")
     logger.info(f"Input queue (filters pool): {filters_pool_queue}")
@@ -153,6 +154,8 @@ def main():
             out_router_rk_fmt=router_rk_fmt,
             num_routers=num_routers,
             stop_event=stop_event,
+            state_dir=state_dir,
+            worker_id=worker_id,
         )
 
         worker.run()
