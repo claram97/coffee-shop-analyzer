@@ -1149,7 +1149,7 @@ class JoinerWorker:
             self._flush_buffer(current_buffer, db, result_table, out_schema)
             current_buffer.clear()
         else:
-            self._log.warning(
+            self._log.debug(
                 "No rows in buffer to flush (all rows skipped or no matches)"
             )
             self._flush_buffer([], db, result_table, out_schema)
