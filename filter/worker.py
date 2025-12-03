@@ -244,47 +244,171 @@ class FilterWorker:
         logger.info("Comenzando consumo de mensajes…")
         self._in.start_consuming(self._on_raw)
 
-    def _on_raw(self, raw: bytes, channel=None, delivery_tag=None) -> None:
-        """Handler principal de mensajes del pool de filtros."""
-        logger.debug("Mensaje recibido, tamaño=%d bytes", len(raw))
-        # Small hex preview to help identify message payload in logs (first 48 bytes)
+    def _log_raw_preview(self, raw: bytes) -> None:
+        """Loguea un pequeño preview hexadecimal del mensaje recibido."""
         try:
             preview = raw[:RAW_LOG_PREVIEW_BYTES].hex()
             logger.debug("raw preview: %s", preview)
         except Exception:
             logger.debug("raw preview unavailable")
-        if self._stop_event.is_set():
-            logger.warning("Shutdown in progress, NACKing message for redelivery.")
-            if channel is not None and delivery_tag is not None:
-                try:
-                    channel.basic_nack(delivery_tag=delivery_tag, requeue=True)
-                except Exception as e:
-                    logger.warning("NACK failed during shutdown: %s", e)
+
+    def _nack_on_shutdown(self, channel=None, delivery_tag=None) -> bool:
+        """NACKea el mensaje si hay shutdown en progreso."""
+        if not self._stop_event.is_set():
             return False
+        logger.warning("Shutdown in progress, NACKing message for redelivery.")
+        if channel is not None and delivery_tag is not None:
+            try:
+                channel.basic_nack(delivery_tag=delivery_tag, requeue=True)
+            except Exception as e:
+                logger.warning("NACK failed during shutdown: %s", e)
+        return True
+
+    def _parse_envelope_or_forward(self, raw: bytes) -> Envelope | None:
+        """Parsea un Envelope; si falla reenvía raw y deja que el broker reintente."""
         env = Envelope()
         try:
             env.ParseFromString(raw)
+            return env
         except Exception as e:
             logger.exception("Failed to parse Envelope from raw bytes: %s", e)
-            # If parsing fails, requeue or send upstream unchanged so other components
-            # (or legacy consumers) can handle it. Here we NACK/reattempt by re-sending
-            # to router to avoid dropping the message silently.
             try:
                 self._send_to_router(raw, None)
             except Exception:
                 logger.warning("Failed to re-send raw message after parse error")
-                raise  # Re-raise to cause NACK and redelivery
+                raise  # Forzar NACK/redelivery
+        return None
+
+    def _handle_cleanup_message(self, env: Envelope) -> bool:
+        """Procesa mensajes CLEAN_UP y devuelve True si fueron manejados."""
+        if env.type != MessageType.CLEAN_UP_MESSAGE:
+            return False
+        cleanup = env.clean_up
+        cid = cleanup.client_id if cleanup.client_id else ""
+        if not cid:
+            logger.warning("CLEANUP sin client_id: se descarta")
+            return True
+        self._add_to_blacklist(cid)
+        logger.info("Recibido CLEANUP → agregado a blacklist | client_id=%s", cid)
+        return True
+
+    def _log_databatch_summary(self, env: Envelope, db) -> None:
+        """Loguea un resumen del DataBatch."""
+        try:
+            rows_count = (
+                len(db.payload.rows)
+                if db and db.payload and db.payload.rows is not None
+                else 0
+            )
+        except Exception:
+            rows_count = -1
+        logger.debug(
+            "Parsed Envelope type=%s client_id=%s batch_rows=%s",
+            env.type,
+            getattr(db, "client_id", None),
+            rows_count,
+        )
+
+    def _safe_batch_number(self, database) -> int | None:
+        """Obtiene batch_number desde payload o toplevel si existe."""
+        logger.debug("Obteniendo batch_number seguro del DataBatch")
+        try:
+            if (
+                getattr(database, "payload", None)
+                and getattr(database.payload, "batch_number", None) is not None
+            ):
+                return int(database.payload.batch_number)
+            if getattr(database, "batch_number", None) is not None:
+                return int(database.batch_number)
+        except Exception:
+            return None
+        return None
+
+    def _build_rows_from_filter_output(
+        self, new_rows: List[Any], inner
+    ) -> List[Row]:
+        """Normaliza la salida del filtro a objetos Row."""
+        rows_objs: list[Row] = []
+        try:
+            cols = list(inner.schema.columns)
+        except Exception:
+            cols = []
+
+        for r in new_rows:
+            if isinstance(r, Row):
+                rows_objs.append(r)
+            elif isinstance(r, (list, tuple)):
+                rows_objs.append(Row(values=list(r)))
+            elif isinstance(r, dict):
+                vals = [r.get(c) for c in cols] if cols else list(r.values())
+                rows_objs.append(Row(values=vals))
+            else:
+                rows_objs.append(Row(values=[str(r)]))
+        return rows_objs
+
+    def _apply_filter_and_forward(
+        self,
+        env: Envelope,
+        db,
+        inner,
+        fn: FilterFn,
+        queries_key: str,
+        step: int,
+        bn: int | None,
+        raw: bytes,
+    ) -> None:
+        """Ejecuta el filtro, reemplaza filas y reenvía; ante error reenvía sin cambios."""
+        try:
+            before_rows = len(getattr(inner, "rows", []))
+        except Exception:
+            before_rows = -1
+
+        try:
+            new_rows = fn(inner) or []
+            rows_objs = self._build_rows_from_filter_output(new_rows, inner)
+
+            inner.rows.clear()
+            if rows_objs:
+                inner.rows.extend(rows_objs)
+
+            env.data_batch.CopyFrom(db)
+            out_raw = env.SerializeToString()
+            logger.debug(
+                "Filtro aplicado con éxito: filas antes=%d, después=%d | table_id=%s step=%s queries=%s filter=%s",
+                before_rows,
+                len(new_rows),
+                inner.name,
+                step,
+                queries_key,
+                getattr(fn, "__name__", "unknown"),
+            )
+            self._send_to_router(out_raw, bn)
+
+        except Exception:
+            logger.exception(
+                "Error aplicando filtro; reenvío sin cambios | table_id=%s step=%s queries=%s filter=%s",
+                inner.name,
+                step,
+                queries_key,
+                getattr(fn, "__name__", "unknown"),
+            )
+            self._send_to_router(raw, bn)
+
+    def _on_raw(self, raw: bytes, channel=None, delivery_tag=None) -> None:
+        """Handler principal de mensajes del pool de filtros."""
+        logger.debug("Mensaje recibido, tamaño=%d bytes", len(raw))
+        self._log_raw_preview(raw)
+
+        if self._nack_on_shutdown(channel, delivery_tag):
+            return False
+
+        env = self._parse_envelope_or_forward(raw)
+        if env is None:
             return
-        if env.type == MessageType.CLEAN_UP_MESSAGE:
-            cleanup = env.clean_up
-            cid = cleanup.client_id if cleanup.client_id else ""
-            if not cid:
-                logger.warning("CLEANUP sin client_id: se descarta")
-                return
-            # Bloquea al cliente para descartar cualquier batch rezagado
-            self._add_to_blacklist(cid)
-            logger.info("Recibido CLEANUP → agregado a blacklist | client_id=%s", cid)
+
+        if self._handle_cleanup_message(env):
             return
+
         if env.type != MessageType.DATA_BATCH:
             logger.warning("Expected databatch, got %s", env.type)
             return
@@ -298,28 +422,9 @@ class FilterWorker:
                 getattr(db.payload, "name", None),
             )
             return
-        # Log envelope / DataBatch summary
-        try:
-            rows_count = len(db.payload.rows) if db and db.payload and db.payload.rows is not None else 0
-        except Exception:
-            rows_count = -1
-        logger.debug("Parsed Envelope type=%s client_id=%s batch_rows=%s", env.type, getattr(db, "client_id", None), rows_count)
-        # protocol2 DataBatch puts the batch_number inside payload.batch_number.
-        # Provide a safe accessor that handles both legacy and protobuf shapes.
-        def _safe_batch_number(database) -> int | None:
-            logger.debug("Obteniendo batch_number seguro del DataBatch")
-            try:
-                # protobuf path: payload.batch_number
-                if getattr(database, "payload", None) and getattr(database.payload, "batch_number", None) is not None:
-                    return int(database.payload.batch_number)
-                # legacy path: top-level batch_number
-                if getattr(database, "batch_number", None) is not None:
-                    return int(database.batch_number)
-            except Exception:
-                return None
-            return None
+        self._log_databatch_summary(env, db)
 
-        bn = _safe_batch_number(db)
+        bn = self._safe_batch_number(db)
         if not db.payload:
             logger.warning("Batch sin batch_msg: reenvío sin cambios")
             self._send_to_router(raw, bn)
@@ -360,61 +465,9 @@ class FilterWorker:
             self._send_to_router(raw, bn)
             return
 
-        try:
-            new_rows = fn(inner) or []
-            # protobuf repeated composite fields (like `rows`) don't allow
-            # direct assignment of a Python list. Convert filter output into
-            # Row messages and replace the repeated field contents.
-            rows_objs: list[Row] = []
-            cols = []
-            try:
-                cols = list(inner.schema.columns)
-            except Exception:
-                cols = []
-
-            for r in new_rows:
-                if isinstance(r, Row):
-                    rows_objs.append(r)
-                elif isinstance(r, (list, tuple)):
-                    # list of values in the schema order
-                    rows_objs.append(Row(values=list(r)))
-                elif isinstance(r, dict):
-                    # build values according to schema column order
-                    vals = [r.get(c) for c in cols] if cols else list(r.values())
-                    rows_objs.append(Row(values=vals))
-                else:
-                    # fallback: coerce to string in a single-column row
-                    rows_objs.append(Row(values=[str(r)]))
-
-            # replace repeated field contents
-            inner.rows.clear()
-            if rows_objs:
-                inner.rows.extend(rows_objs)
-            # Assign the DataBatch into the Envelope using CopyFrom to avoid
-            # "Assignment not allowed to message field" errors on protobuf
-            # message fields.
-            env.data_batch.CopyFrom(db)
-            out_raw = env.SerializeToString()
-            logger.debug(
-                "Filtro aplicado con éxito: filas antes=%d, después=%d | table_id=%s step=%s queries=%s filter=%s",
-                len(inner.rows) + (len(new_rows) - len(rows_objs)),
-                len(new_rows),
-                inner.name,
-                step,
-                queries_key,
-                getattr(fn, "__name__", "unknown"),
-            )
-            self._send_to_router(out_raw, bn)
-
-        except Exception:
-            logger.exception(
-                "Error aplicando filtro; reenvío sin cambios | table_id=%s step=%s queries=%s filter=%s",
-                inner.name,
-                step,
-                queries_key,
-                getattr(fn, "__name__", "unknown"),
-            )
-            self._send_to_router(raw, bn)
+        self._apply_filter_and_forward(
+            env, db, inner, fn, queries_key, step, bn, raw
+        )
 
     def _load_and_clean_blacklist(self) -> None:
         """Carga la blacklist desde disco y purga entradas antiguas (10 min)."""
