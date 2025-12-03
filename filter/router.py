@@ -893,6 +893,23 @@ class ExchangeBusProducer:
             except Exception:
                 pass
 
+    def _ensure_publisher(self, key: tuple[TableName, str]) -> MessageMiddlewareExchange:
+        """Return a live publisher for ``key``, recreating it when missing."""
+        pub = self._pub_cache.get(key)
+        if pub is None:
+            self._log.debug("pub cache miss -> create: %s", key)
+            pub = MessageMiddlewareExchange(
+                host=self._host, exchange_name=key[0], route_keys=[key[1]]
+            )
+            self._pub_cache[key] = pub
+        return pub
+
+    def _sleep_with_backoff(self, backoff: float) -> float:
+        """Sleep using jittered backoff and return the next backoff value."""
+        jitter = random.uniform(0, backoff * 0.2)
+        time.sleep(backoff + jitter)
+        return backoff * self._backoff_multiplier
+
     def _send_with_retry(self, key: tuple[TableName, str], payload: bytes) -> None:
         """
         Envía `payload` al exchange/rk indicado por `key`, con reintentos y recreación del publisher.
@@ -901,19 +918,12 @@ class ExchangeBusProducer:
         self._log.debug("send_with_retry key=%s payload_size=%d", key, len(payload))
         lock = self._pub_locks.setdefault(key, threading.Lock())
         with lock:
-            attempt = 0
             backoff = self._base_backoff_ms / 1000.0
             last_error = None
 
-            while attempt <= self._max_retries:
+            for attempt in range(self._max_retries + 1):
                 try:
-                    pub = self._pub_cache.get(key)
-                    if pub is None:
-                        self._log.debug("pub cache miss -> create: %s", key)
-                        pub = MessageMiddlewareExchange(
-                            host=self._host, exchange_name=key[0], route_keys=[key[1]]
-                        )
-                        self._pub_cache[key] = pub
+                    pub = self._ensure_publisher(key)
                     pub.send(payload)
                     return
                 except Exception as e:
@@ -926,15 +936,9 @@ class ExchangeBusProducer:
                         e,
                     )
                     self._drop_pub(key)
-
-                    attempt += 1
-                    if attempt > self._max_retries:
+                    if attempt >= self._max_retries:
                         break
-
-                    jitter = random.uniform(0, backoff * 0.2)
-                    sleep_s = backoff + jitter
-                    time.sleep(sleep_s)
-                    backoff *= self._backoff_multiplier
+                    backoff = self._sleep_with_backoff(backoff)
 
             raise RuntimeError(
                 f"Error sending message to {key}: retries exhausted"
