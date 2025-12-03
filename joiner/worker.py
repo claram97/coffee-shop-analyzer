@@ -33,6 +33,12 @@ def norm(v) -> str:
 
 
 def index_by_attr(table_data: TableData, attr: str) -> Dict[str, dict[str, str]]:
+    """
+    Create an index dictionary from table data using the specified attribute as the key.
+    
+    Returns a dictionary mapping attribute values to row dictionaries.
+    Rows with None or empty attribute values are skipped.
+    """
     idx: Dict[str, dict[str, str]] = {}
     for r in iterate_rows_as_dicts(table_data):
         logging.info("table: %s, row: %s", table_data.name, r)
@@ -55,6 +61,20 @@ class JoinerWorker:
         persistence_dir: str = "/tmp/joiner_state",
         write_buffer_size: int = 100,
     ):
+        """
+        Initialize the JoinerWorker.
+        
+        Args:
+            in_mw: Dictionary mapping table names to input message middleware
+            out_results_mw: Output message middleware for sending results
+            router_replicas: Number of router replicas (used for EOF threshold calculation)
+            stop_event: Event to signal shutdown
+            logger: Optional logger instance
+            shard_index: Shard identifier for this worker instance
+            out_factory: Optional factory function to recreate output middleware on failure
+            persistence_dir: Directory for persisting state and recovery data
+            write_buffer_size: Number of rows to buffer before persisting progress
+        """
         self._in = in_mw
         self._out = out_results_mw
         self._out_factory = out_factory
@@ -333,6 +353,10 @@ class JoinerWorker:
             return client_id in self._blacklist
 
     def _restore_light_tables(self, filename):
+        """
+        Restore light table cache (menu_items or stores) from a persisted file.
+        Called during state restoration on startup.
+        """
         try:
             parts = filename[6:-5].split("_", 1)
             table_name = int(parts[0])
@@ -352,6 +376,11 @@ class JoinerWorker:
             self._log.warning("Failed to restore light table from %s: %s", filename, e)
 
     def _restore_eof_state(self, filename):
+        """
+        Restore EOF state from a persisted file.
+        Reconstructs pending EOF tracking and marks complete EOFs if applicable.
+        Called during state restoration on startup.
+        """
         try:
             parts = filename[4:-5].split("_", 1)
             table_name = int(parts[0])
@@ -384,6 +413,11 @@ class JoinerWorker:
             self._log.warning("Failed to restore EOF from %s: %s", filename, e)
 
     def _restore_written_rows(self, filename):
+        """
+        Restore written rows tracking from a persisted file.
+        Used to resume batch processing from where it left off after a crash.
+        Called during state restoration on startup.
+        """
         try:
             parts = filename[13:-5].split("_", 2)
             table_name = int(parts[0])
@@ -468,8 +502,6 @@ class JoinerWorker:
         This includes:
         - Menu and stores caches
         - EOF tracking
-        - Pending EOFs
-        - Received batch deduplication state
         - Written rows tracking
         - Persisted data on disk
         """
@@ -511,7 +543,19 @@ class JoinerWorker:
     def _handle_client_cleanup(
         self, cleanup_msg, queue_name: Optional[str] = None
     ) -> None:
-        """Handle client cleanup message from joiner router."""
+        """
+        Handle client cleanup message from joiner router.
+        
+        When a cleanup message is received, this method:
+        1. Extracts the client_id from the message
+        2. Adds the client to the blacklist to prevent further processing
+        3. Cleans up all in-memory and persisted state for the client
+        4. If this is shard 0, forwards the cleanup message to the results router
+           (only shard 0 forwards to avoid duplicate messages downstream)
+        
+        This ensures that all state related to a client is removed when cleanup
+        is requested, preventing memory leaks and stale data.
+        """
         client_id = cleanup_msg.client_id if cleanup_msg.client_id else ""
         if not client_id:
             self._log.warning("Received client_cleanup message with empty client_id")
@@ -551,6 +595,11 @@ class JoinerWorker:
             self._log.debug("log_db failed: %s", e)
 
     def run(self):
+        """
+        Start consuming messages from all input queues.
+        Spawns separate threads for each table's message queue.
+        Blocks until shutdown is requested.
+        """
         self._log.info("JoinerWorker shard=%d: iniciando consumidores", self._shard)
         self._start_queue(TableName.MENU_ITEMS, self._on_raw_menu)
         self._start_queue(TableName.STORES, self._on_raw_stores)
@@ -580,6 +629,10 @@ class JoinerWorker:
         self._log.info("JoinerWorker shutdown complete.")
 
     def _start_queue(self, table_name: TableName, cb: Callable[[bytes], None]):
+        """
+        Start a consumer thread for the specified table's message queue.
+        If the queue is already running, this is a no-op.
+        """
         mw = self._in.get(table_name)
         if not mw:
             self._log.debug("No hay consumer para table_id=%s", table_name)
@@ -592,6 +645,10 @@ class JoinerWorker:
         self._log.info("Consumiendo table=%s", table_name)
 
     def _stop_queue(self, table_name: TableName):
+        """
+        Stop consuming messages from the specified table's queue.
+        Spawns a daemon thread to handle the stop operation asynchronously.
+        """
         mw = self._in.get(table_name)
         if not mw:
             return
@@ -604,6 +661,13 @@ class JoinerWorker:
                 self._log.warning("Error deteniendo cola %s: %s", table_name, e)
 
     def _phase_ready(self, table_name: TableName, client_id: str) -> bool:
+        """
+        Check if all prerequisite tables have received EOF for the given client.
+        
+        For TRANSACTION_ITEMS and TRANSACTIONS, requires MENU_ITEMS and STORES EOF.
+        For USERS, no prerequisites are needed.
+        Returns True if the table can be processed, False if it must wait.
+        """
         need = []
         if table_name == TableName.TRANSACTION_ITEMS:
             need = [TableName.MENU_ITEMS, TableName.STORES]
@@ -626,6 +690,18 @@ class JoinerWorker:
             self._log.error("requeue failed table_id=%s: %s", table_name, e)
 
     def _handle_eof_or_cleanup(self, envelope: Envelope, table: TableName):
+        """
+        Handle EOF or cleanup messages from the envelope.
+        
+        For EOF messages: checks if the client is blacklisted, and if not, processes
+        the EOF through _on_table_eof. Blacklisted clients' EOFs are discarded.
+        
+        For cleanup messages: delegates to _handle_client_cleanup to blacklist the
+        client and clean up all associated state.
+        
+        Returns True if the message was handled successfully and should be ACKed,
+        False otherwise (which will cause the message to be requeued).
+        """
         if envelope.type == MessageType.EOF_MESSAGE:
             eof: EOFMessage = envelope.eof
             if self._is_blacklisted(eof.client_id):
@@ -648,7 +724,21 @@ class JoinerWorker:
             return True
 
     def _on_raw_light_table(self, raw: bytes, table: TableName):
-        """Process menu_items messages. Returns True to ACK immediately."""
+        """
+        Process messages for light tables (menu_items or stores).
+        
+        Parses the envelope and handles three message types:
+        - EOF_MESSAGE: Delegates to _handle_eof_or_cleanup
+        - CLEAN_UP_MESSAGE: Delegates to _handle_eof_or_cleanup
+        - DATA_BATCH: Processes the batch to build the in-memory cache
+        
+        For data batches: checks if the client is blacklisted and discards if so.
+        Otherwise, processes the batch using _process_light_table_buffered to build
+        the cache (menu_items indexed by item_id, stores indexed by store_id).
+        The cache is persisted incrementally to support crash recovery.
+        
+        Returns True to ACK immediately after processing or discarding.
+        """
         envelope = Envelope()
         envelope.ParseFromString(raw)
 
@@ -695,19 +785,52 @@ class JoinerWorker:
                 db, cid, bn, TableName.STORES, "store_id", self._cache_stores
             )
 
-    def _on_raw_menu(
-        self, raw: bytes, channel=None, delivery_tag=None, redelivered=False
-    ):
-        """Process menu_items messages. Returns True to ACK immediately."""
+    def _on_raw_menu(self, raw: bytes):
+        """
+        Message handler for menu_items table queue.
+        
+        Delegates to _on_raw_light_table with TableName.MENU_ITEMS.
+        This handler is called by the message middleware when a message arrives
+        on the menu_items queue. The message is processed to build the menu cache
+        used for joining with transaction_items in Q2 queries.
+        
+        Returns True to ACK immediately.
+        """
         self._on_raw_light_table(raw, TableName.MENU_ITEMS)
 
-    def _on_raw_stores(
-        self, raw: bytes, channel=None, delivery_tag=None, redelivered=False
-    ):
-        """Process stores messages. Returns True to ACK immediately."""
+    def _on_raw_stores(self, raw: bytes):
+        """
+        Message handler for stores table queue.
+        
+        Delegates to _on_raw_light_table with TableName.STORES.
+        This handler is called by the message middleware when a message arrives
+        on the stores queue. The message is processed to build the stores cache
+        used for joining with transactions in Q3 queries.
+        
+        Returns True to ACK immediately.
+        """
         self._on_raw_light_table(raw, TableName.STORES)
 
     def _on_raw_heavy_table(self, raw: bytes, table: TableName):
+        """
+        Process messages for heavy tables (transactions, transaction_items, or users).
+        
+        Parses the envelope and handles three message types:
+        - EOF_MESSAGE: Delegates to _handle_eof_or_cleanup
+        - CLEAN_UP_MESSAGE: Delegates to _handle_eof_or_cleanup
+        - DATA_BATCH: Processes the batch based on table type
+        
+        For data batches: checks if the client is blacklisted and discards if so.
+        Then checks if the phase is ready (prerequisite tables have EOF). If not ready,
+        saves the batch to disk for later processing when prerequisites are met.
+        
+        If phase is ready, routes to the appropriate processor:
+        - TRANSACTION_ITEMS: _process_ti_batch (joins with menu_items for Q2)
+        - TRANSACTIONS: _process_tx_batch (joins with stores for Q3)
+        - USERS: _process_users_batch (passthrough, no join needed)
+        
+        Returns True to ACK immediately after processing, saving, or discarding.
+        """
         envelope = Envelope()
         envelope.ParseFromString(raw)
 
@@ -767,14 +890,35 @@ class JoinerWorker:
         else:
             return self._process_users_batch(raw, cid, bn)
 
-    def _on_raw_ti(
-        self, raw: bytes, channel=None, delivery_tag=None, redelivered=False
-    ):
-        """Process transaction_items messages. Returns True to ACK immediately."""
+    def _on_raw_ti(self, raw: bytes):
+        """
+        Message handler for transaction_items table queue.
+        
+        Delegates to _on_raw_heavy_table with TableName.TRANSACTION_ITEMS.
+        This handler is called by the message middleware when a message arrives
+        on the transaction_items queue. The message is processed to join with
+        menu_items data for Q2 queries, or passed through if Q2 is not present.
+        
+        Returns True to ACK immediately.
+        """
         self._on_raw_heavy_table(raw, TableName.TRANSACTION_ITEMS)
 
     def _process_ti_batch(self, raw: bytes, cid: str, bn: int) -> bool:
-        """Process a transaction_items batch with buffered writes (either fresh or from disk)."""
+        """
+        Process a transaction_items batch with buffered writes.
+        
+        Handles batches either received fresh from the queue or loaded from disk
+        after a crash. The processing logic:
+        1. If Q2 is not in the query_ids, passes the batch through unchanged
+        2. Otherwise, retrieves the menu_items cache for the client
+        3. Joins transaction_items with menu_items using item_id
+        4. Produces TRANSACTION_ITEMS_MENU_ITEMS with columns:
+           transaction_id, name (from menu), quantity, subtotal, created_at
+        5. Uses buffered writes to persist progress incrementally
+        
+        Returns True if processing succeeded, False if menu cache is unavailable
+        (which will cause the message to be requeued).
+        """
         envelope = Envelope()
         envelope.ParseFromString(raw)
         db: DataBatch = envelope.data_batch
@@ -802,14 +946,35 @@ class JoinerWorker:
             "name",
         )
 
-    def _on_raw_tx(
-        self, raw: bytes, channel=None, delivery_tag=None, redelivered=False
-    ):
-        """Process transactions messages. Returns True to ACK immediately."""
+    def _on_raw_tx(self, raw: bytes):
+        """
+        Message handler for transactions table queue.
+        
+        Delegates to _on_raw_heavy_table with TableName.TRANSACTIONS.
+        This handler is called by the message middleware when a message arrives
+        on the transactions queue. The message is processed to join with stores
+        data for Q3 queries, or passed through if only Q1 is present.
+        
+        Returns True to ACK immediately.
+        """
         self._on_raw_heavy_table(raw, TableName.TRANSACTIONS)
 
     def _process_tx_batch(self, raw: bytes, cid: str, bn: int) -> bool:
-        """Process a transactions batch with buffered writes (either fresh or from disk)."""
+        """
+        Process a transactions batch with buffered writes.
+        
+        Handles batches either received fresh from the queue or loaded from disk
+        after a crash. The processing logic:
+        1. If Q1 is in the query_ids, passes the batch through unchanged
+        2. Otherwise, retrieves the stores cache for the client
+        3. Joins transactions with stores using store_id
+        4. Produces TRANSACTION_STORES with columns:
+           transaction_id, store_name (from stores), final_amount, created_at, user_id
+        5. Uses buffered writes to persist progress incrementally
+        
+        Returns True if processing succeeded, False if stores cache is unavailable
+        (which will cause the message to be requeued).
+        """
         envelope = Envelope()
         envelope.ParseFromString(raw)
         db: DataBatch = envelope.data_batch
@@ -1034,14 +1199,30 @@ class JoinerWorker:
 
         self._log.debug("Flushed buffer: rows=%d table=%s", len(buffer), result_table)
 
-    def _on_raw_users(
-        self, raw: bytes, channel=None, delivery_tag=None, redelivered=False
-    ):
-        """Process users messages. Returns True to ACK immediately."""
+    def _on_raw_users(self, raw: bytes):
+        """
+        Message handler for users table queue.
+        
+        Delegates to _on_raw_heavy_table with TableName.USERS.
+        This handler is called by the message middleware when a message arrives
+        on the users queue. Users data is passed through without any joins,
+        as it's used directly in Q4 queries.
+        
+        Returns True to ACK immediately.
+        """
         self._on_raw_heavy_table(raw, TableName.USERS)
 
     def _process_users_batch(self, raw: bytes, cid: str, bn: int) -> bool:
-        """Process a users batch (either fresh or from disk)."""
+        """
+        Process a users batch (either fresh or from disk).
+        
+        Users data requires no joins, so this method simply:
+        1. Sends the batch through to the output unchanged
+        2. Deletes any pending batch file from disk (if it existed)
+        
+        Users batches are used directly in Q4 queries without modification.
+        Returns True after successful processing.
+        """
         self._safe_send(raw)
         self._delete_pending_batch(TableName.USERS, cid, bn)
         return True
@@ -1055,7 +1236,22 @@ class JoinerWorker:
         delivery_tag=None,
         redelivered=False,
     ) -> bool:
-        """Handle EOF message. Returns True to ACK immediately."""
+        """
+        Handle EOF (End of File) message for a table and client.
+        
+        Tracks EOF messages from multiple router replicas using trace identifiers
+        to detect duplicates. When EOF is received:
+        1. Checks if this trace was already processed (deduplication)
+        2. Checks if EOF is already complete (all replicas received)
+        3. Adds the trace to pending EOFs and persists state
+        4. When threshold is reached (router_replicas), marks the table as complete
+        5. Triggers processing of any pending batches that were waiting for this EOF
+        
+        The EOF state is persisted to disk before ACKing to support crash recovery.
+        If persistence fails, the trace is removed and False is returned to requeue.
+        
+        Returns True to ACK immediately if successful, False to requeue on error.
+        """
         key = (table_name, client_id)
         tname = NAME_TO_STR.get(table_name, f"#{table_name}")
 
@@ -1152,6 +1348,12 @@ class JoinerWorker:
                         )
 
     def _safe_send(self, raw: bytes):
+        """
+        Send a message with automatic retry on failure.
+        If the first send fails, attempts to recreate the output middleware
+        using the factory function or reopen() method, then retries.
+        Raises an exception if the retry also fails.
+        """
         with self._out_lock:
             try:
                 self._out.send(raw)
