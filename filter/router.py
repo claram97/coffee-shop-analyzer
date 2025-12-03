@@ -488,78 +488,62 @@ class FilterRouter:
     ) -> tuple[bool, bool]:
         """Track EOF quorum for light tables and broadcast once all workers reported."""
         key = (eof.table, eof.client_id)
+        self._log_table_eof_receipt(key, eof, redelivered)
 
+        if self._should_skip_eof(eof.table, key):
+            return (True, True)
+
+        continue_flow, flush_info = self._update_eof_state(key, eof)
+        if not continue_flow:
+            return (True, True)
+
+        if flush_info:
+            self._flush_eof(*flush_info)
+
+        return (True, True)  # ACK immediately - state is persisted to disk
+
+    def _log_table_eof_receipt(self, key, eof: EOFMessage, redelivered: bool) -> None:
+        """Consistent logging for TABLE_EOF arrivals."""
         if redelivered:
             self._log.info("TABLE_EOF REDELIVERED: key=%s trace=%s", key, eof.trace)
         else:
             self._log.debug("TABLE_EOF received: key=%s trace=%s", key, eof.trace)
 
-        # Only broadcast EOFs for LIGHT_TABLES (menu_items and stores)
-        # These tables don't go through filters, so FIFO is assured
-        if eof.table not in LIGHT_TABLES:
-            self._log.debug("Ignoring EOF for non-light table: key=%s", key)
-            return (True, True)  # Ack immediately for non-light tables
+    def _should_skip_eof(self, table: TableName, key) -> bool:
+        """Return True when EOF should be acked immediately (non-light tables)."""
+        if table in LIGHT_TABLES:
+            return False
+        self._log.debug("Ignoring EOF for non-light table: key=%s", key)
+        return True
 
-        flush_info = None
+    def _update_eof_state(
+        self, key: tuple[TableName, str], eof: EOFMessage
+    ) -> tuple[bool, Optional[tuple[tuple[TableName, str], int]]]:
+        """Updates per-client EOF tracking; returns (continue_flow, flush_info)."""
         with self._state_lock:
-            # Extract worker ID from trace field (format: "orch_worker_id")
-            worker_id = None
-            if eof.trace:
-                # Trace format from orchestrator worker: "orch_worker_id"
-                # Extract the worker ID part
-                if eof.trace.startswith("orch_"):
-                    worker_id = eof.trace
-                else:
-                    # Handle cases where trace might have additional parts (e.g., "orch_0:filter_router_id:aggregator_id")
-                    # Extract just the orchestrator worker part
-                    parts = eof.trace.split(":")
-                    for part in parts:
-                        if part.startswith("orch_"):
-                            worker_id = part
-                            break
-                    if not worker_id:
-                        # Fallback: use the entire trace as worker_id if no "orch_" prefix found
-                        worker_id = eof.trace
+            worker_id = self._extract_worker_id(eof, key)
+            recvd_workers, _ = self._pending_eof.get(key, (set(), eof))
 
-            if not worker_id:
-                # Fallback: if no trace, use a default identifier (shouldn't happen with fix, but handle gracefully)
-                self._log.warning(
-                    "EOF without trace field, using fallback deduplication: key=%s", key
-                )
-                worker_id = f"unknown_{hash(eof.SerializeToString()) % UNKNOWN_TRACE_HASH_MOD}"
-
-            # Get or create the set of received worker IDs for this key
-            (recvd_workers, _eof) = self._pending_eof.get(key, (set(), eof))
-
-            # Check if this worker ID was already received (deduplication)
             if worker_id in recvd_workers:
                 self._log.warning(
                     "Duplicate EOF ignored: key=%s worker_id=%s (already received from this worker)",
                     key,
                     worker_id,
                 )
-                return (True, True)  # ACK immediately - already processed this EOF
+                return (False, None)
 
-            # Check if EOF is already complete (all workers received) before adding this worker
-            # This prevents re-broadcasting on duplicate messages after completion
-            already_complete = len(recvd_workers) >= self._orch_workers
-            if already_complete:
+            if len(recvd_workers) >= self._orch_workers:
                 self._log.info(
                     "EOF already complete for key=%s (received from %d workers), ignoring duplicate",
                     key,
                     len(recvd_workers),
                 )
-                return (True, True)
+                return (False, None)
 
-            # Add this worker ID to the set
             recvd_workers.add(worker_id)
             self._pending_eof[key] = (recvd_workers, eof)
-
-            # Persist EOF state before ACKing
             self._save_eof_state()
 
-            # Check if we've received EOF from all orchestrator workers
-            # Keep entry in _pending_eof until cleanup removes it
             if len(recvd_workers) >= self._orch_workers:
                 flush_info = (key, max(1, int(self._cfg.aggregators)))
                 self._log.info(
@@ -568,19 +552,33 @@ class FilterRouter:
                     len(recvd_workers),
                     self._orch_workers,
                 )
-            else:
-                self._log.debug(
-                    "TABLE_EOF deferred: key=%s received from %d/%d workers (worker_id=%s)",
-                    key,
-                    len(recvd_workers),
-                    self._orch_workers,
-                    worker_id,
-                )
+                return (True, flush_info)
 
-        if flush_info:
-            self._flush_eof(*flush_info)
+            self._log.debug(
+                "TABLE_EOF deferred: key=%s received from %d/%d workers (worker_id=%s)",
+                key,
+                len(recvd_workers),
+                self._orch_workers,
+                worker_id,
+            )
+            return (True, None)
 
-        return (True, True)  # ACK immediately - state is persisted to disk
+    def _extract_worker_id(self, eof: EOFMessage, key) -> str:
+        """Parses the orchestrator worker id from trace, preserving legacy fallbacks."""
+        trace = eof.trace
+        if trace:
+            if trace.startswith("orch_"):
+                return trace
+            parts = trace.split(":")
+            for part in parts:
+                if part.startswith("orch_"):
+                    return part
+            return trace
+
+        self._log.warning(
+            "EOF without trace field, using fallback deduplication: key=%s", key
+        )
+        return f"unknown_{hash(eof.SerializeToString()) % UNKNOWN_TRACE_HASH_MOD}"
 
     def _flush_eof(self, key: tuple[TableName, str], total_parts: int):
         """
