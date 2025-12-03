@@ -30,6 +30,7 @@ STR_TO_NAME = {
 }
 NAME_TO_STR = {v: k for (k, v) in STR_TO_NAME.items()}
 LIGHT_TABLES = {"menu_items", "stores"}
+BLACKLIST_TTL_SECONDS = 600
 
 log = logging.getLogger("joiner-router")
 
@@ -224,7 +225,7 @@ class JoinerRouter:
         Called at bootstrap.
         """
         current_time = time.time()
-        cutoff_time = current_time - 600  # 10 minutes ago
+        cutoff_time = current_time - BLACKLIST_TTL_SECONDS  # 10 minutes ago
         
         # Load from file if it exists
         if os.path.exists(self._blacklist_file):
