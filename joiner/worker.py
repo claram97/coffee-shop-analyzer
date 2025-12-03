@@ -25,6 +25,7 @@ STR_TO_NAME = {
     "stores": TableName.STORES,
 }
 NAME_TO_STR = {v: k for (k, v) in STR_TO_NAME.items()}
+BLACKLIST_TTL_SECONDS = 600
 
 
 def norm(v) -> str:
@@ -299,7 +300,7 @@ class JoinerWorker:
         Called at bootstrap.
         """
         current_time = time.time()
-        cutoff_time = current_time - 600
+        cutoff_time = current_time - BLACKLIST_TTL_SECONDS
 
         if os.path.exists(self._blacklist_file):
             try:
