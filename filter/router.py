@@ -31,6 +31,13 @@ TABLE_NAME_TO_STR = {
 }
 LIGHT_TABLES = {TableName.MENU_ITEMS, TableName.STORES}
 
+# Constants (avoid magic numbers)
+BLACKLIST_RETENTION_SECONDS = 10 * 60  # 10 minutes
+BACKOFF_JITTER_FACTOR = 0.2
+UNKNOWN_WORKER_HASH_MOD = 10000
+MIN_AGGREGATOR_PARTS = 1
+ORCH_PREFIX = "orch_"
+
 
 def is_bit_set(mask: int, idx: int) -> bool:
     return ((mask >> idx) & 1) == 1
@@ -158,7 +165,7 @@ class FilterRouter:
         Called at bootstrap.
         """
         current_time = time.time()
-        cutoff_time = current_time - 600  # 10 minutes ago
+        cutoff_time = current_time - BLACKLIST_RETENTION_SECONDS
 
         # Load from file if it exists
         if os.path.exists(self._blacklist_file):
@@ -351,13 +358,6 @@ class FilterRouter:
                 self._received_batches[dedup_key] = set()
             received_set = self._received_batches[dedup_key]
 
-            # if batch_number in received_set:
-            #     self._log.warning(
-            #         "DUPLICATE batch detected and discarded: table=%s bn=%s client=%s queries=%s",
-            #         table, batch_number, client_id, queries
-            #     )
-            #     return True
-
             # Mark batch as received
             received_set.add(batch_number)
             self._log.debug(
@@ -477,7 +477,7 @@ class FilterRouter:
                 batch.payload.name,
                 batch.payload.batch_number,
             )
-        num_parts = max(1, int(self._cfg.aggregators))
+        num_parts = max(MIN_AGGREGATOR_PARTS, int(self._cfg.aggregators))
         self._p.send_to_aggregator_partition(randint(0, num_parts - 1), batch)
 
     def _handle_table_eof(
@@ -533,7 +533,7 @@ class FilterRouter:
             # Check if we've received EOF from all orchestrator workers
             # Keep entry in _pending_eof until cleanup removes it
             if len(recvd_workers) >= self._orch_workers:
-                flush_info = (key, max(1, int(self._cfg.aggregators)))
+                flush_info = (key, max(MIN_AGGREGATOR_PARTS, int(self._cfg.aggregators)))
                 self._log.info(
                     "TABLE_EOF complete: key=%s received from %d/%d workers",
                     key,
@@ -541,13 +541,13 @@ class FilterRouter:
                     self._orch_workers,
                 )
             else:
-                self._log.debug(
-                    "TABLE_EOF deferred: key=%s received from %d/%d workers (worker_id=%s)",
-                    key,
-                    len(recvd_workers),
-                    self._orch_workers,
-                    worker_id,
-                )
+                    self._log.debug(
+                        "TABLE_EOF deferred: key=%s received from %d/%d workers (worker_id=%s)",
+                        key,
+                        len(recvd_workers),
+                        self._orch_workers,
+                        worker_id,
+                    )
 
         if flush_info:
             self._flush_eof(*flush_info)
@@ -608,7 +608,64 @@ class FilterRouter:
         self._log.warning(
             "EOF without trace field, using fallback deduplication: key=%s", key
         )
-        return f"unknown_{hash(eof.SerializeToString()) % 10000}"
+        return f"unknown_{hash(eof.SerializeToString()) % UNKNOWN_WORKER_HASH_MOD}"
+
+    def _record_eof_worker_under_lock(self, key: tuple[TableName, str], worker_id: str, eof: EOFMessage):
+        """Record an EOF worker id into _pending_eof under the assumption that the caller holds _state_lock.
+
+        Returns a tuple (should_return_immediately: bool, flush_info: Optional[tuple]).
+        - should_return_immediately True indicates the caller should return (ACK immediately).
+        - flush_info is (key, total_parts) when EOF is complete and needs flushing.
+        """
+        # Get or create the set of received worker IDs for this key
+        (recvd_workers, _eof) = self._pending_eof.get(key, (set(), eof))
+
+        # Check if this worker ID was already received (deduplication)
+        if worker_id in recvd_workers:
+            self._log.warning(
+                "Duplicate EOF ignored: key=%s worker_id=%s (already received from this worker)",
+                key,
+                worker_id,
+            )
+            return True, None
+
+        # Check if EOF is already complete (all workers received) before adding this worker
+        already_complete = len(recvd_workers) >= self._orch_workers
+        if already_complete:
+            self._log.info(
+                "EOF already complete for key=%s (received from %d workers), ignoring duplicate",
+                key,
+                len(recvd_workers),
+            )
+            return True, None
+
+        # Add this worker ID to the set
+        recvd_workers.add(worker_id)
+        self._pending_eof[key] = (recvd_workers, eof)
+
+        # Persist EOF state before ACKing
+        self._save_eof_state()
+
+        # If we've received EOF from all orchestrator workers, prepare flush info
+        if len(recvd_workers) >= self._orch_workers:
+            flush_info = (key, max(MIN_AGGREGATOR_PARTS, int(self._cfg.aggregators)))
+            self._log.info(
+                "TABLE_EOF complete: key=%s received from %d/%d workers",
+                key,
+                len(recvd_workers),
+                self._orch_workers,
+            )
+            return False, flush_info
+
+        # Deferred
+        self._log.debug(
+            "TABLE_EOF deferred: key=%s received from %d/%d workers (worker_id=%s)",
+            key,
+            len(recvd_workers),
+            self._orch_workers,
+            worker_id,
+        )
+        return False, None
 
     def _cleanup_client_state(self, client_id: str) -> None:
         """
@@ -715,6 +772,52 @@ class FilterRouter:
         )
         return f"unknown_{len(self._pending_cleanups.get(client_id, set()))}"
 
+    def _record_cleanup_worker_under_lock(self, client_id: str, worker_id: str):
+        """Record a cleanup worker id into _pending_cleanups under the assumption that the caller holds _state_lock.
+
+        Returns a tuple (should_return_immediately: bool, flush_info: Optional[tuple]).
+        - should_return_immediately True indicates the caller should return (ACK immediately).
+        - flush_info is (client_id, total_parts) when cleanup is complete and needs flushing.
+        """
+        recvd_workers = self._pending_cleanups.get(client_id, set())
+
+        if worker_id in recvd_workers:
+            self._log.warning(
+                "Duplicate CLEANUP ignored: client_id=%s worker_id=%s (already received from this worker)",
+                client_id,
+                worker_id,
+            )
+            return True, None
+
+        recvd_workers.add(worker_id)
+        self._pending_cleanups[client_id] = recvd_workers
+
+        # Persist cleanup state before ACKing
+        self._save_cleanup_state()
+
+        if len(recvd_workers) >= self._orch_workers:
+            self._add_to_blacklist(client_id)
+            flush_info = (client_id, max(MIN_AGGREGATOR_PARTS, int(self._cfg.aggregators)))
+            # Remove pending cleanup entry
+            self._pending_cleanups.pop(client_id, None)
+            self._log.info(
+                "CLEANUP complete: client_id=%s received from %d/%d workers",
+                client_id,
+                len(recvd_workers),
+                self._orch_workers,
+            )
+            return False, flush_info
+
+        # Deferred
+        self._log.debug(
+            "CLEANUP deferred: client_id=%s received from %d/%d workers (worker_id=%s)",
+            client_id,
+            len(recvd_workers),
+            self._orch_workers,
+            worker_id,
+        )
+        return False, None
+
     def _handle_client_cleanup_like(
         self, cleanup_msg, channel=None, delivery_tag=None, redelivered=False
     ) -> tuple[bool, bool]:
@@ -769,7 +872,7 @@ class FilterRouter:
 
             if len(recvd_workers) >= self._orch_workers:
                 self._add_to_blacklist(client_id)
-                flush_info = (client_id, max(1, int(self._cfg.aggregators)))
+                flush_info = (client_id, max(MIN_AGGREGATOR_PARTS, int(self._cfg.aggregators)))
                 self._pending_cleanups.pop(client_id, None)
                 self._log.info(
                     "CLEANUP complete: client_id=%s received from %d/%d workers",
@@ -946,7 +1049,7 @@ class ExchangeBusProducer:
 
     def _compute_sleep_with_jitter(self, base_backoff_s: float) -> float:
         """Compute sleep interval adding a small random jitter to avoid thundering-herd."""
-        jitter = random.uniform(0, base_backoff_s * 0.2)
+        jitter = random.uniform(0, base_backoff_s * BACKOFF_JITTER_FACTOR)
         return base_backoff_s + jitter
 
     def _send_with_retry(self, key: tuple[TableName, str], payload: bytes) -> None:
