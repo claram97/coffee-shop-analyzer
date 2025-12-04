@@ -16,3 +16,6 @@ clean_dir "$ROOT/results_finisher_state"
 clean_dir "$ROOT/filter_router_state"
 clean_dir "$ROOT/joiner_state"
 clean_dir "$ROOT/joiner_router_state"
+clean_dir "$ROOT/results_finisher_state"
+clean_dir "$ROOT/results_router_state"
+
