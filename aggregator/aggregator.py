@@ -3,7 +3,19 @@
 Coffee Shop Data Aggregator
 
 This module implements the main aggregator functionality for collecting,
-processing and analyzing coffee shop data from multiple clients.
+processing, and analyzing coffee shop data from multiple clients.
+
+The aggregator acts as an intermediary component in the data processing pipeline,
+receiving filtered data batches from filter routers, performing query-specific
+processing (for queries 2, 3, and 4), and forwarding the results to joiner routers
+for final data joining operations.
+
+Key responsibilities:
+    - Receiving data batches from filter routers via message exchanges
+    - Processing transaction and transaction_item data for specific queries
+    - Routing processed data to appropriate joiner router replicas
+    - Managing EOF (End of File) messages and cleanup operations
+    - Maintaining client-to-replica mappings for proper data routing
 """
 import logging
 import os
@@ -40,12 +52,44 @@ LIGHT_TABLES = {"menu_items", "stores"}
 
 
 class ExchangePublisherPool:
+    """Pool for managing and reusing message exchange connections.
+
+    This class maintains a pool of MessageMiddlewareExchange instances to avoid
+    creating duplicate connections for the same exchange configuration. Exchanges
+    are keyed by (exchange_name, route_keys, queue_name) tuple.
+
+    Attributes:
+        _host: The message broker host address.
+        _pool: Dictionary mapping exchange configurations to exchange instances.
+    """
+
     def __init__(self, host):
+        """
+        Initialize the exchange publisher pool.
+
+        Args:
+            host (str): The message broker host address.
+        """
         self._host = host
         self._pool = {}
         logging.info("Created exchange publisher pool for host: %s", host)
 
     def get_exchange(self, exchange_name, route_keys, queue_name=None):
+        """
+        Get or create a message exchange connection.
+
+        If an exchange with the same configuration already exists in the pool,
+        it is reused. Otherwise, a new exchange is created and added to the pool.
+
+        Args:
+            exchange_name (str): Name of the message exchange.
+            route_keys (str or list[str]): Routing key(s) for the exchange.
+            queue_name (str, optional): Name of the queue to bind to the exchange.
+
+        Returns:
+            MessageMiddlewareExchange: The exchange instance for the given
+                configuration.
+        """
         key = (
             exchange_name,
             tuple(route_keys) if isinstance(route_keys, list) else (route_keys,),
@@ -69,14 +113,42 @@ class ExchangePublisherPool:
 
 
 class Aggregator:
-    """Main aggregator class for coffee shop data analysis."""
+    """Main aggregator class for coffee shop data analysis.
+
+    The Aggregator receives data batches from filter routers, performs
+    query-specific processing on transaction and transaction_item data,
+    and forwards the results to joiner routers. It handles multiple message
+    types including data batches, EOF messages, and cleanup messages.
+
+    The aggregator maintains connections to:
+        - Input exchanges from filter routers (one per table)
+        - Output queues to joiner routers (one per table/replica combination)
+
+    Attributes:
+        id (str): Unique identifier for this aggregator instance.
+        running (bool): Flag indicating if the aggregator is currently running.
+        config_path (str): Path to the configuration file.
+        config (Config): Configuration object loaded from config_path.
+        host (str): Message broker host address.
+        _jr_replicas (int): Number of joiner router replicas.
+        _exchange_pool (ExchangePublisherPool): Pool for managing exchange connections.
+        _exchanges (dict): Dictionary mapping table names to input exchanges.
+        _out_queues (dict): Dictionary mapping (table, replica) tuples to output queues.
+        _client_table_replicas (dict): Tracks which replicas each client/table
+            combination has used for proper EOF routing.
+    """
 
     def __init__(self, id: str):
         """
         Initialize the aggregator.
 
+        Sets up message exchanges for receiving data from filter routers and
+        output queues for sending data to joiner routers. Configures connections
+        for all supported tables: menu_items, stores, transactions,
+        transaction_items, and users.
+
         Args:
-          id (str): The unique identifier for the aggregator instance.
+            id (str): The unique identifier for the aggregator instance.
         """
         self.id = id
         self.running = False
@@ -124,6 +196,21 @@ class Aggregator:
     def _target_replicas(
         self, table: str, client_id: Optional[str], batch_number: int
     ) -> list[int]:
+        """
+        Determine which joiner router replicas should receive data for a given table.
+
+        For light tables (menu_items, stores), data is sent to all replicas.
+        For heavy tables (transactions, transaction_items, users), data is
+        sharded to a single replica based on batch_number.
+
+        Args:
+            table (str): Name of the table.
+            client_id (str, optional): Client identifier for tracking replica usage.
+            batch_number (int): Batch number used for sharding heavy tables.
+
+        Returns:
+            list[int]: List of replica indices that should receive this data.
+        """
         if table in LIGHT_TABLES:
             replicas = list(range(self._jr_replicas))
         else:
@@ -136,9 +223,37 @@ class Aggregator:
     def _send_to_joiner_by_table(
         self, table: str, client_id: Optional[str], batch_number: int, raw_bytes: bytes
     ):
+        """
+        Send raw message bytes to joiner router replicas for a specific table.
+
+        Determines target replicas using _target_replicas and sends the message
+        to each replica's output queue.
+
+        Args:
+            table (str): Name of the table.
+            client_id (str, optional): Client identifier.
+            batch_number (int): Batch number for sharding.
+            raw_bytes (bytes): Raw serialized message bytes to send.
+
+        Raises:
+            Exception: If no output queue is configured for the table/replica,
+                or if the aggregator is shutting down.
+        """
+        if not self.running:
+            logging.warning(
+                "Aggregator shutting down, refusing to send message for table=%s", table
+            )
+            raise Exception("Aggregator is shutting down")
         logging.info("Sending to joiner by table=%s", table)
         replicas = self._target_replicas(table, client_id, batch_number)
         for replica in replicas:
+            if not self.running:
+                logging.warning(
+                    "Aggregator shutting down, aborting send to table=%s replica=%s",
+                    table,
+                    replica,
+                )
+                raise Exception("Aggregator is shutting down")
             q = self._out_queues.get((table, replica))
             if not q:
                 logging.error(
@@ -150,8 +265,22 @@ class Aggregator:
     def _forward_databatch_by_table(
         self, data_batch: DataBatch, raw: bytes, table_name: str
     ):
+        """
+        Forward a DataBatch message to the appropriate joiner router queue.
+
+        Extracts the batch number from the data batch and routes the message
+        to the correct joiner router replica(s) based on the table type and
+        sharding strategy.
+
+        Args:
+            data_batch (DataBatch): The parsed DataBatch protobuf message.
+            raw (bytes): Raw serialized message bytes to forward.
+            table_name (str): Name of the table this data batch belongs to.
+
+        Raises:
+            Exception: If forwarding fails or table_name is invalid.
+        """
         logging.info("Forwarding DataBatch message")
-        """Reenvía DataBatch a la cola correcta usando el table_name provisto."""
         try:
             table = table_name
             logging.debug("Forwarding DataBatch to table=%s", table)
@@ -170,8 +299,29 @@ class Aggregator:
             raise
 
     def _forward_eof(self, raw: bytes, table_name: str):
+        """
+        Forward an EOF (End of File) message to joiner router replicas.
+
+        Parses the EOF message and determines which replicas should receive it.
+        For light tables or when no client_id is present, sends to all replicas.
+        For heavy tables with a client_id, sends only to replicas that received
+        data for that client/table combination.
+
+        Args:
+            raw (bytes): Raw serialized EOF message bytes.
+            table_name (str): Name of the table this EOF belongs to.
+
+        Raises:
+            Exception: If EOF forwarding fails, no output queue is configured,
+                or aggregator is shutting down.
+        """
+        if not self.running:
+            logging.warning(
+                "Aggregator shutting down, refusing to forward EOF for table=%s",
+                table_name,
+            )
+            raise Exception("Aggregator is shutting down")
         logging.debug("Forwarding EOF message")
-        """Parse EOF, update trace with aggregator ID, and forward to joiner routers."""
         try:
             envelope = Envelope()
             envelope.ParseFromString(raw)
@@ -193,6 +343,12 @@ class Aggregator:
                     replicas = list(range(self._jr_replicas))
 
             for replica in replicas:
+                if not self.running:
+                    logging.warning(
+                        "Aggregator shutting down, aborting EOF forwarding for table=%s",
+                        table_name,
+                    )
+                    raise Exception("Aggregator is shutting down")
                 q = self._out_queues.get((table_name, replica))
                 if not q:
                     raise Exception(
@@ -214,14 +370,31 @@ class Aggregator:
     def _broadcast_cleanup_to_joiners(self, raw: bytes):
         """
         Broadcast client cleanup message to all joiner router replicas.
-        Send to all queues (all tables) for all joiner router replicas.
+
+        Sends the cleanup message to all joiner router replicas using the
+        menu_items table queue as a representative channel. This ensures
+        all replicas receive the cleanup signal regardless of which table
+        the cleanup message was received on.
 
         Args:
-            raw: Raw message bytes
-            input_table: The table name of the input queue that received this cleanup message
+            raw (bytes): Raw serialized cleanup message bytes.
+
+        Raises:
+            Exception: If broadcasting cleanup message fails or aggregator
+                is shutting down.
         """
+        if not self.running:
+            logging.warning(
+                "Aggregator shutting down, refusing to broadcast cleanup message"
+            )
+            raise Exception("Aggregator is shutting down")
         try:
             for replica in range(self._jr_replicas):
+                if not self.running:
+                    logging.warning(
+                        "Aggregator shutting down, aborting cleanup broadcast"
+                    )
+                    raise Exception("Aggregator is shutting down")
                 queue = self._out_queues.get(
                     (TID_TO_NAME.get(TableName.MENU_ITEMS), replica)
                 )
@@ -235,7 +408,15 @@ class Aggregator:
             raise
 
     def run(self):
-        """Start the aggregator server."""
+        """
+        Start the aggregator server.
+
+        Begins consuming messages from all configured input exchanges for
+        each table (menu_items, stores, transactions, transaction_items, users).
+        Each exchange uses a dedicated handler method to process incoming messages.
+
+        This method blocks and runs indefinitely until stop() is called.
+        """
         self.running = True
         logging.info("Starting aggregator server with ID %s", self.id)
 
@@ -252,11 +433,21 @@ class Aggregator:
     def stop(self):
         """Stop the aggregator server gracefully.
 
+        This method performs a graceful shutdown by:
+        1. Setting running = False to signal all handlers to stop processing
+        2. Stopping consumption on all exchanges (waits for consumer threads to finish)
+        3. Closing output queues (prevents new messages from being sent)
+        4. Closing input exchanges (releases all connections)
+
+        All message handlers check the running flag before processing and will
+        refuse to process new messages or send to queues once shutdown begins.
+        The middleware's stop_consuming() method waits for consumer threads to
+        complete, ensuring in-flight messages are handled before shutdown completes.
+
         IMPORTANT: Order of operations matters to avoid race conditions:
-        1. Set running = False to signal handlers to stop
-        2. Stop consuming on all exchanges and wait for in-flight messages
-        3. Close output queues (no more sends after this)
-        4. Close input exchanges
+        - Handlers check self.running at the start and during processing
+        - stop_consuming() waits for consumer threads via join()
+        - Queues are closed after consumption stops to prevent send errors
         """
         self.running = False
         logging.info("Stopping aggregator server")
@@ -272,6 +463,25 @@ class Aggregator:
         logging.info("Aggregator server stopped")
 
     def _handle_menu_item(self, message: bytes) -> bool:
+        """
+        Handle incoming messages from the menu_items exchange.
+
+        Processes three types of messages:
+            - EOF_MESSAGE: Forwards to joiner routers
+            - DATA_BATCH: Forwards to joiner routers without processing
+            - CLEAN_UP_MESSAGE: Broadcasts to all joiner router replicas
+
+        Args:
+            message (bytes): Raw serialized message bytes.
+
+        Returns:
+            bool: True if message was handled successfully, False otherwise.
+        """
+        if not self.running:
+            logging.warning(
+                "Aggregator shutting down, refusing to handle menu item message"
+            )
+            return False
         logging.debug("Handling menu item message")
         try:
             if not message:
@@ -296,6 +506,25 @@ class Aggregator:
             return False
 
     def _handle_store(self, message: bytes) -> bool:
+        """
+        Handle incoming messages from the stores exchange.
+
+        Processes three types of messages:
+            - EOF_MESSAGE: Forwards to joiner routers
+            - DATA_BATCH: Forwards to joiner routers without processing
+            - CLEAN_UP_MESSAGE: Broadcasts to all joiner router replicas
+
+        Args:
+            message (bytes): Raw serialized message bytes.
+
+        Returns:
+            bool: True if message was handled successfully, False otherwise.
+        """
+        if not self.running:
+            logging.warning(
+                "Aggregator shutting down, refusing to handle store message"
+            )
+            return False
         logging.debug("Handling store message")
         try:
             if not message:
@@ -319,7 +548,29 @@ class Aggregator:
             logging.exception("Failed to handle store")
             return False
 
-    def _handle_transaction(self, message: bytes):
+    def _handle_transaction(self, message: bytes) -> bool:
+        """
+        Handle incoming messages from the transactions exchange.
+
+        Processes three types of messages:
+            - EOF_MESSAGE: Forwards to joiner routers
+            - DATA_BATCH: Processes based on query_id:
+                * query_id 0 or None: Forwards without processing
+                * query_id 2: Processes with process_query_3 and forwards
+                * query_id 3: Processes with process_query_4_transactions and forwards
+            - CLEAN_UP_MESSAGE: Broadcasts to all joiner router replicas
+
+        Args:
+            message (bytes): Raw serialized message bytes.
+
+        Returns:
+            bool: True if message was handled successfully, False otherwise.
+        """
+        if not self.running:
+            logging.warning(
+                "Aggregator shutting down, refusing to handle transaction message"
+            )
+            return False
         logging.debug("Handling transaction message")
         try:
             if not message:
@@ -343,6 +594,11 @@ class Aggregator:
                         data_batch, message, "transactions"
                     )
                 elif query_id == 2:
+                    if not self.running:
+                        logging.warning(
+                            "Aggregator shutting down, aborting query 3 processing"
+                        )
+                        return False
                     processed = process_query_3(rows)
                     out = serialize_query3_results(processed)
                     columns = [
@@ -376,6 +632,11 @@ class Aggregator:
                         new_data_batch, new_message, "transactions"
                     )
                 elif query_id == 3:
+                    if not self.running:
+                        logging.warning(
+                            "Aggregator shutting down, aborting query 4 processing"
+                        )
+                        return False
                     processed = process_query_4_transactions(rows)
                     out = serialize_query4_transaction_results(processed)
                     columns = [
@@ -423,7 +684,28 @@ class Aggregator:
             logging.exception("Failed to handle transaction")
             return False
 
-    def _handle_transaction_item(self, message: bytes):
+    def _handle_transaction_item(self, message: bytes) -> bool:
+        """
+        Handle incoming messages from the transaction_items exchange.
+
+        Processes three types of messages:
+            - EOF_MESSAGE: Forwards to joiner routers
+            - DATA_BATCH: Processes based on query_id:
+                * query_id 1: Processes with process_query_2 and forwards
+                * Other query_ids: Logs error and returns
+            - CLEAN_UP_MESSAGE: Broadcasts to all joiner router replicas
+
+        Args:
+            message (bytes): Raw serialized message bytes.
+
+        Returns:
+            bool: True if message was handled successfully, False otherwise.
+        """
+        if not self.running:
+            logging.warning(
+                "Aggregator shutting down, refusing to handle transaction item message"
+            )
+            return False
         logging.debug("Handling transaction item message")
         try:
             if not message:
@@ -444,6 +726,11 @@ class Aggregator:
                 query_id = data_batch.query_ids[0] if data_batch.query_ids else None
 
                 if int(query_id) == 1:
+                    if not self.running:
+                        logging.warning(
+                            "Aggregator shutting down, aborting query 2 processing"
+                        )
+                        return False
                     logging.debug("Processing transaction item with query 2")
                     processed = process_query_2(rows)
                     out = serialize_query2_results(processed)
@@ -495,6 +782,25 @@ class Aggregator:
             return False
 
     def _handle_user(self, message: bytes) -> bool:
+        """
+        Handle incoming messages from the users exchange.
+
+        Processes three types of messages:
+            - EOF_MESSAGE: Forwards to joiner routers
+            - DATA_BATCH: Forwards to joiner routers without processing
+            - CLEAN_UP_MESSAGE: Broadcasts to all joiner router replicas
+
+        Args:
+            message (bytes): Raw serialized message bytes.
+
+        Returns:
+            bool: True if message was handled successfully, False otherwise.
+        """
+        if not self.running:
+            logging.warning(
+                "Aggregator shutting down, refusing to handle user message"
+            )
+            return False
         logging.debug("Handling user message")
         try:
             if not message:
