@@ -29,6 +29,17 @@ ELECTION_TIMEOUT_SECONDS = 5.0
 
 
 def resolve_config_path(cli_value: str | None) -> str:
+    """Determina la ruta del archivo de configuración a usar.
+
+    Orden de preferencia:
+    1. Valor pasado por CLI (`cli_value`).
+    2. Variable de entorno `CONFIG_PATH`.
+    3. Variable de entorno `CFG`.
+    4. Rutas por defecto (`/config/config.ini`, `./config.ini`, `/app_config/config.ini`).
+
+    Devuelve la primera ruta existente como ruta absoluta; si ninguna existe
+    devuelve la primera candidata como ruta absoluta.
+    """
     candidates = []
     if cli_value:
         candidates.append(cli_value)
@@ -50,6 +61,16 @@ def resolve_config_path(cli_value: str | None) -> str:
 def build_filter_router_from_config(
     cfg: Config, stop_event: threading.Event, router_id: int
 ) -> RouterServer:
+    """Construye e inicializa un `RouterServer` a partir de la configuración.
+
+    Parámetros:
+    - `cfg`: instancia de `Config` con los nombres y puertos del broker.
+    - `stop_event`: `threading.Event` que se pasa al servidor para detectar
+      solicitudes de parada.
+    - `router_id`: identificador del router (usado para formar la RK/colas).
+
+    Devuelve una instancia de `RouterServer` preparada para ejecutar `run()`.
+    """
     router_in = MessageMiddlewareExchange(
         host=cfg.broker.host,
         exchange_name=cfg.names.orch_to_fr_exchange,
@@ -92,9 +113,29 @@ class HeartbeatSettings:
     follower_restart_cooldown: float
     follower_recovery_grace: float
     follower_max_restart_attempts: int
+    """Configuración compacta para la lógica de heartbeats y elección.
+
+    Campos:
+    - `interval`: Periodo entre heartbeats en segundos.
+    - `timeout`: Tiempo de espera para considerar que falta un heartbeat.
+    - `max_misses`: Número máximo de heartbeats perdidos antes de alertar.
+    - `startup_grace`: Tiempo de gracia al arrancar antes de reaccionar.
+    - `election_cooldown`: Tiempo mínimo entre elecciones.
+    - `cooldown_jitter`: Jitter aplicado al cooldown para evitar colisiones.
+    - `follower_down_timeout`: Tiempo para considerar un follower caído.
+    - `follower_restart_cooldown`: Tiempo entre reintentos de restart.
+    - `follower_recovery_grace`: Margen de recuperación para followers.
+    - `follower_max_restart_attempts`: Límite de reintentos de restart.
+    """
 
 
 def _parse_args() -> argparse.Namespace:
+    """Parsea argumentos de línea de comandos y devuelve el namespace.
+
+    Argumentos soportados:
+    - `-c/--config`: ruta al archivo `config.ini`.
+    - `--log-level`: nivel de logging (por defecto toma `LOG_LEVEL` o `INFO`).
+    """
     parser = argparse.ArgumentParser()
     parser.add_argument("-c", "--config", help="Ruta al config.ini")
     parser.add_argument("--log-level", default=os.environ.get("LOG_LEVEL", "INFO"))
@@ -102,6 +143,10 @@ def _parse_args() -> argparse.Namespace:
 
 
 def _configure_logging(log_level: str) -> logging.Logger:
+    """Configura logging y devuelve un logger nombrado `filter-router-main`.
+
+    - `log_level`: nivel de logging o nombre (ej. `DEBUG`, `INFO`).
+    """
     logging.basicConfig(
         level=getattr(logging, log_level.upper(), logging.INFO),
         format="%(asctime)s %(levelname)s %(name)s - %(message)s",
@@ -110,6 +155,13 @@ def _configure_logging(log_level: str) -> logging.Logger:
 
 
 def _load_config_or_exit(config_flag: str | None, log: logging.Logger) -> Config:
+    """Carga la configuración desde `config_flag` o rutas por defecto.
+
+    - Si no se encuentra el archivo, imprime un mensaje en stderr y sale con
+      código 2.
+    - Si la carga de `Config` falla lanza un mensaje y sale con código 2.
+    Devuelve una instancia de `Config` válida.
+    """
     cfg_path = resolve_config_path(config_flag)
     if not os.path.exists(cfg_path):
         print("[filter-router] config no encontrado: %s" % cfg_path, file=sys.stderr)
@@ -125,6 +177,12 @@ def _load_config_or_exit(config_flag: str | None, log: logging.Logger) -> Config
 
 
 def _register_signal_handlers(stop_event: threading.Event, log: logging.Logger) -> None:
+    """Registra handlers para SIGINT y SIGTERM que activan `stop_event`.
+
+    Esto permite un apagado ordenado del proceso cuando se reciben señales de
+    terminación (Ctrl+C o `docker stop`).
+    """
+
     def shutdown_handler(*_a):
         log.info("Shutdown signal received. Initiating graceful shutdown...")
         stop_event.set()
@@ -134,6 +192,11 @@ def _register_signal_handlers(stop_event: threading.Event, log: logging.Logger) 
 
 
 def _read_heartbeat_settings() -> HeartbeatSettings:
+    """Construye `HeartbeatSettings` leyendo variables de entorno y usando
+    valores por defecto cuando no están definidas.
+
+    Devuelve una instancia de `HeartbeatSettings`.
+    """
     return HeartbeatSettings(
         interval=float(os.getenv("HEARTBEAT_INTERVAL_SECONDS") or DEFAULT_HEARTBEAT_INTERVAL),
         timeout=float(os.getenv("HEARTBEAT_TIMEOUT_SECONDS") or DEFAULT_HEARTBEAT_TIMEOUT),
@@ -177,6 +240,20 @@ def _start_leader_election_components(
     HeartbeatClient | None,
     FollowerRecoveryManager | None,
 ]:
+    """Inicializa y arranca los componentes de elección de líder y
+    monitorización de nodos para el `filter-router`.
+
+    Parámetros:
+    - `fr_index`: índice/ID del filter-router en el cluster.
+    - `cfg`: configuración de la aplicación.
+    - `hb`: settings de heartbeat.
+    - `log`: logger para registrar eventos.
+
+    Devuelve una tupla de componentes `(election_coordinator,
+    heartbeat_client, follower_recovery)` o `(None, None, None)` en caso de
+    fallo.
+    """
+
     election_coordinator = None
     heartbeat_client = None
     follower_recovery = None
@@ -264,6 +341,15 @@ def _shutdown_components(
     server,
     log: logging.Logger,
 ):
+    """Detiene y limpia los componentes arrancados por `main` en orden.
+
+    Acciones:
+    1. Resignar y detener el `ElectionCoordinator` si existe.
+    2. Detener el `FollowerRecoveryManager`.
+    3. Detener el `HeartbeatClient`.
+    4. Parar el servidor (`RouterServer`) si está presente.
+    Registra las acciones en `log`.
+    """
     log.info("Cleaning up resources...")
     if election_coordinator:
         election_coordinator.graceful_resign()
@@ -280,6 +366,16 @@ def _shutdown_components(
 
 
 def main():
+    """Punto de entrada para el proceso `filter-router`.
+
+    Flujo principal:
+    - Parsear argumentos y configurar logging.
+    - Resolver `FILTER_ROUTER_INDEX` del entorno.
+    - Cargar la configuración y registrar handlers de señal.
+    - Inicializar componentes de elección de líder y monitorización.
+    - Construir y ejecutar el `RouterServer` hasta recibir señal de parada.
+    - Realizar un apagado ordenado de todos los componentes.
+    """
     args = _parse_args()
     log = _configure_logging(args.log_level)
     fr_index = int(os.environ["FILTER_ROUTER_INDEX"])

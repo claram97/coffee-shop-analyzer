@@ -351,23 +351,46 @@ class FilterWorker:
     def _build_rows_from_filter_output(
         self, new_rows: List[Any], inner
     ) -> List[Row]:
-        rows_objs: list[Row] = []
-        try:
-            cols = list(inner.schema.columns)
-        except Exception:
-            cols = []
+                """
+                Construye una lista de objetos `Row` a partir de la salida de un filtro.
 
-        for r in new_rows:
-            if isinstance(r, Row):
-                rows_objs.append(r)
-            elif isinstance(r, (list, tuple)):
-                rows_objs.append(Row(values=list(r)))
-            elif isinstance(r, dict):
-                vals = [r.get(c) for c in cols] if cols else list(r.values())
-                rows_objs.append(Row(values=vals))
-            else:
-                rows_objs.append(Row(values=[str(r)]))
-        return rows_objs
+                Parámetros:
+                - `new_rows`: lista de elementos devueltos por la función de filtro. Cada
+                    elemento puede ser un objeto `Row`, una secuencia (list/tuple), un
+                    diccionario o cualquier otro valor convertible a string.
+                - `inner`: objeto que representa el `batch` original; se utiliza sólo
+                    para obtener el esquema (`inner.schema.columns`) cuando esté
+                    disponible y así mantener el orden de columnas al crear `Row`.
+
+                Comportamiento:
+                - Si un elemento ya es instancia de `Row`, se reutiliza.
+                - Si es una secuencia, se asume que contiene los valores de la fila.
+                - Si es un diccionario, se extraen los valores en el orden de las
+                    columnas del esquema si está disponible; en caso contrario se usan
+                    los valores del diccionario en orden de iteración.
+                - Para cualquier otro tipo se crea una fila con una única columna que
+                    contiene la representación en string del valor.
+
+                Devuelve:
+                - Lista de objetos `Row` listos para asignar a `inner.rows`.
+                """
+                rows_objs: list[Row] = []
+                try:
+                        cols = list(inner.schema.columns)
+                except Exception:
+                        cols = []
+
+                for r in new_rows:
+                        if isinstance(r, Row):
+                                rows_objs.append(r)
+                        elif isinstance(r, (list, tuple)):
+                                rows_objs.append(Row(values=list(r)))
+                        elif isinstance(r, dict):
+                                vals = [r.get(c) for c in cols] if cols else list(r.values())
+                                rows_objs.append(Row(values=vals))
+                        else:
+                                rows_objs.append(Row(values=[str(r)]))
+                return rows_objs
 
     def _replace_rows(self, inner, rows_objs: List[Row]) -> None:
         inner.rows.clear()

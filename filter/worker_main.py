@@ -31,19 +31,46 @@ ELECTION_TIMEOUT_SECONDS = 5.0
 
 @dataclass
 class HeartbeatSettings:
-    interval: float
-    timeout: float
-    max_misses: int
-    startup_grace: float
-    election_cooldown: float
-    cooldown_jitter: float
-    follower_down_timeout: float
-    follower_restart_cooldown: float
-    follower_recovery_grace: float
-    follower_max_restart_attempts: int
+        """Parámetros de configuración del mecanismo de heartbeat y tolerancia.
+
+        Campos:
+        - `interval`: intervalo en segundos entre heartbeats.
+        - `timeout`: tiempo en segundos tras el cual se considera que falta un
+            heartbeat.
+        - `max_misses`: número máximo de heartbeats perdidos antes de marcar un nodo.
+        - `startup_grace`: tiempo de gracia al iniciar antes de aplicar reglas de
+            election/timeout.
+        - `election_cooldown`: tiempo mínimo entre elecciones.
+        - `cooldown_jitter`: factor de jitter aplicado al cooldown para evitar
+            colisiones.
+        - `follower_down_timeout`: tiempo que determina cuando un follower se
+            considera caído.
+        - `follower_restart_cooldown`: tiempo de espera entre intentos de reinicio
+            del follower.
+        - `follower_recovery_grace`: margen de recuperación para followers al entrar
+            en modo líder/seguidor.
+        - `follower_max_restart_attempts`: número máximo de reintentos de restart
+            para un follower.
+        """
+        interval: float
+        timeout: float
+        max_misses: int
+        startup_grace: float
+        election_cooldown: float
+        cooldown_jitter: float
+        follower_down_timeout: float
+        follower_restart_cooldown: float
+        follower_recovery_grace: float
+        follower_max_restart_attempts: int
 
 
 def _configure_logging() -> logging.Logger:
+    """Configura el logging básico y devuelve un logger específico para el
+    proceso `filter-worker-main`.
+
+    Usa la variable de entorno `LOG_LEVEL` (por ejemplo `DEBUG`, `INFO`).
+    Devuelve el logger raíz nombrado `filter-worker-main`.
+    """
     log_level = os.getenv("LOG_LEVEL", "INFO").upper()
     logging.basicConfig(
         level=getattr(logging, log_level, logging.INFO),
@@ -53,6 +80,13 @@ def _configure_logging() -> logging.Logger:
 
 
 def _resolve_worker_id(logger: logging.Logger) -> int:
+    """Resuelve el identificador del worker.
+
+    - Si `FILTER_WORKER_INDEX` está presente en el entorno, lo devuelve como
+      entero.
+    - En caso contrario, calcula un fallback a partir del `HOSTNAME` y lo
+      reduce módulo `HOST_HASH_MODULUS`. El fallback se registra en el logger.
+    """
     worker_id_env = os.getenv("FILTER_WORKER_INDEX")
     if worker_id_env is not None:
         return int(worker_id_env)
@@ -62,6 +96,12 @@ def _resolve_worker_id(logger: logging.Logger) -> int:
 
 
 def _register_signal_handlers(stop_event: threading.Event, logger: logging.Logger) -> None:
+    """Registra handlers para SIGINT y SIGTERM que activan `stop_event`.
+
+    Esto permite a la aplicación realizar un apagado ordenado cuando reciba
+    señales de terminación (por ejemplo, Ctrl+C o `docker stop`).
+    """
+
     def shutdown_handler(*_a):
         logger.info("Shutdown signal received. Initiating graceful shutdown...")
         stop_event.set()
@@ -71,6 +111,11 @@ def _register_signal_handlers(stop_event: threading.Event, logger: logging.Logge
 
 
 def _load_config(logger: logging.Logger) -> Config:
+    """Carga la configuración de la ruta indicada por `CONFIG_PATH`.
+
+    Registra el inicio del worker y la ruta del fichero de configuración.
+    Devuelve una instancia de `Config`.
+    """
     cfg_path = os.getenv("CONFIG_PATH", "./config/config.ini")
     logger.info("Starting Filter Worker...")
     logger.info("Loading config from %s", cfg_path)
@@ -78,12 +123,19 @@ def _load_config(logger: logging.Logger) -> Config:
 
 
 def _log_worker_endpoints(cfg: Config, logger: logging.Logger) -> None:
+    """Registra en el logger los endpoints y nombres de recursos usados por el
+    worker (broker, colas y exchanges).
+    """
     logger.info("Connecting to RabbitMQ at %s", cfg.broker.host)
     logger.info("Input queue (filters pool): %s", cfg.names.filters_pool_queue)
     logger.info("Output exchange (router input): %s", cfg.names.orch_to_fr_exchange)
 
 
 def _read_heartbeat_settings() -> HeartbeatSettings:
+    """Lee variables de entorno relacionadas con heartbeats y devuelve una
+    instancia de `HeartbeatSettings` con valores por defecto cuando no están
+    definidos.
+    """
     return HeartbeatSettings(
         interval=float(os.getenv("HEARTBEAT_INTERVAL_SECONDS") or DEFAULT_HEARTBEAT_INTERVAL),
         timeout=float(os.getenv("HEARTBEAT_TIMEOUT_SECONDS") or DEFAULT_HEARTBEAT_TIMEOUT),
@@ -123,6 +175,18 @@ def _start_leader_election_components(
     hb: HeartbeatSettings,
     logger: logging.Logger,
 ):
+    """Inicializa y arranca los componentes relacionados con la elección de
+    líder y la monitorización de nodos.
+
+    - Crea un `ElectionCoordinator` para el cluster de `filter` workers.
+    - Crea y arranca un `HeartbeatClient` que mantiene el estado de líderes.
+    - Crea un `FollowerRecoveryManager` para gestionar reinicios/recuperación.
+
+    Devuelve una tupla `(election_coordinator, heartbeat_client,
+    follower_recovery)`. En caso de fallo en la inicialización devuelve `(None,
+    None, None)` y registra el error.
+    """
+
     election_coordinator = None
     heartbeat_client = None
     follower_recovery = None
@@ -204,6 +268,13 @@ def _start_leader_election_components(
 
 
 def _build_worker(cfg: Config, stop_event: threading.Event) -> FilterWorker:
+    """Construye y devuelve una instancia de `FilterWorker` usando la
+    configuración proporcionada.
+
+    - `cfg`: instancia de `Config` con rutas y nombres de recursos.
+    - `stop_event`: `threading.Event` que se pasa al worker para detectar
+      apagados ordenados.
+    """
     return FilterWorker(
         host=cfg.broker.host,
         in_queue=cfg.names.filters_pool_queue,
@@ -221,6 +292,16 @@ def _shutdown_components(
     worker,
     logger: logging.Logger,
 ):
+    """Detiene y limpia los componentes iniciados por `main` en el orden
+    apropiado:
+
+    1. Resignar de forma ordenada en el coordinador de elección (si existe).
+    2. Parar el gestor de recuperación de followers.
+    3. Parar el cliente de heartbeat.
+    4. Cerrar el `FilterWorker`.
+
+    Registra en el logger las acciones realizadas.
+    """
     logger.info("Cleaning up resources...")
     if election_coordinator:
         election_coordinator.graceful_resign()
@@ -237,6 +318,18 @@ def _shutdown_components(
 
 
 def main():
+    """Punto de entrada del servicio `filter-worker`.
+
+    Flujo principal:
+    - Configura logging y resuelve el `worker_id`.
+    - Registra handlers de señal para apagado ordenado.
+    - Carga la configuración y muestra los endpoints usados.
+    - Inicializa los componentes de elección de líder (ElectionCoordinator,
+      HeartbeatClient y FollowerRecoveryManager).
+    - Construye y ejecuta el `FilterWorker`, bloqueando hasta que `stop_event`
+      sea activado.
+    - Al finalizar, realiza un apagado ordenado de los componentes.
+    """
     logger = _configure_logging()
     worker_id = _resolve_worker_id(logger)
     stop_event = threading.Event()
