@@ -51,17 +51,16 @@ class _FanInServer:
         self._threads: list[threading.Thread] = []
 
     def run(self, stop_evt: threading.Event):
-        def mk_cb(queue_name: str):
-            def callback(body: bytes, channel=None, delivery_tag=None, redelivered=False):
-                return self._router._on_raw_with_ack(
-                    body, channel, delivery_tag, redelivered, queue_name=queue_name
+        def mk_cb():
+            def callback(body: bytes):
+                return self._router._on_raw(
+                    body
                 )
             return callback
 
         for i, c in enumerate(self._consumers):
-            queue_name = self._in_queues[i]
             t = threading.Thread(
-                target=c.start_consuming, args=(mk_cb(queue_name),), daemon=False
+                target=c.start_consuming, args=(mk_cb(),), daemon=False
             )
             t.start()
             self._threads.append(t)
@@ -75,7 +74,19 @@ class _FanInServer:
 
         self._logger.info("Waiting for consumer threads to finish...")
         for t in self._threads:
-            t.join()
+            t.join(timeout=5.0)
+            if t.is_alive():
+                self._logger.warning(
+                    "Consumer thread did not finish within timeout"
+                )
+
+        self._logger.info("Closing all middleware connections...")
+        for c in self._consumers:
+            try:
+                c.close()
+            except Exception as e:
+                self._logger.warning("Error closing consumer connection: %s", e)
+
         self._logger.info(
             "All consumer threads finished. FanInServer shutdown complete."
         )
