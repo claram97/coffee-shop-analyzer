@@ -1250,9 +1250,6 @@ class JoinerWorker:
         table_name: TableName,
         client_id: str,
         trace: str,
-        channel=None,
-        delivery_tag=None,
-        redelivered=False,
     ) -> bool:
         """
         Handle EOF (End of File) message for a table and client.

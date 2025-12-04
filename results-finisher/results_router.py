@@ -98,83 +98,36 @@ class ResultsRouter:
             logger.exception("Failed to broadcast cleanup to finishers")
             raise
 
-    # Deduplication method removed - router no longer deduplicates
-    # def _is_duplicate_batch(self, data_batch) -> bool:
-    #     """
-    #     Check if a batch is a duplicate. Returns True if duplicate, False otherwise.
-    #     Tracks batches by (table, client_id, query_ids_tuple, batch_number).
-    #     In-memory only - no persistence (loss on restart is acceptable).
-    #     """
-    #     table = data_batch.payload.name
-    #     client_id = data_batch.client_id
-    #     batch_number = data_batch.payload.batch_number
-    #     query_ids_tuple = tuple(sorted(data_batch.query_ids))
-    #     
-    #     dedup_key = (table, client_id, query_ids_tuple)
-    #     
-    #     if batch_number in self._received_batches[dedup_key]:
-    #         logger.warning(
-    #             "DUPLICATE batch detected and discarded in results router: table=%s bn=%s client=%s queries=%s",
-    #             table, batch_number, client_id, list(data_batch.query_ids)
-    #         )
-    #         return True
-    #     
-    #     # Mark batch as received
-    #     self._received_batches[dedup_key].add(batch_number)
-    #     logger.debug(
-    #         "Batch marked as received: table=%s bn=%s client=%s queries=%s",
-    #         table, batch_number, client_id, list(data_batch.query_ids)
-    #     )
-    #     return False
-
-    def _process_message(self, body: bytes, channel=None, delivery_tag=None, redelivered=False):
+    def _process_message(self, body: bytes):
         """
         Parses, validates, and routes a single incoming message.
-        Uses manual ACKs so messages are requeued on failures.
+        Returns True to ACK the message, raises an exception to NACK.
         """
-        manual_ack = channel is not None and delivery_tag is not None
-
         if not body:
             logger.warning("Received an empty message body. Discarding.")
-            if manual_ack:
-                channel.basic_ack(delivery_tag=delivery_tag)
-            return False
+            return True
 
         try:
-            # The primary responsibility is to route DataBatch messages.
             envelope = Envelope()
             envelope.ParseFromString(body)
 
             if envelope.type == MessageType.CLEAN_UP_MESSAGE:
-                # Broadcast cleanup message to all results finishers
                 self._broadcast_cleanup_to_finishers(body)
-                if manual_ack:
-                    channel.basic_ack(delivery_tag=delivery_tag)
-                return False
+                return True
 
             if envelope.type != MessageType.DATA_BATCH:
                 logger.warning(
                     "Received envelope with unsupported type %s. Discarding.",
                     envelope.type,
                 )
-                if manual_ack:
-                    channel.basic_ack(delivery_tag=delivery_tag)
-                return False
+                return True
 
             message = envelope.data_batch
 
-            # Deduplication removed - router now passes all batches through
-            # Results finisher will handle deduplication
-            # if self._is_duplicate_batch(message):
-            #     return  # Discard duplicate
-
             if not message.query_ids:
                 logger.warning("DataBatch contains no query_ids for routing. Discarding.")
-                if manual_ack:
-                    channel.basic_ack(delivery_tag=delivery_tag)
-                return False
+                return True
 
-            # Route based on the first query_id in the list.
             query_id = str(int(message.query_ids[0]))
             client_id = getattr(message, "client_id", None)
             if not client_id:
@@ -182,9 +135,7 @@ class ResultsRouter:
                     "DataBatch missing client_id for routing. Query: %s. Discarding.",
                     query_id,
                 )
-                if manual_ack:
-                    channel.basic_ack(delivery_tag=delivery_tag)
-                return False
+                return True
 
             routing_key = f"{client_id}:{query_id}"
             batch_number = getattr(message.payload, "batch_number", 0)
@@ -192,8 +143,6 @@ class ResultsRouter:
             target_client = self.output_clients[target_queue_name]
             
             target_client.send(body)
-            if manual_ack:
-                channel.basic_ack(delivery_tag=delivery_tag)
             logger.debug(
                 "Routed DATA_BATCH %s for query '%s' (client %s) to queue '%s'",
                 batch_number,
@@ -201,7 +150,7 @@ class ResultsRouter:
                 client_id,
                 target_queue_name,
             )
-            return False
+            return True
 
         except DecodeError as e:
             logger.error(
@@ -209,13 +158,10 @@ class ResultsRouter:
                 e,
                 body[:60],
             )
-            if manual_ack:
-                channel.basic_ack(delivery_tag=delivery_tag)
+            return True
         except Exception as e:
             logger.critical(f"An unexpected error occurred in the message handler: {e}", exc_info=True)
-            if manual_ack:
-                channel.basic_nack(delivery_tag=delivery_tag, requeue=True)
-        return False
+            raise
 
     def start(self):
         """Starts the message consumer in a dedicated thread."""
