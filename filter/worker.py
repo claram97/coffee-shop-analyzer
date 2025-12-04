@@ -355,27 +355,18 @@ class FilterWorker:
         except Exception:
             logger.debug("raw preview unavailable")
 
-    def _nack_on_shutdown(self, channel=None, delivery_tag=None) -> bool:
-        """NACK a message if shutdown is in progress.
+    def _nack_on_shutdown(self) -> bool:
+        """Check if shutdown is in progress.
 
-        Checks if shutdown has been requested and, if so, NACKs the message
-        for redelivery so it can be processed by another worker.
-
-        Args:
-            channel: AMQP channel (optional, for manual NACK).
-            delivery_tag: Message delivery tag (optional, for manual NACK).
+        The middleware handles NACKing messages during shutdown automatically.
+        This method only checks the shutdown status for early return.
 
         Returns:
-            True if shutdown is in progress and message was NACKed, False otherwise.
+            True if shutdown is in progress, False otherwise.
         """
         if not self._stop_event.is_set():
             return False
-        logger.warning("Shutdown in progress, NACKing message for redelivery.")
-        if channel is not None and delivery_tag is not None:
-            try:
-                channel.basic_nack(delivery_tag=delivery_tag, requeue=True)
-            except Exception as e:
-                logger.warning("NACK failed during shutdown: %s", e)
+        logger.warning("Shutdown in progress, message will be NACKed by middleware.")
         return True
 
     def _parse_envelope_or_forward(self, raw: bytes) -> Envelope | None:
@@ -740,7 +731,7 @@ class FilterWorker:
             )
             self._send_to_router(raw, bn)
 
-    def _on_raw(self, raw: bytes, channel=None, delivery_tag=None) -> None:
+    def _on_raw(self, raw: bytes) -> None:
         """Callback for processing raw messages from the queue.
 
         Main entry point for message processing. Handles shutdown checks,
@@ -748,17 +739,12 @@ class FilterWorker:
 
         Args:
             raw: Raw message bytes from the queue.
-            channel: AMQP channel (optional, for manual NACK during shutdown).
-            delivery_tag: Message delivery tag (optional, for manual NACK).
-
-        Returns:
-            False if message should be NACKed (during shutdown), None otherwise.
         """
         logger.debug("Mensaje recibido, tamaño=%d bytes", len(raw))
         self._log_raw_preview(raw)
 
-        if self._nack_on_shutdown(channel, delivery_tag):
-            return False
+        if self._nack_on_shutdown():
+            return
 
         env = self._parse_envelope_or_forward(raw)
         if env is None:
