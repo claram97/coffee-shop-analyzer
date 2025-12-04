@@ -447,20 +447,28 @@ class FilterRouter:
         )
 
         try:
-            if self._route_back_to_filters(batch, table, queries, mask):
-                return
-
-            if self._fan_out_batches(batch, table, queries):
-                return
-
-            if self._is_duplicate_batch(batch):
-                return
-
-            self._send_to_some_aggregator(batch)
-
+            self._process_batch_flow(batch, table, queries, mask, bn, cid)
         except Exception:
             self._log.exception("Error processing batch: table=%s bn=%s", table, bn)
             raise
+
+    def _process_batch_flow(
+        self, batch: DataBatch, table: TableName, queries: list[Query], mask: int, bn, cid
+    ) -> None:
+        """Core processing flow for a received batch.
+
+        Preserves original branching and side effects from `_handle_data`.
+        """
+        if self._route_back_to_filters(batch, table, queries, mask):
+            return
+
+        if self._fan_out_batches(batch, table, queries):
+            return
+
+        if self._is_duplicate_batch(batch):
+            return
+
+        self._send_to_some_aggregator(batch)
 
     def _send_to_some_aggregator(self, batch: DataBatch) -> None:
         if batch.payload.name in [TableName.MENU_ITEMS, TableName.STORES]:
@@ -490,31 +498,7 @@ class FilterRouter:
 
         flush_info = None
         with self._state_lock:
-            # Extract worker ID from trace field (format: "orch_worker_id")
-            worker_id = None
-            if eof.trace:
-                # Trace format from orchestrator worker: "orch_worker_id"
-                # Extract the worker ID part
-                if eof.trace.startswith("orch_"):
-                    worker_id = eof.trace
-                else:
-                    # Handle cases where trace might have additional parts (e.g., "orch_0:filter_router_id:aggregator_id")
-                    # Extract just the orchestrator worker part
-                    parts = eof.trace.split(":")
-                    for part in parts:
-                        if part.startswith("orch_"):
-                            worker_id = part
-                            break
-                    if not worker_id:
-                        # Fallback: use the entire trace as worker_id if no "orch_" prefix found
-                        worker_id = eof.trace
-
-            if not worker_id:
-                # Fallback: if no trace, use a default identifier (shouldn't happen with fix, but handle gracefully)
-                self._log.warning(
-                    "EOF without trace field, using fallback deduplication: key=%s", key
-                )
-                worker_id = f"unknown_{hash(eof.SerializeToString()) % 10000}"
+            worker_id = self._get_eof_worker_id(eof, key)
 
             # Get or create the set of received worker IDs for this key
             (recvd_workers, _eof) = self._pending_eof.get(key, (set(), eof))
@@ -602,6 +586,30 @@ class FilterRouter:
             for k in keys_to_remove:
                 self._received_batches.pop(k, None)
 
+    def _get_eof_worker_id(self, eof: EOFMessage, key: tuple[TableName, str]) -> str:
+        """Extract worker_id from EOF trace preserving original behavior and logs.
+
+        Returns a string worker_id; if no trace is present, logs and returns
+        the same fallback id as original implementation.
+        """
+        if eof.trace:
+            # Trace format from orchestrator worker: "orch_worker_id"
+            if eof.trace.startswith("orch_"):
+                return eof.trace
+            # Handle cases where trace might have additional parts (e.g., "orch_0:filter_router_id:aggregator_id")
+            parts = eof.trace.split(":")
+            for part in parts:
+                if part.startswith("orch_"):
+                    return part
+            # Fallback: use the entire trace if no orch_ prefix found
+            return eof.trace
+
+        # No trace: emit same warning and fallback id as original
+        self._log.warning(
+            "EOF without trace field, using fallback deduplication: key=%s", key
+        )
+        return f"unknown_{hash(eof.SerializeToString()) % 10000}"
+
     def _cleanup_client_state(self, client_id: str) -> None:
         """
         Clean all in-memory and persisted state for a given client_id.
@@ -619,7 +627,19 @@ class FilterRouter:
             "action: cleanup_client_state | result: starting | client_id: %s", client_id
         )
 
-        # Clean received batches deduplication state
+        # Clean received batches deduplication state and persisted state
+        self._clear_in_memory_state_for_client(client_id)
+        self._remove_persisted_state_for_client(client_id)
+
+        self._log.info(
+            "action: cleanup_client_state | result: success | client_id: %s", client_id
+        )
+
+    def _clear_in_memory_state_for_client(self, client_id: str) -> None:
+        """Remove in-memory deduplication and pending state for a client and persist changes.
+
+        Preserves original behavior and logging from `_cleanup_client_state`.
+        """
         with self._state_lock:
             # Remove all entries where client_id matches (second element of tuple key)
             keys_to_remove = [
@@ -642,35 +662,58 @@ class FilterRouter:
             self._save_eof_state()
             self._save_cleanup_state()
 
-        # Clean persisted state if it exists
-        # Note: Currently filter router doesn't persist state, but this is here for future-proofing
-        # If persistence is added later, this is where it should be cleaned
-        state_dir = os.getenv("FILTER_ROUTER_STATE_DIR")
-        if state_dir and os.path.exists(state_dir):
-            try:
-                # Look for any files/directories related to this client_id
-                for item in os.listdir(state_dir):
-                    if client_id in item:
-                        item_path = os.path.join(state_dir, item)
-                        try:
-                            if os.path.isfile(item_path):
-                                os.remove(item_path)
-                                self._log.debug("Removed persisted file: %s", item_path)
-                            elif os.path.isdir(item_path):
-                                shutil.rmtree(item_path)
-                                self._log.debug(
-                                    "Removed persisted directory: %s", item_path
-                                )
-                        except Exception as e:
-                            self._log.warning(
-                                "Failed to remove persisted state %s: %s", item_path, e
-                            )
-            except Exception as e:
-                self._log.warning("Failed to clean persisted state directory: %s", e)
+    def _remove_persisted_state_for_client(self, client_id: str) -> None:
+        """Remove any persisted files/directories in `FILTER_ROUTER_STATE_DIR` related to client_id.
 
-        self._log.info(
-            "action: cleanup_client_state | result: success | client_id: %s", client_id
+        Keeps original behavior and logs.
+        """
+        state_dir = os.getenv("FILTER_ROUTER_STATE_DIR")
+        if not state_dir or not os.path.exists(state_dir):
+            return
+
+        try:
+            # Look for any files/directories related to this client_id
+            for item in os.listdir(state_dir):
+                if client_id in item:
+                    item_path = os.path.join(state_dir, item)
+                    try:
+                        if os.path.isfile(item_path):
+                            os.remove(item_path)
+                            self._log.debug("Removed persisted file: %s", item_path)
+                        elif os.path.isdir(item_path):
+                            shutil.rmtree(item_path)
+                            self._log.debug(
+                                "Removed persisted directory: %s", item_path
+                            )
+                    except Exception as e:
+                        self._log.warning(
+                            "Failed to remove persisted state %s: %s", item_path, e
+                        )
+        except Exception as e:
+            self._log.warning("Failed to clean persisted state directory: %s", e)
+
+    def _get_cleanup_worker_id(self, cleanup_msg, client_id: str) -> str:
+        """Extract and normalize worker_id from a cleanup message's trace.
+
+        Preserves original logging and fallback behavior used by
+        `_handle_client_cleanup_like`.
+        """
+        if cleanup_msg.trace:
+            if cleanup_msg.trace.startswith("orch_"):
+                return cleanup_msg.trace
+            # keep original behavior: use trace but emit a warning
+            self._log.warning(
+                "CLEANUP trace format unexpected: client_id=%s trace=%s",
+                client_id,
+                cleanup_msg.trace,
+            )
+            return cleanup_msg.trace
+
+        # No trace: warn and produce a deterministic fallback id
+        self._log.warning(
+            "CLEANUP received without trace: client_id=%s", client_id
         )
+        return f"unknown_{len(self._pending_cleanups.get(client_id, set()))}"
 
     def _handle_client_cleanup_like(
         self, cleanup_msg, channel=None, delivery_tag=None, redelivered=False
@@ -706,24 +749,7 @@ class FilterRouter:
 
         flush_info = None
         with self._state_lock:
-            worker_id = None
-            if cleanup_msg.trace:
-                if cleanup_msg.trace.startswith("orch_"):
-                    worker_id = cleanup_msg.trace
-                else:
-                    worker_id = cleanup_msg.trace
-                    self._log.warning(
-                        "CLEANUP trace format unexpected: client_id=%s trace=%s",
-                        client_id,
-                        cleanup_msg.trace,
-                    )
-            else:
-                self._log.warning(
-                    "CLEANUP received without trace: client_id=%s", client_id
-                )
-                worker_id = (
-                    f"unknown_{len(self._pending_cleanups.get(client_id, set()))}"
-                )
+            worker_id = self._get_cleanup_worker_id(cleanup_msg, client_id)
 
             recvd_workers = self._pending_cleanups.get(client_id, set())
 
@@ -879,6 +905,50 @@ class ExchangeBusProducer:
             except Exception:
                 pass
 
+    def _is_pub_closed(self, pub) -> bool:
+        """Safely check whether a cached publisher is closed."""
+        if pub is None:
+            return True
+        try:
+            is_closed = getattr(pub, "is_closed", None)
+            if callable(is_closed):
+                return is_closed()
+            if is_closed is not None:
+                return bool(is_closed)
+        except Exception:
+            # If probing fails, assume closed so we recreate it
+            return True
+        return False
+
+    def _ensure_pub_for_key(self, key: tuple[TableName, str]) -> MessageMiddlewareExchange:
+        """Return a live publisher for `key`, creating one if missing/closed.
+
+        Keeps behavior equivalent to the original inline logic in `_send_with_retry`.
+        """
+        pub = self._pub_cache.get(key)
+        if pub is not None and self._is_pub_closed(pub):
+            try:
+                self._log.debug("publisher cached but closed: %s → recreate", key)
+            except Exception:
+                pass
+            self._drop_pub(key)
+            pub = None
+
+        if pub is None:
+            self._log.debug("pub cache miss -> create: %s", key)
+            pub = MessageMiddlewareExchange(
+                host=self._host, exchange_name=key[0], route_keys=[key[1]]
+            )
+            self._pub_cache[key] = pub
+            if key not in self._pub_locks:
+                self._pub_locks[key] = threading.Lock()
+        return pub
+
+    def _compute_sleep_with_jitter(self, base_backoff_s: float) -> float:
+        """Compute sleep interval adding a small random jitter to avoid thundering-herd."""
+        jitter = random.uniform(0, base_backoff_s * 0.2)
+        return base_backoff_s + jitter
+
     def _send_with_retry(self, key: tuple[TableName, str], payload: bytes) -> None:
         """
         Envía `payload` al exchange/rk indicado por `key`, con reintentos y recreación del publisher.
@@ -893,13 +963,7 @@ class ExchangeBusProducer:
 
             while attempt <= self._max_retries:
                 try:
-                    pub = self._pub_cache.get(key)
-                    if pub is None:
-                        self._log.debug("pub cache miss -> create: %s", key)
-                        pub = MessageMiddlewareExchange(
-                            host=self._host, exchange_name=key[0], route_keys=[key[1]]
-                        )
-                        self._pub_cache[key] = pub
+                    pub = self._ensure_pub_for_key(key)
                     pub.send(payload)
                     return
                 except Exception as e:
@@ -911,14 +975,14 @@ class ExchangeBusProducer:
                         key,
                         e,
                     )
+                    # Remove cached publisher so next attempt recreates it
                     self._drop_pub(key)
 
                     attempt += 1
                     if attempt > self._max_retries:
                         break
 
-                    jitter = random.uniform(0, backoff * 0.2)
-                    sleep_s = backoff + jitter
+                    sleep_s = self._compute_sleep_with_jitter(backoff)
                     time.sleep(sleep_s)
                     backoff *= self._backoff_multiplier
 
