@@ -899,6 +899,16 @@ class ResultsFinisher:
             return
 
         try:
+            # First, clean up any orphaned batch files for this client
+            # (batches that were persisted but never added to a manifest)
+            orphaned_count = self.persistence.delete_orphaned_batches_for_client(client_id)
+            if orphaned_count > 0:
+                logger.info(
+                    "Deleted %d orphaned batch files for client %s",
+                    orphaned_count,
+                    client_id,
+                )
+
             manifest_files = [
                 f
                 for f in os.listdir(manifest_dir)
