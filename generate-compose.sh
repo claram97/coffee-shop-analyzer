@@ -96,7 +96,7 @@ services:
       - ORCH_TO_FR_RK_FMT=fr.{pid:02d}
       - FILTER_ROUTER_COUNT=${FR_ROUTERS}
       - ORCH_PROCESS_COUNT=${ORCHESTRATORS}
-      - ORCH_PROCESS_QUEUE_SIZE=256
+      - ORCH_PROCESS_QUEUE_SIZE=128
       - ORCH_PROCESS_QUEUE_TIMEOUT=10.0
     networks:
       - testing_net
