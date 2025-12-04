@@ -2,8 +2,6 @@ import logging
 import multiprocessing as mp
 from typing import Dict
 
-from common.processing import message_logger
-
 from middleware.middleware_client import MessageMiddlewareExchange
 from common.processing import create_filtered_data_batch_protocol2
 from protocol2.envelope_pb2 import Envelope, MessageType
@@ -146,8 +144,6 @@ def processing_worker_main(
             status_value = getattr(msg, "batch_status", 0)
             status_text = STATUS_TEXT_MAP.get(status_value, f"Unknown({status_value})")
 
-            message_logger.write_original_message(msg, status_text)
-
             # Build a protocol2 Envelope containing a DataBatch (TableData payload)
             env = create_filtered_data_batch_protocol2(msg, client_id)
             batch_bytes = env.SerializeToString()
@@ -158,8 +154,6 @@ def processing_worker_main(
             rk = rk_fmt.format(pid=pid)
 
             _publisher_for_rk(rk).send(batch_bytes)
-
-            message_logger.log_batch_processing_success(msg, status_text)
 
         except Exception:
             logging.exception(
