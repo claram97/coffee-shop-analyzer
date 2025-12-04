@@ -288,6 +288,111 @@ class FilterWorker:
         key = (inner.name, step, queries_key)
         return queries_key, self._filters.get(key)
 
+    def _ensure_rows_or_forward(
+        self, inner, step: int, raw: bytes, bn: int | None
+    ) -> bool:
+        if inner and inner.rows:
+            return True
+        logger.debug(
+            "Batch sin 'rows': reenvío sin cambios | table_id=%s step=%s",
+            getattr(inner, "name", None),
+            step,
+        )
+        self._send_to_router(raw, bn)
+        return False
+
+    def _resolve_filter_or_forward(
+        self,
+        inner,
+        step: int,
+        queries: List[Query],
+        raw: bytes,
+        bn: int | None,
+    ) -> tuple[Optional[str], Optional[FilterFn]]:
+        queries_key, fn = self._resolve_filter(inner, step, queries)
+        if fn is not None:
+            return queries_key, fn
+        logger.warning(
+            "No hay filtro registrado para queries=%s: reenvío sin cambios | table_id=%s step=%s",
+            queries_key,
+            inner.name,
+            step,
+        )
+        self._send_to_router(raw, bn)
+        return None, None
+
+    def _handle_data_batch(self, env: Envelope, raw: bytes) -> None:
+        db = env.data_batch
+        self._log_databatch_summary(env, db)
+        bn = self._safe_batch_number(db)
+        inner = self._payload_or_forward(db, raw, bn)
+        if inner is None:
+            return
+
+        step = self._step_or_forward(db, inner, raw, bn)
+        if step is None:
+            return
+
+        if not self._ensure_rows_or_forward(inner, step, raw, bn):
+            return
+
+        queries_key, fn = self._resolve_filter_or_forward(
+            inner,
+            step,
+            list(db.query_ids),
+            raw,
+            bn,
+        )
+        if fn is None:
+            return
+
+        self._apply_filter_and_forward(env, db, inner, fn, queries_key, step, bn, raw)
+
+    def _build_rows_from_filter_output(
+        self, new_rows: List[Any], inner
+    ) -> List[Row]:
+        rows_objs: list[Row] = []
+        try:
+            cols = list(inner.schema.columns)
+        except Exception:
+            cols = []
+
+        for r in new_rows:
+            if isinstance(r, Row):
+                rows_objs.append(r)
+            elif isinstance(r, (list, tuple)):
+                rows_objs.append(Row(values=list(r)))
+            elif isinstance(r, dict):
+                vals = [r.get(c) for c in cols] if cols else list(r.values())
+                rows_objs.append(Row(values=vals))
+            else:
+                rows_objs.append(Row(values=[str(r)]))
+        return rows_objs
+
+    def _replace_rows(self, inner, rows_objs: List[Row]) -> None:
+        inner.rows.clear()
+        if rows_objs:
+            inner.rows.extend(rows_objs)
+
+    def _log_filter_success(
+        self,
+        inner,
+        step: int,
+        queries_key: str,
+        fn: FilterFn,
+        before_rows: int,
+        after_rows: int,
+    ) -> None:
+        logger.debug(
+            "Filtro aplicado con éxito | table_id=%s step=%s queries=%s filter=%s before=%s after=%s",
+            inner.name,
+            step,
+            queries_key,
+            getattr(fn, "__name__", "unknown"),
+            before_rows,
+            after_rows,
+        )
+
     def _apply_filter_and_forward(
         self,
         env: Envelope,
@@ -300,37 +405,20 @@ class FilterWorker:
         raw: bytes,
     ) -> None:
         try:
+            before_rows = len(getattr(inner, "rows", []) or [])
             new_rows = fn(inner) or []
-            rows_objs: list[Row] = []
-            cols = []
-            try:
-                cols = list(inner.schema.columns)
-            except Exception:
-                cols = []
-
-            for r in new_rows:
-                if isinstance(r, Row):
-                    rows_objs.append(r)
-                elif isinstance(r, (list, tuple)):
-                    rows_objs.append(Row(values=list(r)))
-                elif isinstance(r, dict):
-                    vals = [r.get(c) for c in cols] if cols else list(r.values())
-                    rows_objs.append(Row(values=vals))
-                else:
-                    rows_objs.append(Row(values=[str(r)]))
-
-            inner.rows.clear()
-            if rows_objs:
-                inner.rows.extend(rows_objs)
+            rows_objs = self._build_rows_from_filter_output(new_rows, inner)
+            self._replace_rows(inner, rows_objs)
 
             env.data_batch.CopyFrom(db)
             out_raw = env.SerializeToString()
-            logger.debug(
-                "Filtro aplicado con éxito | table_id=%s step=%s queries=%s filter=%s",
-                inner.name,
+            self._log_filter_success(
+                inner,
                 step,
                 queries_key,
-                getattr(fn, "__name__", "unknown"),
+                fn,
+                before_rows,
+                len(rows_objs),
             )
             self._send_to_router(out_raw, bn)
 
@@ -358,34 +446,4 @@ class FilterWorker:
         if env.type != MessageType.DATA_BATCH:
             logger.warning("Expected databatch, got %s", env.type)
             return
-        db = env.data_batch
-        self._log_databatch_summary(env, db)
-        bn = self._safe_batch_number(db)
-        inner = self._payload_or_forward(db, raw, bn)
-        if inner is None:
-            return
-
-        step = self._step_or_forward(db, inner, raw, bn)
-        if step is None:
-            return
-        if not inner.rows:
-            logger.debug(
-                "Batch sin 'rows': reenvío sin cambios | table_id=%s step=%s",
-                inner.name,
-                step,
-            )
-            self._send_to_router(raw, bn)
-            return
-
-        queries_key, fn = self._resolve_filter(inner, step, list(db.query_ids))
-        if fn is None:
-            logger.warning(
-                "No hay filtro registrado para queries=%s: reenvío sin cambios | table_id=%s step=%s",
-                queries_key,
-                inner.name,
-                step,
-            )
-            self._send_to_router(raw, bn)
-            return
-
-        self._apply_filter_and_forward(env, db, inner, fn, queries_key, step, bn, raw)
+        self._handle_data_batch(env, raw)

@@ -115,28 +115,24 @@ class FilterRouter:
         self._orch_workers = orch_workers
         self._router_id = router_id
 
+        self._init_state_containers()
+        self._configure_state_paths(router_id)
+        self._load_initial_state()
+
+    def _init_state_containers(self) -> None:
         # Batch deduplication: track received batch numbers per (table, client_id, query_ids_tuple)
-        # In-memory only (no persistence)
-        # Use regular dict instead of defaultdict to ensure each key gets its own set
         self._received_batches: Dict[tuple[int, str, tuple], set[int]] = {}
 
-        # Track pending EOFs for LIGHT_TABLES only: key=(table, client_id) -> (set of worker_ids, EOFMessage)
-        # Only menu_items and stores tables need EOF broadcasting
-        # Worker IDs are extracted from the trace field (format: "orch_worker_id")
-        # EOFs remain in _pending_eof until client cleanup removes them
+        # Pending EOFs / cleanup tracking
         self._pending_eof: Dict[tuple[TableName, str], tuple[set[str], EOFMessage]] = {}
-
-        # Track pending cleanup messages: key=client_id -> set of worker_ids
-        # Worker IDs are extracted from the trace field (format: "orch_worker_id")
         self._pending_cleanups: Dict[str, set[str]] = {}
         self._state_lock = threading.Lock()
 
         # Blacklist: client_ids that should have their batches discarded
-        # Format: {client_id: timestamp} - timestamp is when the client was blacklisted
         self._blacklist: Dict[str, float] = {}
         self._blacklist_lock = threading.Lock()
 
-        # State directory and file paths
+    def _configure_state_paths(self, router_id: int) -> None:
         self._state_dir = os.getenv(
             "FILTER_ROUTER_STATE_DIR", "/tmp/filter_router_state"
         )
@@ -151,7 +147,7 @@ class FilterRouter:
             self._state_dir, f"cleanup_state_{router_id}.json"
         )
 
-        # Load state at bootstrap
+    def _load_initial_state(self) -> None:
         self._load_and_clean_blacklist()
         self._load_eof_state()
         self._load_cleanup_state()
@@ -373,6 +369,60 @@ class FilterRouter:
             )
             return False
 
+    def _should_drop_for_blacklist(self, mask: int, cid) -> bool:
+        if mask == 0:
+            return False
+        if self._is_blacklisted(str(cid) if cid else ""):
+            self._log.info(
+                "Discarding batch from blacklisted client: cid=%s mask=%s",
+                cid,
+                bin(mask),
+            )
+            return True
+        return False
+
+    def _route_back_to_filters(
+        self, batch: DataBatch, table: TableName, queries: list[Query], mask: int
+    ) -> bool:
+        total_steps = self._pol.total_steps(table, queries)
+        next_step = first_zero_bit(mask, total_steps)
+        if next_step is None:
+            return False
+        if not self._pol.steps_remaining(table, queries, steps_done=next_step):
+            return False
+        new_mask = set_bit(mask, next_step)
+        batch.filter_steps = new_mask
+        self._log.debug(
+            "→ filters step=%d table=%s new_mask=%s",
+            next_step,
+            table,
+            bin(new_mask),
+        )
+        self._p.send_to_filters_pool(batch)
+        return True
+
+    def _fan_out_batches(
+        self, batch: DataBatch, table: TableName, queries: list[Query]
+    ) -> bool:
+        dup_count = int(self._pol.get_duplication_count(queries) or 1)
+        if dup_count <= 1:
+            return False
+        self._log.debug("Fan-out x%d table=%s queries=%s", dup_count, table, queries)
+        fanout_batches = []
+        for i in range(dup_count):
+            new_queries = self._pol.get_new_batch_queries(
+                table, queries, copy_number=i
+            ) or list(queries)
+            b = DataBatch()
+            b.CopyFrom(batch)
+            b.query_ids.clear()
+            b.query_ids.extend(new_queries)
+            fanout_batches.append(b)
+
+        for b in fanout_batches:
+            self._handle_data(b)
+        return True
+
     def _handle_data(self, batch: DataBatch) -> None:
         table = batch.payload.name
         queries = batch.query_ids
@@ -384,17 +434,8 @@ class FilterRouter:
             self._log.warning("Batch sin table_id válido. bn=%s", bn)
             return
 
-        # Check blacklist for batches from filter workers (mask != 0)
-        if mask != 0:
-            if self._is_blacklisted(str(cid) if cid else ""):
-                self._log.info(
-                    "Discarding batch from blacklisted client: table=%s bn=%s cid=%s mask=%s",
-                    table,
-                    bn,
-                    cid,
-                    bin(mask),
-                )
-                return
+        if self._should_drop_for_blacklist(mask, cid):
+            return
 
         self._log.debug(
             "recv DataBatch table=%s queries=%s mask=%s bn=%s cid=%s",
@@ -406,44 +447,12 @@ class FilterRouter:
         )
 
         try:
-            total_steps = self._pol.total_steps(table, queries)
-            next_step = first_zero_bit(mask, total_steps)
-            if next_step is not None and self._pol.steps_remaining(
-                table, queries, steps_done=next_step
-            ):
-                new_mask = set_bit(mask, next_step)
-                batch.filter_steps = new_mask
-                self._log.debug(
-                    "→ filters step=%d table=%s new_mask=%s",
-                    next_step,
-                    table,
-                    bin(new_mask),
-                )
-                self._p.send_to_filters_pool(batch)
+            if self._route_back_to_filters(batch, table, queries, mask):
                 return
 
-            dup_count = int(self._pol.get_duplication_count(queries) or 1)
-            if dup_count > 1:
-                self._log.debug(
-                    "Fan-out x%d table=%s queries=%s", dup_count, table, queries
-                )
-                fanout_batches = []
-                for i in range(dup_count):
-                    new_queries = self._pol.get_new_batch_queries(
-                        table, queries, copy_number=i
-                    ) or list(queries)
-                    b = DataBatch()
-                    b.CopyFrom(batch)
-                    b.query_ids.clear()
-                    b.query_ids.extend(new_queries)
-                    fanout_batches.append(b)
-
-                for b in fanout_batches:
-                    self._handle_data(b)
+            if self._fan_out_batches(batch, table, queries):
                 return
 
-            # Check for duplicates only when batch is finished processing (ready to send to aggregator)
-            # This prevents marking batches as duplicates when they're still going through filter steps
             if self._is_duplicate_batch(batch):
                 return
 
