@@ -92,31 +92,42 @@ class ResultsFinisher:
 
         logger.info("Initialized ResultsFinisher for processing.")
 
-    def _process_message(self, body: bytes, channel=None, delivery_tag=None, redelivered=False):
-        manual_ack = channel is not None and delivery_tag is not None
+    def _process_message(self, body: bytes):
+        """
+        Entry point invoked by the middleware consumer.
+
+        The middleware wrapper handles ACK/NACK decisions based on our return value
+        and any raised exceptions. Returning True means "message handled, ACK it".
+        """
+        try:
+            envelope = self._parse_envelope(body)
+        except DecodeError as e:
+            logger.error("Failed to decode envelope. Discarding message. Error: %s", e)
+            return True
+        except Exception as e:
+            logger.critical(f"Unexpected error in message handler: {e}", exc_info=True)
+            raise
+
+        if envelope is None:
+            return True
+
+        return self._route_envelope(envelope, body)
+
+    def _parse_envelope(self, body: bytes) -> Optional[Envelope]:
+        """Parse raw bytes into an Envelope; returns None for empty bodies."""
         try:
             if not body:
                 logger.warning("Received empty message body, ignoring.")
-                if manual_ack:
-                    channel.basic_ack(delivery_tag=delivery_tag)
-                return False
-
+                return None
             envelope = Envelope()
             envelope.ParseFromString(body)
-        except DecodeError as e:
-            logger.error("Failed to decode envelope. Discarding message. Error: %s", e)
-            if manual_ack:
-                channel.basic_ack(delivery_tag=delivery_tag)
-            return False
-        except Exception as e:
-            logger.critical(f"Unexpected error in message handler: {e}", exc_info=True)
-            if manual_ack:
-                channel.basic_nack(delivery_tag=delivery_tag, requeue=True)
-            return False
+            return envelope
+        except DecodeError:
+            raise
 
+    def _route_envelope(self, envelope: Envelope, raw_body: bytes) -> bool:
+        """Handle supported envelope types; return True to ACK the message."""
         if envelope.type == MessageType.CLEAN_UP_MESSAGE:
-            if manual_ack:
-                channel.basic_ack(delivery_tag=delivery_tag)
             try:
                 cleanup_msg = envelope.clean_up
                 self._handle_client_cleanup(cleanup_msg)
@@ -126,33 +137,30 @@ class ResultsFinisher:
                     exc,
                     exc_info=True,
                 )
-            return False
+            return True
 
         if envelope.type != MessageType.DATA_BATCH:
             logger.warning(
                 "Received envelope with unsupported type %s, ignoring.",
                 envelope.type,
             )
-            if manual_ack:
-                channel.basic_ack(delivery_tag=delivery_tag)
-            return False
+            return True
 
+        return self._persist_and_process_batch(envelope, raw_body)
+
+    def _persist_and_process_batch(self, envelope: Envelope, raw_body: bytes) -> bool:
+        """Persist incoming batch to disk, then process it."""
         batch = envelope.data_batch
         metadata = self._build_batch_metadata(batch)
         client_id = metadata["client_id"]
         query_id = metadata["query_id"]
 
         try:
-            record = self.persistence.save_batch(metadata, body)
+            record = self.persistence.save_batch(metadata, raw_body)
             self.persistence.append_manifest(client_id, query_id, record)
         except Exception as exc:
             logger.error("Failed to persist incoming batch: %s", exc, exc_info=True)
-            if manual_ack:
-                channel.basic_nack(delivery_tag=delivery_tag, requeue=True)
-            return False
-
-        if manual_ack:
-            channel.basic_ack(delivery_tag=delivery_tag)
+            raise
 
         try:
             self._process_persisted_record(record, envelope=envelope)
@@ -163,11 +171,9 @@ class ResultsFinisher:
                 exc,
                 exc_info=True,
             )
-        return False
+        return True
 
     def _handle_data_batch(self, batch: DataBatch):
-        # logger.info("Handling data batch")
-
         if not batch.query_ids:
             return
 
