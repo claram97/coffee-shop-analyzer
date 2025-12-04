@@ -199,108 +199,108 @@ class FilterWorker:
         logger.info("Comenzando consumo de mensajes…")
         self._in.start_consuming(self._on_raw)
 
-    def _on_raw(self, raw: bytes) -> None:
-        logger.debug("Mensaje recibido, tamaño=%d bytes", len(raw))
-        # Small hex preview to help identify message payload in logs (first 48 bytes)
+    def _log_raw_preview(self, raw: bytes) -> None:
         try:
             preview = raw[:48].hex()
             logger.debug("raw preview: %s", preview)
         except Exception:
             logger.debug("raw preview unavailable")
-        if self._stop_event.is_set():
-            logger.warning("Shutdown in progress, NACKing message for redelivery.")
-            if channel is not None and delivery_tag is not None:
-                try:
-                    channel.basic_nack(delivery_tag=delivery_tag, requeue=True)
-                except Exception as e:
-                    logger.warning("NACK failed during shutdown: %s", e)
+
+    def _nack_on_shutdown(self, channel=None, delivery_tag=None) -> bool:
+        if not self._stop_event.is_set():
             return False
-        t0 = time.perf_counter()
+        logger.warning("Shutdown in progress, NACKing message for redelivery.")
+        if channel is not None and delivery_tag is not None:
+            try:
+                channel.basic_nack(delivery_tag=delivery_tag, requeue=True)
+            except Exception as e:
+                logger.warning("NACK failed during shutdown: %s", e)
+        return True
+
+    def _parse_envelope_or_forward(self, raw: bytes) -> Envelope | None:
         env = Envelope()
         try:
             env.ParseFromString(raw)
+            return env
         except Exception as e:
             logger.exception("Failed to parse Envelope from raw bytes: %s", e)
-            # If parsing fails, requeue or send upstream unchanged so other components
-            # (or legacy consumers) can handle it. Here we NACK/reattempt by re-sending
-            # to router to avoid dropping the message silently.
             try:
                 self._send_to_router(raw, None)
             except Exception:
                 logger.warning("Failed to re-send raw message after parse error")
-                raise  # Re-raise to cause NACK and redelivery
-            return
-        if env.type != MessageType.DATA_BATCH:
-            logger.warning("Expected databatch, got %s", env.type)
-            return
-        db = env.data_batch
-        # Log envelope / DataBatch summary
+                raise
+        return None
+
+    def _log_databatch_summary(self, env: Envelope, db) -> None:
         try:
-            rows_count = len(db.payload.rows) if db and db.payload and db.payload.rows is not None else 0
+            rows_count = (
+                len(db.payload.rows)
+                if db and db.payload and db.payload.rows is not None
+                else 0
+            )
         except Exception:
             rows_count = -1
-        logger.debug("Parsed Envelope type=%s client_id=%s batch_rows=%s", env.type, getattr(db, "client_id", None), rows_count)
-        # protocol2 DataBatch puts the batch_number inside payload.batch_number.
-        # Provide a safe accessor that handles both legacy and protobuf shapes.
-        def _safe_batch_number(database) -> int | None:
-            logger.debug("Obteniendo batch_number seguro del DataBatch")
-            try:
-                # protobuf path: payload.batch_number
-                if getattr(database, "payload", None) and getattr(database.payload, "batch_number", None) is not None:
-                    return int(database.payload.batch_number)
-                # legacy path: top-level batch_number
-                if getattr(database, "batch_number", None) is not None:
-                    return int(database.batch_number)
-            except Exception:
-                return None
+        logger.debug(
+            "Parsed Envelope type=%s client_id=%s batch_rows=%s",
+            env.type,
+            getattr(db, "client_id", None),
+            rows_count,
+        )
+
+    def _safe_batch_number(self, database) -> int | None:
+        logger.debug("Obteniendo batch_number seguro del DataBatch")
+        try:
+            if (
+                getattr(database, "payload", None)
+                and getattr(database.payload, "batch_number", None) is not None
+            ):
+                return int(database.payload.batch_number)
+            if getattr(database, "batch_number", None) is not None:
+                return int(database.batch_number)
+        except Exception:
             return None
+        return None
 
-        bn = _safe_batch_number(db)
-        if not db.payload:
-            logger.warning("Batch sin batch_msg: reenvío sin cambios")
-            self._send_to_router(raw, bn)
-            return
+    def _payload_or_forward(self, db, raw: bytes, bn: int | None):
+        inner = getattr(db, "payload", None)
+        if inner:
+            return inner
+        logger.warning("Batch sin batch_msg: reenvío sin cambios")
+        self._send_to_router(raw, bn)
+        return None
 
-        inner = db.payload
-        step_mask = db.filter_steps
-        step = current_step_from_mask(step_mask)
-        if step is None:
-            logger.debug(
-                "Sin step activo en máscara: reenvío sin cambios | table_id=%s mask=%s",
-                inner.name,
-                step_mask,
-            )
-            self._send_to_router(raw, bn)
-            return
-        if inner is None or not inner.rows:
-            logger.debug(
-                "Batch sin 'rows': reenvío sin cambios | table_id=%s step=%s",
-                inner.name,
-                step,
-            )
-            self._send_to_router(raw, bn)
-            return
+    def _step_or_forward(self, db, inner, raw: bytes, bn: int | None) -> int | None:
+        step = current_step_from_mask(getattr(db, "filter_steps", 0))
+        if step is not None:
+            return step
+        logger.debug(
+            "Sin step activo en máscara: reenvío sin cambios | table_id=%s mask=%s",
+            inner.name,
+            getattr(db, "filter_steps", None),
+        )
+        self._send_to_router(raw, bn)
+        return None
 
-        queries = list(db.query_ids)
-        queries_key = qkey(queries)
+    def _resolve_filter(
+        self, inner, step: int, queries: List[Query]
+    ) -> Tuple[str, Optional[FilterFn]]:
+        queries_key = qkey(list(queries))
         key = (inner.name, step, queries_key)
+        return queries_key, self._filters.get(key)
 
-        fn = self._filters.get(key)
-        if fn is None:
-            logger.warning(
-                "No hay filtro registrado para queries=%s: reenvío sin cambios | table_id=%s step=%s",
-                queries_key,
-                inner.name,
-                step,
-            )
-            self._send_to_router(raw, bn)
-            return
-
+    def _apply_filter_and_forward(
+        self,
+        env: Envelope,
+        db,
+        inner,
+        fn: FilterFn,
+        queries_key: str,
+        step: int,
+        bn: int | None,
+        raw: bytes,
+    ) -> None:
         try:
             new_rows = fn(inner) or []
-            # protobuf repeated composite fields (like `rows`) don't allow
-            # direct assignment of a Python list. Convert filter output into
-            # Row messages and replace the repeated field contents.
             rows_objs: list[Row] = []
             cols = []
             try:
@@ -312,29 +312,21 @@ class FilterWorker:
                 if isinstance(r, Row):
                     rows_objs.append(r)
                 elif isinstance(r, (list, tuple)):
-                    # list of values in the schema order
                     rows_objs.append(Row(values=list(r)))
                 elif isinstance(r, dict):
-                    # build values according to schema column order
                     vals = [r.get(c) for c in cols] if cols else list(r.values())
                     rows_objs.append(Row(values=vals))
                 else:
-                    # fallback: coerce to string in a single-column row
                     rows_objs.append(Row(values=[str(r)]))
 
-            # replace repeated field contents
             inner.rows.clear()
             if rows_objs:
                 inner.rows.extend(rows_objs)
-            # Assign the DataBatch into the Envelope using CopyFrom to avoid
-            # "Assignment not allowed to message field" errors on protobuf
-            # message fields.
+
             env.data_batch.CopyFrom(db)
             out_raw = env.SerializeToString()
             logger.debug(
-                "Filtro aplicado con éxito: filas antes=%d, después=%d | table_id=%s step=%s queries=%s filter=%s",
-                len(inner.rows) + (len(new_rows) - len(rows_objs)),
-                len(new_rows),
+                "Filtro aplicado con éxito | table_id=%s step=%s queries=%s filter=%s",
                 inner.name,
                 step,
                 queries_key,
@@ -351,3 +343,49 @@ class FilterWorker:
                 getattr(fn, "__name__", "unknown"),
             )
             self._send_to_router(raw, bn)
+
+    def _on_raw(self, raw: bytes, channel=None, delivery_tag=None) -> None:
+        logger.debug("Mensaje recibido, tamaño=%d bytes", len(raw))
+        self._log_raw_preview(raw)
+
+        if self._nack_on_shutdown(channel, delivery_tag):
+            return False
+
+        env = self._parse_envelope_or_forward(raw)
+        if env is None:
+            return
+
+        if env.type != MessageType.DATA_BATCH:
+            logger.warning("Expected databatch, got %s", env.type)
+            return
+        db = env.data_batch
+        self._log_databatch_summary(env, db)
+        bn = self._safe_batch_number(db)
+        inner = self._payload_or_forward(db, raw, bn)
+        if inner is None:
+            return
+
+        step = self._step_or_forward(db, inner, raw, bn)
+        if step is None:
+            return
+        if not inner.rows:
+            logger.debug(
+                "Batch sin 'rows': reenvío sin cambios | table_id=%s step=%s",
+                inner.name,
+                step,
+            )
+            self._send_to_router(raw, bn)
+            return
+
+        queries_key, fn = self._resolve_filter(inner, step, list(db.query_ids))
+        if fn is None:
+            logger.warning(
+                "No hay filtro registrado para queries=%s: reenvío sin cambios | table_id=%s step=%s",
+                queries_key,
+                inner.name,
+                step,
+            )
+            self._send_to_router(raw, bn)
+            return
+
+        self._apply_filter_and_forward(env, db, inner, fn, queries_key, step, bn, raw)
