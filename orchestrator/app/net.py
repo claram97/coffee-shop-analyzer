@@ -81,21 +81,6 @@ class Orchestrator:
                     self._queue_put_timeout,
                 )
 
-        retry_sleep_raw = os.getenv("ORCH_PROCESS_QUEUE_RETRY_SLEEP")
-        self._queue_retry_sleep = 0.3
-        if retry_sleep_raw:
-            try:
-                parsed_sleep = float(retry_sleep_raw)
-                if parsed_sleep <= 0:
-                    raise ValueError("non_positive_retry_sleep")
-                self._queue_retry_sleep = parsed_sleep
-            except ValueError:
-                logging.warning(
-                    "action: queue_retry_sleep_parse | result: fail | value: %s | using_default: %s",
-                    retry_sleep_raw,
-                    self._queue_retry_sleep,
-                )
-        
         # Use one multiprocessing.Queue per worker so we can route messages
         # to individual workers (one-queue-per-worker). Queues are created
         # when starting worker processes.
@@ -403,48 +388,16 @@ class Orchestrator:
             logging.debug("action: stop_worker_processes | result: queue_close_skip_all")
 
     def _enqueue_processing_task(self, msg, client_id: str):
-        # Try to assign to worker queues using round-robin. If the chosen
-        # queue is full, try the next one. If all are full, wait and retry
-        # until a queue accepts the task or the optional timeout elapses.
+        """Enqueue task to a worker using round-robin with blocking put."""
         if not getattr(self, "_task_queues", None):
             raise RuntimeError("no task queues available for workers")
 
-        start_time = time.time()
-        deadline = None if self._queue_put_timeout is None else start_time + self._queue_put_timeout
-        attempts = 0
-        num_queues = len(self._task_queues)
+        with self._rr_lock:
+            idx = self._next_worker_idx
+            self._next_worker_idx = (idx + 1) % len(self._task_queues)
 
-        while True:
-            with self._rr_lock:
-                start_idx = self._next_worker_idx
-
-            for i in range(num_queues):
-                idx = (start_idx + i) % num_queues
-                q = self._task_queues[idx]
-                try:
-                    q.put((msg, client_id), block=False)
-                    # Advance round-robin pointer to next worker after the one we used
-                    with self._rr_lock:
-                        self._next_worker_idx = (idx + 1) % num_queues
-                    return
-                except queue.Full:
-                    # Try the next queue
-                    continue
-
-            # No queue had space this iteration
-            attempts += 1
-            logging.warning(
-                "action: enqueue_data_batch | result: retry | reason: all_queues_full | attempts: %d | batch_number: %d | opcode: %d",
-                attempts,
-                getattr(msg, "batch_number", 0),
-                getattr(msg, "opcode", -1),
-            )
-
-            if deadline is not None and time.time() >= deadline:
-                # Respect configured timeout: raise to let caller respond with failure
-                raise queue.Full()
-
-            time.sleep(self._queue_retry_sleep)
+        q = self._task_queues[idx]
+        q.put((msg, client_id), block=True, timeout=self._queue_put_timeout)
 
     def _process_data_message(self, msg, client_sock) -> bool:
         try:
@@ -478,8 +431,6 @@ class Orchestrator:
             if not getattr(self, "_task_queues", None):
                 raise RuntimeError("no task queues available for workers")
 
-            now = time.time()
-            overall_deadline = None if self._queue_put_timeout is None else now + self._queue_put_timeout
             client_id = getattr(msg, "client_id", None)
 
             pb_eof = PB_EOFMessage()
@@ -512,31 +463,13 @@ class Orchestrator:
             payload = env.SerializeToString()
 
             for idx, q in enumerate(self._task_queues):
-                enqueued = False
-                while True:
-                    try:
-                        q.put(("__eof__", payload, client_id), block=False)
-                        enqueued = True
-                        logging.info(
-                            "action: eof_enqueue | result: success | worker_queue: %d | table_type: %s | batch_number: %d",
-                            idx,
-                            table_type,
-                            getattr(msg, "batch_number", 0),
-                        )
-                        break
-                    except queue.Full:
-                        if overall_deadline is not None and time.time() >= overall_deadline:
-                            logging.error(
-                                "action: eof_enqueue | result: fail | reason: timeout | worker_queue: %d | table_type: %s | batch_number: %d",
-                                idx,
-                                table_type,
-                                getattr(msg, "batch_number", 0),
-                            )
-                            raise
-                        time.sleep(0.1)
-
-                if not enqueued:
-                    raise queue.Full()
+                q.put(("__eof__", payload, client_id), block=True, timeout=self._queue_put_timeout)
+                logging.info(
+                    "action: eof_enqueue | result: success | worker_queue: %d | table_type: %s | batch_number: %d",
+                    idx,
+                    table_type,
+                    getattr(msg, "batch_number", 0),
+                )
 
             logging.info(
                 "action: eof_enqueued_all | result: success | table_type: %s | replicas: %d | bytes_length: %d",
