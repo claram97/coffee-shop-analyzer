@@ -17,9 +17,8 @@ class FinisherPersistence:
 
     def save_batch(self, metadata: Dict[str, str], body: bytes) -> Dict[str, str]:
         """Persist a batch payload plus metadata. Returns stored metadata."""
-        client_id = metadata.get("client_id", "unknown")
         batch_id = f"{int(time.time() * 1000)}_{uuid.uuid4().hex}"
-        data_filename = f"{client_id}__{batch_id}.bin"
+        data_filename = f"{batch_id}.bin"
         data_path = os.path.join(self.batches_dir, data_filename)
 
         tmp_data = f"{data_path}.tmp"
@@ -114,53 +113,3 @@ class FinisherPersistence:
         path = os.path.join(self.manifest_dir, filename)
         if os.path.exists(path):
             os.remove(path)
-
-    def delete_orphaned_batches_for_client(self, client_id: str) -> int:
-        """
-        Delete all batch files for a client that are not referenced in any manifest.
-        This handles the case where a batch was persisted but the program crashed
-        before the manifest was updated.
-        
-        Returns the number of orphaned batches deleted.
-        """
-        if not client_id or not os.path.exists(self.batches_dir):
-            return 0
-
-        prefix = f"{client_id}__"
-        deleted_count = 0
-
-        try:
-            client_batch_files = [
-                f for f in os.listdir(self.batches_dir)
-                if f.startswith(prefix) and f.endswith(".bin")
-            ]
-
-            referenced_files: set = set()
-            if os.path.exists(self.manifest_dir):
-                manifest_prefix = f"{client_id}__"
-                for manifest_file in os.listdir(self.manifest_dir):
-                    if manifest_file.startswith(manifest_prefix) and manifest_file.endswith(".json"):
-                        manifest_path = os.path.join(self.manifest_dir, manifest_file)
-                        try:
-                            with open(manifest_path, "r", encoding="utf-8") as fh:
-                                entries = json.load(fh)
-                            for entry in entries:
-                                data_file = entry.get("data_file")
-                                if data_file:
-                                    referenced_files.add(data_file)
-                        except Exception:
-                            continue
-
-            for batch_file in client_batch_files:
-                if batch_file not in referenced_files:
-                    batch_path = os.path.join(self.batches_dir, batch_file)
-                    try:
-                        os.remove(batch_path)
-                        deleted_count += 1
-                    except OSError:
-                        pass
-
-        except Exception:
-            pass
-
-        return deleted_count
