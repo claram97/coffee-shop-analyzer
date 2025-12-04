@@ -29,11 +29,6 @@ from protocol2.envelope_pb2 import Envelope, MessageType
 from protocol2.table_data_pb2 import TableName
 from protocol2.table_data_utils import build_table_data, iterate_rows_as_dicts
 
-# Para transactions y query 1: re-enviar
-# Para transaction_items y query 2: procesamiento en esta instancia
-# Para transactions y query 3: procesamiento en esta instancia
-# Para transactions y query 4: procesamiento en esta instancia
-
 TID_TO_NAME = {
     TableName.MENU_ITEMS: "menu_items",
     TableName.STORES: "stores",
@@ -54,7 +49,7 @@ class ExchangePublisherPool:
         key = (
             exchange_name,
             tuple(route_keys) if isinstance(route_keys, list) else (route_keys,),
-            queue_name,  # Include queue_name in cache key
+            queue_name,
         )
         if key not in self._pool:
             logging.info(
@@ -124,40 +119,7 @@ class Aggregator:
                     host=self.host, queue_name=out_q
                 )
 
-        # In-memory batch deduplication: track received batches per (table, client_id, query_ids_tuple)
-        self._received_batches = defaultdict(set)
-        # Track joiner replicas used per (table, client_id)
         self._client_table_replicas: Dict[Tuple[str, str], set[int]] = defaultdict(set)
-
-    def _is_duplicate_batch(self, data_batch: DataBatch) -> bool:
-        """
-        Check if a batch is a duplicate. Returns True if duplicate, False otherwise.
-        Tracks batches by (table, client_id, query_ids_tuple, batch_number).
-        """
-        table = data_batch.payload.name
-        client_id = data_batch.client_id
-        batch_number = data_batch.payload.batch_number
-        query_ids_tuple = tuple(sorted(data_batch.query_ids))
-
-        dedup_key = (table, client_id, query_ids_tuple)
-
-        # if batch_number in self._received_batches[dedup_key]:
-        #     logging.warning(
-        #         "DUPLICATE batch detected and discarded in aggregator: table=%s bn=%s client=%s queries=%s",
-        #         table, batch_number, client_id, data_batch.query_ids
-        #     )
-        #     return True
-
-        # Mark batch as received
-        self._received_batches[dedup_key].add(batch_number)
-        logging.debug(
-            "Batch marked as received: table=%s bn=%s client=%s queries=%s",
-            table,
-            batch_number,
-            client_id,
-            data_batch.query_ids,
-        )
-        return False
 
     def _target_replicas(
         self, table: str, client_id: Optional[str], batch_number: int
@@ -205,7 +167,7 @@ class Aggregator:
             logging.exception(
                 "Failed to forward databatch by table. Table: %s", table_name
             )
-            raise  # Re-raise to cause NACK and redelivery
+            raise
 
     def _forward_eof(self, raw: bytes, table_name: str):
         logging.debug("Forwarding EOF message")
@@ -289,7 +251,7 @@ class Aggregator:
 
     def stop(self):
         """Stop the aggregator server gracefully.
-        
+
         IMPORTANT: Order of operations matters to avoid race conditions:
         1. Set running = False to signal handlers to stop
         2. Stop consuming on all exchanges and wait for in-flight messages
@@ -309,15 +271,11 @@ class Aggregator:
 
         logging.info("Aggregator server stopped")
 
-    def _handle_menu_item(
-        self, message: bytes, channel=None, delivery_tag=None, redelivered=None
-    ) -> bool:
+    def _handle_menu_item(self, message: bytes) -> bool:
         logging.debug("Handling menu item message")
         try:
             if not message:
-                if channel and delivery_tag is not None:
-                    channel.basic_nack(delivery_tag=delivery_tag, requeue=True)
-                return False
+                return True
             envelope = Envelope()
             envelope.ParseFromString(message)
             if envelope.type == MessageType.EOF_MESSAGE:
@@ -326,41 +284,22 @@ class Aggregator:
                 self._forward_eof(message, table_name)
             elif envelope.type == MessageType.DATA_BATCH:
                 data_batch = envelope.data_batch
-                if self._is_duplicate_batch(data_batch):
-                    if channel and delivery_tag is not None:
-                        channel.basic_ack(delivery_tag=delivery_tag)
-                    return False
                 table_name = TID_TO_NAME[data_batch.payload.name]
                 self._forward_databatch_by_table(data_batch, message, table_name)
             elif envelope.type == MessageType.CLEAN_UP_MESSAGE:
                 self._broadcast_cleanup_to_joiners(message)
             else:
                 logging.warning("Unknown message type: %s", envelope.type)
-
-            if channel and delivery_tag is not None:
-                channel.basic_ack(delivery_tag=delivery_tag)
-                logging.debug(
-                    f"Manually ACKed menu item message, delivery_tag: {delivery_tag}"
-                )
-            return False
+            return True
         except Exception:
             logging.exception("Failed to handle menu item")
-            if channel and delivery_tag is not None:
-                try:
-                    channel.basic_nack(delivery_tag=delivery_tag, requeue=True)
-                except Exception:
-                    logging.exception("Failed to NACK menu item message")
             return False
 
-    def _handle_store(
-        self, message: bytes, channel=None, delivery_tag=None, redelivered=None
-    ) -> bool:
+    def _handle_store(self, message: bytes) -> bool:
         logging.debug("Handling store message")
         try:
             if not message:
-                if channel and delivery_tag is not None:
-                    channel.basic_nack(delivery_tag=delivery_tag, requeue=True)
-                return False
+                return True
             envelope = Envelope()
             envelope.ParseFromString(message)
             if envelope.type == MessageType.EOF_MESSAGE:
@@ -369,40 +308,21 @@ class Aggregator:
                 self._forward_eof(message, table_name)
             elif envelope.type == MessageType.DATA_BATCH:
                 data_batch = envelope.data_batch
-                if self._is_duplicate_batch(data_batch):
-                    if channel and delivery_tag is not None:
-                        channel.basic_ack(delivery_tag=delivery_tag)
-                    return False
                 table_name = TID_TO_NAME[data_batch.payload.name]
                 self._forward_databatch_by_table(data_batch, message, table_name)
             elif envelope.type == MessageType.CLEAN_UP_MESSAGE:
                 self._broadcast_cleanup_to_joiners(message)
             else:
                 logging.warning("Unknown message type: %s", envelope.type)
-
-            if channel and delivery_tag is not None:
-                channel.basic_ack(delivery_tag=delivery_tag)
-                logging.debug(
-                    f"Manually ACKed store message, delivery_tag: {delivery_tag}"
-                )
-            return False
+            return True
         except Exception:
             logging.exception("Failed to handle store")
-            if channel and delivery_tag is not None:
-                try:
-                    channel.basic_nack(delivery_tag=delivery_tag, requeue=True)
-                except Exception:
-                    logging.exception("Failed to NACK store message")
             return False
 
-    def _handle_transaction(
-        self, message: bytes, channel=None, delivery_tag=None, redelivered=None
-    ):
+    def _handle_transaction(self, message: bytes):
         logging.debug("Handling transaction message")
         try:
             if not message:
-                if channel and delivery_tag is not None:
-                    channel.basic_nack(delivery_tag=delivery_tag, requeue=True)
                 return False
 
             envelope = Envelope()
@@ -414,10 +334,6 @@ class Aggregator:
                 self._forward_eof(message, table_name)
             elif envelope.type == MessageType.DATA_BATCH:
                 data_batch = envelope.data_batch
-                if self._is_duplicate_batch(data_batch):
-                    if channel and delivery_tag is not None:
-                        channel.basic_ack(delivery_tag=delivery_tag)
-                    return False
                 table_data = data_batch.payload
                 rows = list(iterate_rows_as_dicts(table_data))
                 query_id = data_batch.query_ids[0] if data_batch.query_ids else None
@@ -497,34 +413,21 @@ class Aggregator:
                     logging.error(
                         "Unexpected query_id=%s for transaction table", query_id
                     )
-                    return False
+                    return True
             elif envelope.type == MessageType.CLEAN_UP_MESSAGE:
                 self._broadcast_cleanup_to_joiners(message)
             else:
                 logging.warning("Unknown message type: %s", envelope.type)
-
-            if channel and delivery_tag is not None:
-                channel.basic_ack(delivery_tag=delivery_tag)
-                logging.debug(
-                    f"Manually ACKed transaction message, delivery_tag: {delivery_tag}"
-                )
-            return False
+            return True
         except Exception:
             logging.exception("Failed to handle transaction")
-            if channel and delivery_tag is not None:
-                try:
-                    channel.basic_nack(delivery_tag=delivery_tag, requeue=True)
-                except Exception:
-                    logging.exception("Failed to NACK transaction message")
             return False
 
-    def _handle_transaction_item(
-        self, message: bytes, channel=None, delivery_tag=None, redelivered=None
-    ):
+    def _handle_transaction_item(self, message: bytes):
         logging.debug("Handling transaction item message")
         try:
             if not message:
-                return False
+                return True
 
             envelope = Envelope()
             envelope.ParseFromString(message)
@@ -536,10 +439,6 @@ class Aggregator:
 
             elif envelope.type == MessageType.DATA_BATCH:
                 data_batch = envelope.data_batch
-                if self._is_duplicate_batch(data_batch):
-                    if channel and delivery_tag is not None:
-                        channel.basic_ack(delivery_tag=delivery_tag)
-                    return False
                 table_data = data_batch.payload
                 rows = list(iterate_rows_as_dicts(table_data))
                 query_id = data_batch.query_ids[0] if data_batch.query_ids else None
@@ -548,7 +447,6 @@ class Aggregator:
                     logging.debug("Processing transaction item with query 2")
                     processed = process_query_2(rows)
                     out = serialize_query2_results(processed)
-                    # TODO: Convert out to protobuf
                     columns = [
                         "transaction_item_id",
                         "transaction_id",
@@ -586,37 +484,22 @@ class Aggregator:
                     logging.error(
                         "Transaction item with query distinct from 1: %s", query_id
                     )
-                    return False
+                    return True
             elif envelope.type == MessageType.CLEAN_UP_MESSAGE:
                 self._broadcast_cleanup_to_joiners(message)
             else:
                 logging.warning("Unknown message type: %s", envelope.type)
-
-            if channel and delivery_tag is not None:
-                channel.basic_ack(delivery_tag=delivery_tag)
-                logging.debug(
-                    f"Manually ACKed transaction item message, delivery_tag: {delivery_tag}"
-                )
-            return False
+            return True
         except Exception:
             logging.exception("Failed to handle transaction item")
-            if channel and delivery_tag is not None:
-                try:
-                    channel.basic_nack(delivery_tag=delivery_tag, requeue=True)
-                except Exception:
-                    logging.exception("Failed to NACK transaction item message")
             return False
 
-    def _handle_user(
-        self, message: bytes, channel=None, delivery_tag=None, redelivered=None
-    ) -> bool:
+    def _handle_user(self, message: bytes) -> bool:
         logging.debug("Handling user message")
         try:
             if not message:
                 logging.error("Empty message received in user handler")
-                if channel and delivery_tag is not None:
-                    channel.basic_nack(delivery_tag=delivery_tag, requeue=True)
-                return False
+                return True
             envelope = Envelope()
             envelope.ParseFromString(message)
             if envelope.type == MessageType.EOF_MESSAGE:
@@ -625,28 +508,13 @@ class Aggregator:
                 self._forward_eof(message, table_name)
             elif envelope.type == MessageType.DATA_BATCH:
                 data_batch = envelope.data_batch
-                if self._is_duplicate_batch(data_batch):
-                    if channel and delivery_tag is not None:
-                        channel.basic_ack(delivery_tag=delivery_tag)
-                    return False
                 table_name = TID_TO_NAME[data_batch.payload.name]
                 self._forward_databatch_by_table(data_batch, message, table_name)
             elif envelope.type == MessageType.CLEAN_UP_MESSAGE:
                 self._broadcast_cleanup_to_joiners(message)
             else:
                 logging.warning("Unknown message type: %s", envelope.type)
-
-            if channel and delivery_tag is not None:
-                channel.basic_ack(delivery_tag=delivery_tag)
-                logging.debug(
-                    f"Manually ACKed user message, delivery_tag: {delivery_tag}"
-                )
-            return False
+            return True
         except Exception:
             logging.exception("Failed to handle user")
-            if channel and delivery_tag is not None:
-                try:
-                    channel.basic_nack(delivery_tag=delivery_tag, requeue=True)
-                except Exception:
-                    logging.exception("Failed to NACK user message")
             return False
